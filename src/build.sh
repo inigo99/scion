@@ -100,14 +100,14 @@ llvm-lipo-18 -create $T/at_x86_64.dylib $T/at_arm64.dylib -output $OUT/lib/Audio
 x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -Wno-unused-parameter -municode host.cpp dyld.cpp arm64.cpp ui.cpp install.cpp -o $OUT/scion.exe \
   -I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include \
   $B/src/dynarmic/libdynarmic.a $(find $B/externals -name '*.a') -lbcrypt -lwinmm -lsynchronization -ldwmapi -lole32 -luuid -lgdi32 -lshell32 -lwindowscodecs -static -Wl,-Map=../out/scion.map
-# scion: the native Linux host (#10, command-line programs for now), sharing lib/ with scion.exe. Needs dynarmic built
-# for Linux (scripts/build-dynarmic.sh --linux); without it, this step is skipped.
+# scion: the native Linux host (#10), sharing lib/ with scion.exe. Needs dynarmic built for Linux
+# (scripts/build-dynarmic.sh --linux) and SDL2, FreeType, fontconfig, libpng and libjpeg; without them, it is skipped.
 L=$D/build-linux
-if [ -f $L/src/dynarmic/libdynarmic.a ]; then
-  g++ -std=c++20 -O2 -Wall -Wno-unused-parameter host_linux.cpp dyld.cpp arm64.cpp -o $OUT/scion \
-    -I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include \
-    $L/src/dynarmic/libdynarmic.a $(find $L/externals -name '*.a') -lpthread -lrt
-else echo "note: dynarmic for Linux is not built (scripts/build-dynarmic.sh --linux): skipping bin/scion"; fi
+if [ -f $L/src/dynarmic/libdynarmic.a ] && pkg-config --exists sdl2 freetype2 fontconfig libpng; then
+  g++ -std=c++20 -O2 -Wall -Wno-unused-parameter host_linux.cpp ui_linux.cpp dyld.cpp arm64.cpp -o $OUT/scion \
+    -I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include $(pkg-config --cflags sdl2 freetype2 fontconfig libpng) \
+    $L/src/dynarmic/libdynarmic.a $(find $L/externals -name '*.a') $(pkg-config --libs sdl2 freetype2 fontconfig libpng) -ljpeg -lpthread -lrt
+else echo "note: dynarmic for Linux (scripts/build-dynarmic.sh --linux) or SDL2/FreeType/fontconfig/libpng are missing: skipping bin/scion"; fi
 # scionw.exe: scion.exe without a console window (Start menu shortcuts of installed apps)
 x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -municode -mwindows launcher.cpp -o $OUT/scionw.exe -lshell32 -lole32 -luuid -static
 rm -rf $T
