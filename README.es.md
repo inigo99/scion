@@ -28,8 +28,8 @@ comandos, apps de AppKit y SwiftUI y gráficos Metal, para un conjunto de progra
 | **Swift** | El runtime y la biblioteca estándar de Swift, los overlays de Darwin, Dispatch y Foundation, Swift Concurrency, y Combine y SwiftUI propios de Scion. |
 | **Se siente como Windows** | Ventanas Win32 reales, menús, diálogos de archivo, iconos en el área de notificación, teclado, ratón, mandos XInput con vibración y audio WASAPI. `scion install` añade una app al menú Inicio con su icono y sus tipos de archivo. |
 
-En Linux funciona hoy con [Wine](https://www.winehq.org/) (mira [En Linux](#en-linux)); un anfitrión nativo para Linux está
-en la [hoja de ruta](docs/roadmap.md).
+En Linux funciona de forma nativa (una vista previa, compilando desde el código fuente) o con
+[Wine](https://www.winehq.org/): mira [En Linux](#en-linux).
 
 ## Empezar
 
@@ -68,9 +68,9 @@ Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad
 
 **Anfitrión nativo (vista previa).** Al compilar desde el código fuente también se genera `bin/scion`, un programa de
 Linux que ejecuta programas de macOS sin Wine: `bin/scion ruta/a/herramienta` o `bin/scion "ruta/a/Una App.app"`.
-Funcionan programas de línea de comandos y apps de AppKit y SwiftUI, de Intel y de Apple Silicon, con ventanas, entrada,
-mandos y audio a través de SDL2 (pasan sus pruebas Hex Fiend, Itsycal, Reminders MenuBar, SwiftFormat, esbuild y
-Biome). Metal, la barra de menús y `scion install` todavía necesitan Wine. Se agradece ayuda ([issue](../../issues/10)).
+Funcionan programas de línea de comandos, apps de AppKit y SwiftUI y Metal, de Intel y de Apple Silicon, con ventanas,
+entrada, mandos y audio a través de SDL2 y Metal sobre Vulkan (`scion-metal.so`, `scion-msl.so`); pasa toda la batería
+de pruebas salvo `scion install`. Falta todavía: la barra de menús, los iconos en la bandeja y `scion install`. Se agradece ayuda ([issue](../../issues/10)).
 
 ## Cómo funciona
 

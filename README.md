@@ -28,8 +28,8 @@ work today, for a growing set of programs.
 | **Swift** | Swift's runtime and standard library, the Darwin/Dispatch/Foundation overlays, Swift Concurrency, and Scion's own Combine and SwiftUI. |
 | **Feels like Windows** | Real Win32 windows, menus, file dialogs, notification-area icons, keyboard, mouse, XInput gamepads with rumble, WASAPI audio. `scion install` adds an app to the Start menu with its icon and file types. |
 
-On Linux it runs under [Wine](https://www.winehq.org/) today (see [On Linux](#on-linux)); a native Linux host is on the
-[roadmap](docs/roadmap.md).
+On Linux it runs natively (a preview, built from source) or under [Wine](https://www.winehq.org/): see
+[On Linux](#on-linux).
 
 ## Quick start
 
@@ -66,10 +66,10 @@ wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop
 Linux paths work as they are: Scion turns them into Wine's `Z:` paths.
 
 **Native host (preview).** A build from source also produces `bin/scion`, a Linux program that runs macOS programs
-without Wine: `bin/scion path/to/tool` or `bin/scion "path/to/Some App.app"`. Command-line programs and AppKit/SwiftUI
-apps run, Intel and Apple Silicon, with windows, input, controllers and audio through SDL2 (Hex Fiend, Itsycal,
-Reminders MenuBar, SwiftFormat, esbuild and Biome pass their tests). Metal, the menu bar and `scion install` still
-need Wine. Help is welcome
+without Wine: `bin/scion path/to/tool` or `bin/scion "path/to/Some App.app"`. Command-line programs, AppKit/SwiftUI
+apps and Metal run, Intel and Apple Silicon, with windows, input, controllers and audio through SDL2 and Metal on
+Vulkan (`scion-metal.so`, `scion-msl.so`); the whole test suite passes except `scion install`. Still missing: the menu
+bar, status items in the tray and `scion install`. Help is welcome
 ([issue](../../issues/10)).
 
 ## How it works
