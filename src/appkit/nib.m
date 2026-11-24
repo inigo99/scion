@@ -378,7 +378,7 @@ NSView *mw_nib_init_view(NSView *self, NSCoder *c) {
     self.bezeled = (cf & 0x00400000u) != 0;
     self.bordered = (cf & 0x00800000u) != 0;
     self.drawsBackground = [a[@"NSDrawsBackground"] boolValue];
-    if (!(cf & 0x40) && !self.bezeled && !self.bordered) [(id)self _mwSetWraps:YES];   /* bit 0x40 set = "does not wrap" */
+    if (!(cf & 0x40) && !self.bezeled && !self.bordered) [self _mwSetWraps:YES];   /* bit 0x40 set = "does not wrap" */
     if ([a[@"NSTextColor"] isKindOfClass:[NSColor class]]) self.textColor = a[@"NSTextColor"];
     if ([a[@"NSBackgroundColor"] isKindOfClass:[NSColor class]]) self.backgroundColor = a[@"NSBackgroundColor"];
     if ([a[@"NSPlaceholderString"] isKindOfClass:[NSString class]]) self.placeholderString = a[@"NSPlaceholderString"];

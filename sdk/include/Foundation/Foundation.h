@@ -226,6 +226,7 @@ NS_SWIFT_BRIDGE(CharacterSet)
 
 @interface NSValue : NSObject <NSCopying>
 + (NSValue *)valueWithRange:(NSRange)r; + (NSValue *)valueWithPointer:(const void *)p;
++ (NSValue *)valueWithBytes:(const void *)v objCType:(const char *)t; - (void)getValue:(void *)v;
 + (NSValue *)valueWithPoint:(NSPoint)p; + (NSValue *)valueWithSize:(NSSize)s; + (NSValue *)valueWithRect:(NSRect)r;
 @property (readonly) NSRange rangeValue; @property (nullable, readonly) void *pointerValue;
 @property (readonly) NSPoint pointValue; @property (readonly) NSSize sizeValue; @property (readonly) NSRect rectValue;
@@ -268,6 +269,7 @@ NS_SWIFT_BRIDGE(Swift.Array)
 - (ObjectType)objectAtIndex:(NSUInteger)i; - (ObjectType)objectAtIndexedSubscript:(NSUInteger)i;
 @property (nullable, readonly) ObjectType firstObject, lastObject;
 - (BOOL)containsObject:(id)o; - (NSUInteger)indexOfObject:(id)o; - (NSUInteger)indexOfObjectIdenticalTo:(id)o;
+- (NSUInteger)indexOfObjectPassingTest:(BOOL (^)(id o, NSUInteger i, BOOL *stop))t;
 - (NSArray *)arrayByAddingObject:(id)o; - (NSArray *)arrayByAddingObjectsFromArray:(NSArray *)a;
 - (NSString *)componentsJoinedByString:(NSString *)sep;
 - (NSArray *)subarrayWithRange:(NSRange)r;
@@ -308,7 +310,7 @@ NS_SWIFT_BRIDGE(Swift.Dictionary)
 @interface NSMutableDictionary<KeyType, ObjectType> : NSDictionary<KeyType, ObjectType>
 + (instancetype)dictionaryWithCapacity:(NSUInteger)n; - (instancetype)initWithCapacity:(NSUInteger)n;
 - (void)setObject:(ObjectType)o forKey:(KeyType)k; - (void)setObject:(ObjectType)o forKeyedSubscript:(KeyType)k;
-- (void)removeObjectForKey:(id)k; - (void)removeAllObjects; - (void)addEntriesFromDictionary:(NSDictionary *)d;
+- (void)removeObjectForKey:(id)k; - (void)removeAllObjects; - (void)addEntriesFromDictionary:(NSDictionary *)d; - (void)setDictionary:(NSDictionary *)d;
 - (void)removeObjectsForKeys:(NSArray *)keys;
 @end
 
@@ -633,6 +635,7 @@ NS_SWIFT_NAME(Timer)
 - (void)performSelectorOnMainThread:(SEL)s withObject:(nullable id)o waitUntilDone:(BOOL)w;
 - (void)performSelectorInBackground:(SEL)s withObject:(nullable id)o;
 - (void)performSelector:(SEL)s withObject:(nullable id)o afterDelay:(NSTimeInterval)d;
++ (void)cancelPreviousPerformRequestsWithTarget:(id)t;
 @end
 typedef NSString *NSNotificationName NS_TYPED_EXTENSIBLE_ENUM NS_SWIFT_NAME(NSNotification.Name);
 NS_SWIFT_BRIDGE(Notification)
@@ -799,6 +802,7 @@ extern NSString *const NSLocalizedFailureReasonErrorKey, *const NSLocalizedRecov
 - (BOOL)isWritableFileAtPath:(NSString *)p; - (BOOL)isExecutableFileAtPath:(NSString *)p;
 @end
 @interface NSString (Paths2)
++ (NSString *)pathWithComponents:(NSArray<NSString *> *)c;
 @property (readonly, copy) NSString *stringByResolvingSymlinksInPath, *decomposedStringWithCanonicalMapping, *precomposedStringWithCanonicalMapping;
 @end
 @interface NSMutableData (Length) - (instancetype)initWithLength:(NSUInteger)n; - (instancetype)initWithCapacity:(NSUInteger)n; @end

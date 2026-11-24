@@ -288,6 +288,7 @@ static int fpositional(const char *f, union farg *args, int max, va_list ap) {
 }
 static void vformat(struct fout *o, const char *f, va_list ap) {
     union farg args[64]; int positional = strchr(f, '$') && fpositional(f, args, 64, ap), cur = 0;
+#undef va_arg
 #define va_arg(ap, T) (positional ? *(T *)&args[cur] : __builtin_va_arg(ap, T))   /* little-endian: an int is the low half of its slot */
     for (; *f; f++) {
         if (*f != '%') { const char *s = f; while (f[1] && f[1] != '%') f++; put(o, s, (size_t)(f - s + 1)); continue; }

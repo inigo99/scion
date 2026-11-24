@@ -312,6 +312,7 @@ static int fold(int c) { return c < 128 ? tolower(c) : c; }
     if (r.location == 0) return @"/";
     return [s substringToIndex:r.location];
 }
++ (NSString *)pathWithComponents:(NSArray *)c { NSString *p = @""; for (NSString *x in c) p = [p stringByAppendingPathComponent:x]; return p; }
 - (NSString *)stringByAppendingPathComponent:(NSString *)c {
     if (![self length]) return c;
     if (![c length]) return self;

@@ -832,9 +832,9 @@ static void spread(CGFloat delta, CGFloat *a, BOOL fa, CGFloat *b, BOOL fb, CGFl
 - (void)updateConstraintsForSubtreeIfNeeded { }
 - (void)setNeedsUpdateConstraints:(BOOL)f { }
 - (NSArray *)constraints { return _cons ? [[_cons copy] autorelease] : @[]; }
-- (void)addConstraint:(NSLayoutConstraint *)c { if (!_cons) _cons = [[NSMutableArray alloc] init]; if (c && ![_cons containsObject:c]) { [_cons addObject:c]; [(id)c _mwSetActiveFlag:YES]; self.needsLayout = YES; } }   /* adding activates (Cocoa) */
+- (void)addConstraint:(NSLayoutConstraint *)c { if (!_cons) _cons = [[NSMutableArray alloc] init]; if (c && ![_cons containsObject:c]) { [_cons addObject:c]; [c _mwSetActiveFlag:YES]; self.needsLayout = YES; } }   /* adding activates (Cocoa) */
 - (void)addConstraints:(NSArray *)a { for (NSLayoutConstraint *c in a) [self addConstraint:c]; }
-- (void)removeConstraint:(NSLayoutConstraint *)c { if ([_cons containsObject:c]) [(id)c _mwSetActiveFlag:NO]; [_cons removeObjectIdenticalTo:c]; self.needsLayout = YES; }
+- (void)removeConstraint:(NSLayoutConstraint *)c { if ([_cons containsObject:c]) [c _mwSetActiveFlag:NO]; [_cons removeObjectIdenticalTo:c]; self.needsLayout = YES; }
 - (void)removeConstraints:(NSArray *)a { for (NSLayoutConstraint *c in a) [self removeConstraint:c]; }
 - (NSLayoutPriority)contentHuggingPriorityForOrientation:(NSLayoutConstraintOrientation)o {
     NSNumber *n = _prio[[NSString stringWithFormat:@"h%ld", (long)o]]; return n ? [n floatValue] : NSLayoutPriorityDefaultLow;

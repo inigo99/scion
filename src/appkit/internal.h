@@ -73,6 +73,8 @@ NSMenuItem *mw_popup_choose(NSMenu *m, NSWindow *w, NSPoint p); /* menu.m: the c
 - (NSMutableSet *)_mwInside;
 - (void)_mwSetNeedsRender;
 @end
+@interface NSLayoutConstraint (MWInternal) - (void)_mwSetActiveFlag:(BOOL)a; @end
+@interface NSTextField (MWInternal) - (void)_mwSetWraps:(BOOL)w; @end
 @interface NSView (MWInternal)
 - (void)_mwSetWindow:(NSWindow *)w;
 - (void)_mwBackingChanged;

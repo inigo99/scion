@@ -1,10 +1,18 @@
 # Scion
 
+[![CI](https://github.com/inigo99/scion/actions/workflows/ci.yml/badge.svg)](https://github.com/inigo99/scion/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/inigo99/scion)](https://github.com/inigo99/scion/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6)
+![macOS binaries](https://img.shields.io/badge/runs-x86__64%20%7C%20arm64%20Mach--O-555)
+
 **Ejecuta apps de macOS en Windows.** Scion carga programas de macOS (Mach-O, de Intel y de Apple Silicon) directamente
 en un proceso de Windows: sin Mac, sin máquina virtual y sin instalar macOS. Hoy funcionan herramientas de línea de
 comandos, apps de AppKit y SwiftUI y gráficos Metal, para un conjunto de programas que no deja de crecer.
 
 [Read in English](README.md)
+
+<p align="center"><img src="docs/images/screenshot.png" alt="Hex Fiend, un cubo 3D con Metal e Itsycal ejecutándose en Windows 11 con Scion" width="900"><br><sub>Hex Fiend (AppKit), una ventana Metal (<code>CAMetalLayer</code>) y el calendario de la barra de menús de Itsycal: binarios de macOS sin modificar, ejecutándose en Windows 11.</sub></p>
 
 > **Estado: experimental.** Scion ejecuta apps reales de terceros (Hex Fiend, Itsycal, Reminders MenuBar, SwiftFormat,
 > esbuild, Biome) y pasa su propia batería de pruebas, pero a la mayoría de las apps de macOS todavía les falta algo. Crece

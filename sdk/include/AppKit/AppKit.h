@@ -728,7 +728,7 @@ APPKIT_EXTERN NSApplication *NSApp;
 int NSApplicationMain(int argc, const char *argv[]);
 void NSBeep(void);
 @interface NSSound : NSObject <NSCopying>
-@property(copy) NSString *name; @property float volume; @property BOOL loops; @property(nullable, assign) id delegate;
+@property(nullable, readonly, copy) NSString *name; - (BOOL)setName:(nullable NSString *)n; @property float volume; @property BOOL loops; @property(nullable, assign) id delegate;
 + (nullable instancetype)soundNamed:(NSString *)n;
 - (BOOL)play; - (BOOL)stop;
 @end
@@ -1803,6 +1803,7 @@ APPKIT_EXTERN NSNotificationName const NSTableViewSelectionDidChangeNotification
 - (id)tableView:(NSTableView *)t objectValueForTableColumn:(NSTableColumn *)c row:(NSInteger)r;
 - (void)tableView:(NSTableView *)t setObjectValue:(nullable id)v forTableColumn:(NSTableColumn *)c row:(NSInteger)r;
 @end
+@class NSTableRowView;
 @protocol NSTableViewDelegate <NSObject> @optional
 - (NSView *)tableView:(NSTableView *)t viewForTableColumn:(NSTableColumn *)c row:(NSInteger)r;
 - (void)tableView:(NSTableView *)t willDisplayCell:(nullable id)cell forTableColumn:(NSTableColumn *)c row:(NSInteger)r;
@@ -1811,6 +1812,10 @@ APPKIT_EXTERN NSNotificationName const NSTableViewSelectionDidChangeNotification
 - (void)tableView:(NSTableView *)t mouseDownInHeaderOfTableColumn:(NSTableColumn *)c;
 - (void)tableView:(NSTableView *)t didClickTableColumn:(NSTableColumn *)c;
 - (void)tableViewSelectionDidChange:(NSNotification *)n;
+- (nullable NSTableRowView *)tableView:(NSTableView *)t rowViewForRow:(NSInteger)r;
+- (BOOL)tableView:(NSTableView *)t isGroupRow:(NSInteger)r;
+- (void)tableView:(NSTableView *)t didAddRowView:(NSTableRowView *)v forRow:(NSInteger)r;
+- (void)tableView:(NSTableView *)t didRemoveRowView:(NSTableRowView *)v forRow:(NSInteger)r;
 @end
 typedef NS_ENUM(NSInteger, NSBackgroundStyle) { NSBackgroundStyleNormal = 0, NSBackgroundStyleEmphasized = 1, NSBackgroundStyleRaised = 2, NSBackgroundStyleLowered = 3,
     NSBackgroundStyleLight = 0, NSBackgroundStyleDark = 1 };

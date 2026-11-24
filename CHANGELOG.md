@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: NSTableView column rectangles read `-width` through the wrong method signature (garbage column widths).
+- Fixed: `-tableView:isGroupRow:` delegate answers could be misread; `+[NSString pathWithComponents:]` was missing
+  (`+[NSURL fileURLWithPathComponents:]` raised).
+- The core build is free of compiler warnings; `src/foundation/swift.m` is split into `calendar.m` and `url.m`.
+- CI: a Windows test job, a manual heavy build (Metal host and Swift) and a release workflow on `v*` tags.
+
 ## 0.1.0 (2026-11-24)
 
 First public release.
