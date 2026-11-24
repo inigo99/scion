@@ -13,8 +13,16 @@
 #include <indium/texture.private.hpp>
 #include <indium/command-buffer.private.hpp>
 #include <indium/sampler.private.hpp>
+#ifdef _WIN32
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>
+#else
+#include <dlfcn.h>
+/* VK_KHR_xlib_surface without Xlib.h (its Window would clash with ours) */
+struct XlibSurfaceInfo { VkStructureType sType; const void *pNext; VkFlags flags; void *dpy; unsigned long window; };
+typedef VkResult (VKAPI_PTR *PFN_xlib_create)(VkInstance, const XlibSurfaceInfo *, const VkAllocationCallbacks *, VkSurfaceKHR *);
+#include <sys/stat.h>
+#endif
 #include <atomic>
 #include <csignal>
 #include <cstring>
@@ -22,7 +30,9 @@
 #include <thread>
 #include <vector>
 #include "mtlbridge.h"
+#ifdef _WIN32
 #include "../backtrace.h"
+#endif
 #include <exception>
 
 using namespace Indium;
@@ -64,13 +74,20 @@ static std::shared_ptr<Device> device() {
         /* Indium calls abort() on Vulkan errors it does not handle: say so instead of dying silently */
         signal(SIGABRT, [](int) {
             fputs("scion-metal: abort() in Indium (unhandled Vulkan error; try SCION_METAL_VALIDATION=1)\n", stderr);
-            CONTEXT c; RtlCaptureContext(&c); mw_backtrace(c); _exit(3);
+#ifdef _WIN32
+            CONTEXT c; RtlCaptureContext(&c); mw_backtrace(c);
+#endif
+            _exit(3);
         });
         std::set_terminate([] {
             try { if (auto e = std::current_exception()) std::rethrow_exception(e); } catch (const std::exception &e) { fprintf(stderr, "scion-metal: Indium exception: %s\n", e.what()); } catch (...) {}
             abort();
         });
+#ifdef _WIN32
         static const char *ext[] = {VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#else
+        static const char *ext[] = {"VK_KHR_xlib_surface"};
+#endif
         Indium::init(ext, 1, getenv("SCION_METAL_VALIDATION") != nullptr);
         g_device = Indium::createSystemDefaultDevice();
         if (g_device && getenv("SCION_METAL_INFO")) { /* GPU and memory types (flags: 1 device-local, 2 host-visible, 4 coherent, 8 cached) */
@@ -85,6 +102,32 @@ static std::shared_ptr<Device> device() {
     return g_device;
 }
 
+#ifndef _WIN32
+/* ------------------------------------------------------------------ CAMetalLayer on Linux: the host's X11 window + swapchain */
+struct Window {
+    MwNativeWindow nw{};
+    std::atomic<bool> closed{false};
+    std::atomic<uint32_t> cw{0}, ch{0};
+    std::atomic<uint64_t> format{0};
+    bool external = true;                 /* the host (scion) owns every window: it sizes and closes them */
+    std::shared_ptr<IndiumKit::Layer> layer;
+    ~Window() { layer.reset(); }
+    void query() { uint32_t w = 0, h = 0; if (nw.size) nw.size(nw.ctx, &w, &h); if (w && h) { cw = w; ch = h; } if (nw.closed && nw.closed(nw.ctx)) closed = true; }
+};
+static std::shared_ptr<Window> new_window(int w, int h, const char *, uint64_t pixelFormat, const MwNativeWindow *host) {
+    if (!host || !host->display || !host->window) return nullptr;
+    auto win = std::make_shared<Window>();
+    win->nw = *host; win->cw = w; win->ch = h; win->query();
+    XlibSurfaceInfo si{(VkStructureType)1000004000 /* XLIB_SURFACE_CREATE_INFO_KHR */, nullptr, 0, host->display, (unsigned long)host->window};
+    auto create = (PFN_xlib_create)DynamicVK::vkGetInstanceProcAddr(Indium::globalInstance, "vkCreateXlibSurfaceKHR");
+    VkSurfaceKHR surface;
+    if (!create || create(Indium::globalInstance, &si, nullptr, &surface) != VK_SUCCESS) throw std::runtime_error("vkCreateXlibSurfaceKHR");
+    win->layer = IndiumKit::Layer::make(surface, device(), win->cw, win->ch);
+    if (pixelFormat) win->layer->setPixelFormat((PixelFormat)pixelFormat);
+    if (getenv("SCION_METAL_INFO")) fprintf(stderr, "scion-metal: layer in X11 window %#llx (%ux%u)\n", (unsigned long long)host->window, win->cw.load(), win->ch.load());
+    return win;
+}
+#else
 /* ------------------------------------------------------------------ CAMetalLayer: Win32 window + swapchain */
 /* The window lives on its own thread with its own message loop, so it stays responsive whatever the guest does. */
 struct Window {
@@ -156,6 +199,8 @@ static std::shared_ptr<Window> new_window(int w, int h, const char *title, uint6
     if (pixelFormat) win->layer->setPixelFormat((PixelFormat)pixelFormat);
     return win;
 }
+
+#endif
 
 /* Metal rounds a clear color to the nearest 8-bit value (0.5 -> 128); Vulkan lets drivers truncate (NVIDIA: 127).
    Clearing to a quarter step above that byte gives it both ways. (8-bit formats only.) */
@@ -429,16 +474,24 @@ static int64_t dispatch(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, 
         }
         return 0;
     }
+#ifdef _WIN32
     case MW_NEW_LAYER: return device() ? put(new_window((int)a, (int)b, (const char *)c, d, (HWND)e), K_LAYER) : 0;
+#else
+    case MW_NEW_LAYER: return device() ? put(new_window((int)a, (int)b, (const char *)c, d, (const MwNativeWindow *)e), K_LAYER) : 0;
+#endif
     case MW_LAYER_NEXT_DRAWABLE: {
         auto win = get<Window>(a);
         auto layer = std::dynamic_pointer_cast<IndiumKit::PrivateLayer>(win->layer);
         /* size and format changes apply here, between frames: the drawable the app holds now must stay valid */
         if (uint64_t f = win->format.exchange(0)) layer->setPixelFormat((PixelFormat)f);
+#ifdef _WIN32
         if (win->external) { /* ponytail: the whole client area, even for a view that covers only part of it */
             RECT rc; GetClientRect(win->hwnd, &rc);
             if (rc.right > 0 && rc.bottom > 0) { win->cw = rc.right; win->ch = rc.bottom; }
         }
+#else
+        win->query();
+#endif
         if (win->cw && win->ch) layer->resize(win->cw, win->ch); /* the user resized the window */
         auto dr = layer->nextDrawable();
         if (!dr) return 0;
@@ -450,10 +503,16 @@ static int64_t dispatch(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, 
     case MW_LAYER_SET_FORMAT: get<Window>(a)->format = b; return 0;
     case MW_LAYER_SET_SIZE: {
         auto win = get<Window>(a);
+#ifdef _WIN32
         if (!win->external && b && c && (b != win->cw || c != win->ch)) PostMessageW(win->hwnd, WM_APP, (WPARAM)b, (LPARAM)c);
+#endif
         return 0;
     }
+#ifndef _WIN32
+    case MW_LAYER_POLL: { auto w = get<Window>(a); w->query(); return w->closed; }
+#else
     case MW_LAYER_POLL: return get<Window>(a)->closed;
+#endif
     case MW_DRAWABLE_PRESENT: get<Indium::Drawable>(a)->present(); return 0;
     case MW_FUNCTION_CONSTANTS: {
         auto f = std::dynamic_pointer_cast<PrivateFunction>(get<Function>(a));
@@ -486,6 +545,18 @@ static bool msl_load(std::string &why) {
     static std::once_flag once;
     static std::string error;
     std::call_once(once, [] {
+#ifndef _WIN32
+        Dl_info di{};
+        dladdr((void *)&msl_load, &di);
+        std::string dir = di.dli_fname ? di.dli_fname : "";
+        dir = dir.substr(0, dir.find_last_of('/') + 1);
+        void *m = dlopen((dir + "scion-msl.so").c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!m) { error = "scion: scion-msl.so (the MSL compiler) is missing"; return; }
+        g_msl.version = (const char *(*)())dlsym(m, "mw_msl_version");
+        g_msl.compile = (void *(*)(const char *, const char *, size_t *, char *, size_t))dlsym(m, "mw_msl_compile");
+        g_msl.release = (void (*)(void *))dlsym(m, "mw_msl_free");
+        if (!g_msl.version || !g_msl.compile || !g_msl.release) { g_msl = {}; error = "scion: invalid scion-msl.so"; }
+#else
         HMODULE self = nullptr;
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&msl_load, &self);
         char path[MAX_PATH];
@@ -498,6 +569,7 @@ static bool msl_load(std::string &why) {
         g_msl.compile = (void *(*)(const char *, const char *, size_t *, char *, size_t))GetProcAddress(m, "mw_msl_compile");
         g_msl.release = (void (*)(void *))GetProcAddress(m, "mw_msl_free");
         if (!g_msl.version || !g_msl.compile || !g_msl.release) { g_msl = {}; error = "scion: invalid scion-msl.dll"; }
+#endif
     });
     why = error;
     return g_msl.compile != nullptr;
@@ -508,6 +580,7 @@ static std::string msl_cache_path(const std::string &src, const std::string &mac
     mix(g_msl.version());
     mix(macros);
     mix(src);
+#ifdef _WIN32
     const char *base = getenv("LOCALAPPDATA");
     if (!base || getenv("SCION_MSL_NOCACHE")) return "";
     std::string dir = std::string(base) + "\\scion";
@@ -516,6 +589,14 @@ static std::string msl_cache_path(const std::string &src, const std::string &mac
     CreateDirectoryA(dir.c_str(), nullptr);
     char name[32];
     snprintf(name, sizeof name, "\\%016llx.metallib", (unsigned long long)h);
+#else   /* $XDG_CACHE_HOME/scion/msl */
+    const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+    if ((!xdg && !home) || getenv("SCION_MSL_NOCACHE")) return "";
+    std::string dir = xdg ? xdg : std::string(home) + "/.cache";
+    mkdir(dir.c_str(), 0755); dir += "/scion"; mkdir(dir.c_str(), 0755); dir += "/msl"; mkdir(dir.c_str(), 0755);
+    char name[32];
+    snprintf(name, sizeof name, "/%016llx.metallib", (unsigned long long)h);
+#endif
     return dir + name;
 }
 static int64_t compile_source(const char *src, const char *macros, char *err, size_t errsz, uint64_t *len) {
@@ -553,7 +634,12 @@ static int64_t compile_source(const char *src, const char *macros, char *err, si
     return (int64_t)p;
 }
 
-extern "C" __declspec(dllexport) int64_t mw_metal(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+#ifdef _WIN32
+#define MW_EXPORT __declspec(dllexport)
+#else
+#define MW_EXPORT __attribute__((visibility("default")))
+#endif
+extern "C" MW_EXPORT int64_t mw_metal(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
     try {
         return dispatch(op, a, b, c, d, e);
     } catch (const std::exception &x) {

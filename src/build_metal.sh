@@ -5,9 +5,24 @@
 #                          patches/clang-msl.patch + metal_stdlib.h), loaded by scion-metal.dll on first use
 # Inputs (scripts/fetch-deps.sh --all, then scripts/build-llvm-mingw.sh): INDIUM (Indium, patched), LLVM20 (llvm-project
 # 20.1.2 with clang/, patched, and build-win/ with its static libraries for MinGW), VKINC (Vulkan headers).
+# build_metal.sh --linux: scion-metal.so for the native Linux host (#10), with the system's LLVM 20 (llvm-20-dev) and
+# Vulkan headers (libvulkan-dev) -> bin/scion-metal.so. ponytail: scion-msl.so (patched clang) is not built yet.
 set -e
 cd "$(dirname "$0")"
 DEPS=${DEPS:-../deps}
+if [ "$1" = --linux ]; then
+  INDIUM=${INDIUM:-$DEPS/indium}; OUT=${OUT:-../bin}; O=../out/metal-linux; mkdir -p $O $OUT
+  LC=${LLVM_CONFIG:-llvm-config-20}
+  CXX="g++ -std=c++17 -O2 -w -fPIC -I$INDIUM/include -I$INDIUM/private-include -include cstdint -include stdexcept -include string"
+  for f in $INDIUM/src/indium/*.cpp $INDIUM/src/indium-kit/*.cpp metal/host_metal.cpp metal/air2spv/air2spv.cpp; do
+    o=$O/$(basename $f .cpp).o
+    [ -f $o ] && [ $o -nt $f ] && [ $o -nt metal/mtlbridge.h ] && continue
+    case $f in *air2spv.cpp) C="$CXX $($LC --cxxflags) -fno-rtti -fexceptions";; *) C=$CXX;; esac
+    ($C -c $f -o $o || { rm -f $o; touch $O/FAILED; }) &
+  done; wait; [ ! -f $O/FAILED ] || { rm $O/FAILED; echo "compilation failed"; exit 1; }
+  g++ -shared -o $OUT/scion-metal.so $O/*.o -L$($LC --libdir) -lLLVM-20 -Wl,-rpath,$($LC --libdir) -ldl -lpthread
+  echo "OK -> $OUT/scion-metal.so"; exit 0
+fi
 INDIUM=${INDIUM:-$DEPS/indium}
 LLVM20=${LLVM20:-$DEPS/llvm20}
 LLVM_SRC=$LLVM20/llvm

@@ -6,7 +6,9 @@
  * the guest and the tests), per-pixel transparent windows, BMP/TIFF/GIF images, HiDPI (everything is 96 dpi). */
 #include "scion.h"
 #include "uibridge.h"
+#include "metal/mtlbridge.h"
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <fontconfig/fontconfig.h>
@@ -277,6 +279,8 @@ static void ui_start() {
         std::mutex m; std::condition_variable cv; bool ready = false;
         std::thread([&] {
             SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");          /* signals belong to the guest */
+            SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");               /* Metal layers draw into X11 windows (XWayland on Wayland) */
+            SDL_SetHint("SDL_VIDEO_X11_XINITTHREADS", "1");          /* Vulkan presents from other threads */
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
             SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
             if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS)) fprintf(stderr, "scion: SDL: %s\n", SDL_GetError());
@@ -695,6 +699,22 @@ static A image_encode(const MwImage *img, A type, float quality, uint64_t *size)
     void *out = malloc(len);
     if (!png_image_write_to_memory(&im, out, &len, 0, rgba.data(), 0, nullptr)) { free(out); return 0; }
     *size = len; return (A)out;
+}
+
+/* ======================================================================= Metal layers: the X11 window behind an SDL window */
+static void nw_size(void *ctx, uint32_t *w, uint32_t *h) { int a = 0, b = 0; SDL_GetWindowSizeInPixels((SDL_Window *)ctx, &a, &b); *w = (uint32_t)a; *h = (uint32_t)b; }
+bool ui_native_window(uint64_t sdl_window, uint32_t w, uint32_t h, const char *title, MwNativeWindow *out) {
+    SDL_Window *s = (SDL_Window *)sdl_window;
+    if (!s) {   /* a CAMetalLayer without an AppKit window: one of its own */
+        MwWindowDesc d{-32001, -32001, (int32_t)(w ? w : 640), (int32_t)(h ? h : 480), UI_STYLE_TITLED | UI_STYLE_CLOSABLE | UI_STYLE_RESIZABLE | UI_STYLE_NOMENU, 1, title};
+        Win *win = win_by_id((uint32_t)on_ui(UI_WINDOW_CREATE, (A)&d));
+        s = win ? win->sw : nullptr;
+    }
+    if (!s) return false;
+    SDL_SysWMinfo i; SDL_VERSION(&i.version);
+    if (!SDL_GetWindowWMInfo(s, &i) || i.subsystem != SDL_SYSWM_X11) { fprintf(stderr, "scion: Metal needs an X11 window\n"); return false; }
+    *out = MwNativeWindow{i.info.x11.display, (uint64_t)i.info.x11.window, nw_size, nullptr, s};
+    return true;
 }
 
 /* ======================================================================= the hostcall */
