@@ -1,0 +1,54 @@
+# Publishes a release when a tag v* is pushed: builds the core, adds the Metal DLLs and the Swift libraries from the
+# latest successful heavy.yml run (or, failing that, from the previous release), packages and uploads the zip.
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 zip
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-dynarmic.sh', 'patches/**') }}
+      - run: |
+          scripts/fetch-deps.sh
+          [ -f deps/dynarmic/build-win/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh
+      - run: src/build.sh
+      - name: Metal and Swift libraries
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow heavy.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$run" ]; then
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --dir /tmp/heavy
+            cp /tmp/heavy/scion-metal/*.dll bin/ || true
+            cp --update=none /tmp/heavy/scion-swift/*.dylib bin/lib/ || true
+          fi
+          if [ ! -f bin/scion-metal.dll ] || [ ! -f bin/lib/libswiftCore.dylib ]; then
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern '*windows-x64.zip' --dir /tmp/release
+            unzip -q /tmp/release/*.zip -d /tmp/release/x
+            cp --update=none /tmp/release/x/*/scion-metal.dll /tmp/release/x/*/scion-msl.dll bin/
+            cp --update=none /tmp/release/x/*/lib/*.dylib bin/lib/
+          fi
+      - name: Package and publish
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          scripts/package.sh "$v"
+          notes=$(awk -v v="$v" '/^## /{p = index($0 " ", "## " v " ") == 1; next} p' CHANGELOG.md)
+          gh release create "$GITHUB_REF_NAME" "out/scion-$v-windows-x64.zip" --title "Scion $v" --notes "${notes:-See CHANGELOG.md.}"

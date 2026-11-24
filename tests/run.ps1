@@ -1,5 +1,6 @@
 # Runs Scion's regression tests (tests/cases.txt) on Windows, from out\tests (built on Linux by tests/build.sh).
 # Usage:  powershell -ExecutionPolicy Bypass -File tests\run.ps1 [filter]
+# SCION_SKIP: a regular expression of test names to skip, as in tests/run.sh (e.g. $env:SCION_SKIP = 'Metal|MSL').
 param([string]$Filter = '')
 $root = Split-Path -Parent $PSScriptRoot
 $scion = if ($env:SCION) { $env:SCION } else { Join-Path $root 'bin\scion.exe' }
@@ -10,6 +11,7 @@ Set-Location $tests
 $pass = 0; $fail = 0; $skip = 0
 
 function Run-Case([string]$name, [string]$want, [string]$envs, [string]$argline) {
+    if ($env:SCION_SKIP -and $name -match $env:SCION_SKIP) { $script:skip++; return }
     $argv = @([regex]::Matches($argline, '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
     foreach ($a in $argv) { if ($a -like 'apps/*' -and -not (Test-Path $a)) { $script:skip++; return } }
     $p = $argv[0]

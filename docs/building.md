@@ -48,7 +48,7 @@ This compiles the host with MinGW-w64 (static, no runtime DLLs to ship) and each
 ## 4. Metal host (optional)
 
 ```sh
-scripts/fetch-deps.sh --all    # also LLVM 20.1.2, Vulkan headers, Swift sources
+scripts/fetch-deps.sh --metal  # also LLVM 20.1.2 and the Vulkan headers
 scripts/build-llvm-mingw.sh    # static LLVM + Clang 20 for MinGW -> deps/llvm20/build-win (slow)
 src/build_metal.sh             # -> bin/scion-metal.dll, bin/scion-msl.dll
 ```
@@ -59,8 +59,15 @@ The Swift runtime is built from Apple's open-source Swift 6.1.3 with Swift's own
 linking against Scion's libraries.
 
 1. Download the Swift 6.1.3 toolchain for your Linux distribution from [swift.org](https://www.swift.org/install/linux/)
-   and unpack it. Set `SWIFT_TC` to its `usr` folder, e.g. `export SWIFT_TC=$HOME/swift-6.1.3-RELEASE-ubuntu24.04/usr`.
-2. `scripts/fetch-deps.sh --all` (the Swift sources).
+   and unpack it. The scripts expect the layout of Ubuntu's `swiftlang` package (`$SWIFT_TC/libexec/swift/bin/swiftc`),
+   so point `SWIFT_TC` at a folder that links to the toolchain's `usr`:
+
+   ```sh
+   mkdir -p ~/swift-tc/libexec && ln -s ~/swift-6.1.3-RELEASE-ubuntu24.04/usr ~/swift-tc/libexec/swift
+   export SWIFT_TC=~/swift-tc
+   ```
+
+2. `scripts/fetch-deps.sh --swift` (the Swift sources).
 3. Build, in this order:
 
 ```sh
@@ -73,8 +80,9 @@ src/build_swiftui.sh           # Scion's Combine and SwiftUI
 Intermediate files go to `out/swift-build`.
 
 > **Note.** The Metal-host and Swift scripts were moved to this layout when the project was published and have not yet
-> been run end to end on a clean machine with it. If a step fails, please open an issue with the log; a CI job that
-> builds every layer is one of the most useful contributions right now.
+> been run end to end on a clean machine with it. The same goes for the workflows that run them on GitHub
+> (`.github/workflows/heavy.yml`, by hand, and `release.yml`, on a `v*` tag): they are experimental. If a step fails,
+> please open an issue with the log.
 
 ## Release layout
 
