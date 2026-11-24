@@ -1,7 +1,18 @@
-/* scion.h — declarations shared by the host (Windows) translation units. */
+/* scion.h — declarations shared by the host translation units (Windows: host.cpp, Linux: host_linux.cpp). */
 #pragma once
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define HCABI   /* host calls: the guest calls them with the Microsoft x64 convention, Windows' own */
+#else
+#include <stdint.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+typedef uint32_t DWORD;
+#define _stricmp strcasecmp
+#define HCABI __attribute__((ms_abi))
+#endif
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -19,14 +30,15 @@ bool mw_subcommand(int argc, wchar_t **argv, int *rc); /* install.cpp */
 std::string mw_bundle_executable(const std::string &app);
 
 typedef int64_t A;
-typedef A (*hostfn)(A, A, A, A, A, A);
+typedef A (HCABI *hostfn)(A, A, A, A, A, A);
 extern hostfn g_hc[HC_COUNT];
-A hc_exit(A code, A, A, A, A, A);
-A hc_clock(A kind, A, A, A, A, A);
+HCABI A hc_exit(A code, A, A, A, A, A);
+HCABI A hc_clock(A kind, A, A, A, A, A);
 std::string win_to_darwin(const std::string &w);
 std::wstring darwin_to_win(const char *p, int dirfd);
-void *low_alloc(size_t n, DWORD type, DWORD prot); /* guest memory below 2^39 */
-A hc_ui(A op, A a, A b, A c, A d, A e); /* ui.cpp */
+void *low_alloc(size_t n, DWORD type, DWORD prot); /* guest memory below 2^39 (Windows) */
+void *image_alloc(uint64_t at, uint64_t len);    /* an image's RWX mapping, at its address if free */
+HCABI A hc_ui(A op, A a, A b, A c, A d, A e); /* ui.cpp */
 extern DWORD g_tls_self;
 extern bool g_guest_arm;
 
