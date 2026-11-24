@@ -100,6 +100,8 @@ llvm-lipo-18 -create $T/at_x86_64.dylib $T/at_arm64.dylib -output $OUT/lib/Audio
 x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -Wno-unused-parameter -municode host.cpp dyld.cpp arm64.cpp ui.cpp install.cpp -o $OUT/scion.exe \
   -I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include \
   $B/src/dynarmic/libdynarmic.a $(find $B/externals -name '*.a') -lbcrypt -lwinmm -lsynchronization -ldwmapi -lole32 -luuid -lgdi32 -lshell32 -lwindowscodecs -static -Wl,-Map=../out/scion.map
+# scion: the native Linux host (#10, x86_64 command-line programs for now), sharing lib/ with scion.exe
+g++ -std=c++20 -O2 -Wall -Wno-unused-parameter host_linux.cpp dyld.cpp -o $OUT/scion -lpthread
 # scionw.exe: scion.exe without a console window (Start menu shortcuts of installed apps)
 x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -municode -mwindows launcher.cpp -o $OUT/scionw.exe -lshell32 -lole32 -luuid -static
 rm -rf $T

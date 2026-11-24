@@ -39,7 +39,7 @@ applied. Set `DEPS` to keep them somewhere else (all scripts honor it).
 ## 3. Core
 
 ```sh
-src/build.sh                   # -> bin/scion.exe, bin/scionw.exe, bin/lib/*.dylib
+src/build.sh                   # -> bin/scion.exe, bin/scionw.exe, bin/lib/*.dylib, bin/scion (native Linux host)
 ```
 
 This compiles the host with MinGW-w64 (static, no runtime DLLs to ship) and each guest library twice, for

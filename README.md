@@ -63,9 +63,12 @@ wine scion.exe "path/to/Some App.app"
 wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop entry and file associations
 ```
 
-Linux paths work as they are: Scion turns them into Wine's `Z:` paths. A native Linux host, without Wine,
-is being worked on: the guest libraries only talk to the host through one table of host calls, so only `scion` itself
-needs porting. Help is welcome ([issue](../../issues/10)).
+Linux paths work as they are: Scion turns them into Wine's `Z:` paths.
+
+**Native host (preview).** A build from source also produces `bin/scion`, a Linux program that runs macOS programs
+without Wine: `bin/scion path/to/tool`. Today it runs x86_64 command-line programs (esbuild, Biome, SwiftFormat and the
+runtime tests pass); windows, input, audio, Metal and arm64 programs still need Wine. Help is welcome
+([issue](../../issues/10)).
 
 ## How it works
 

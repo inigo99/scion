@@ -6,11 +6,14 @@
 # an Xvfb is started on :88; Mesa's lavapipe provides software Vulkan (docs/testing.md).
 cd "$(dirname "$0")/.." || exit 1
 R=$(pwd); SCION=${SCION:-$R/bin/scion.exe}
+case $SCION in *.exe) RUN=wine;; *) RUN=;; esac   # SCION=bin-linux/scion: the native Linux host (#10), no Wine
 cd out/tests || { echo "out/tests is missing: run tests/build.sh first"; exit 1; }
 export WINEDEBUG=${WINEDEBUG:--all}
-[ -n "$DISPLAY" ] || { pgrep -f "Xvfb :88" >/dev/null || (Xvfb :88 -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &); sleep 2; export DISPLAY=:88; }
+if [ -n "$RUN" ] && [ -z "$DISPLAY" ]; then
+  pgrep -f "Xvfb :88" >/dev/null || (Xvfb :88 -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &); sleep 2; export DISPLAY=:88
+fi
 # a wineserver started without a display would hide the GPU from Vulkan
-wineserver -k 2>/dev/null; wineserver -w 2>/dev/null
+[ -n "$RUN" ] && { wineserver -k 2>/dev/null; wineserver -w 2>/dev/null; }
 pass=0 fail=0 skip=0
 run_case() {  # NAME EXPECTED ENV ARGS (its variables are global in sh: c_* keeps them apart from the loop's)
   c_name=$1 c_want=$2 c_env=$3
@@ -23,7 +26,7 @@ run_case() {  # NAME EXPECTED ENV ARGS (its variables are global in sh: c_* keep
     *) [ -e "$1" ] || { skip=$((skip+1)); return; };;
   esac
   [ "$c_env" = - ] && c_env=
-  got=$(env $c_env timeout 900 wine "$SCION" "$@" </dev/null 2>&1)
+  got=$(env $c_env timeout 900 $RUN "$SCION" "$@" </dev/null 2>&1)
   case "$got" in
     *"$c_want"*) echo "OK   $c_name"; pass=$((pass+1));;
     *) echo "FAIL $c_name"; echo "$got" | grep -v "^X connection" | tail -5 | sed 's/^/     /'; fail=$((fail+1));;

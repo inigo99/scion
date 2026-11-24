@@ -100,6 +100,10 @@ std::wstring darwin_to_win(const char *p, int dirfd) {
 
 /* Anonymous memory goes below 2^39, from 4 GB up, as on macOS arm64 (Wine hands out 47-bit addresses): guest code
  * (Switch emulators, JS engines) checks that its pointers fit in 39 bits. First free gap at or above a moving cursor. */
+void *image_alloc(uint64_t at, uint64_t len) {
+    void *p = VirtualAlloc((void *)at, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    return p ? p : low_alloc(len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+}
 void *low_alloc(size_t n, DWORD type, DWORD prot) {
     static std::atomic<uint64_t> cursor{1ull << 32};
     /* the reservation is whole 64 KB units, but only the pages asked for are committed: munmap decommits exactly

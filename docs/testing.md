@@ -9,6 +9,7 @@ tests/build.sh        # build the test programs -> out/tests
 tests/run.sh          # run them under Wine          (Linux)
 tests/run.ps1         # run them natively            (Windows: powershell -ExecutionPolicy Bypass -File tests\run.ps1)
 tests/run.sh Metal    # only the tests whose name contains "Metal"
+SCION=$PWD/bin/scion tests/run.sh   # the native Linux host, no Wine (#10; see the skip list in .github/workflows/ci.yml)
 ```
 
 Both runners read the same list, [`tests/cases.txt`](../tests/cases.txt): one test per line with its name, the output it

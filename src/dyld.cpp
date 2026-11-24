@@ -104,9 +104,8 @@ Image *map_image(const std::string &path, uint32_t want) {
     }
     /* ponytail: one RWX mapping per image; per-segment VirtualProtect when W^X matters */
     uint64_t len = hi - lo;
-    im->base = (uint8_t *)VirtualAlloc((void *)lo, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!im->base) im->base = (uint8_t *)low_alloc(len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!im->base) die("VirtualAlloc of the image failed");
+    im->base = (uint8_t *)image_alloc(lo, len);
+    if (!im->base) die("could not map the image");
     im->slide = (int64_t)((uint64_t)im->base - lo);
     im->size = len;
     g_images.push_back(im);
@@ -157,7 +156,11 @@ static uint64_t resolve(Image &im, int ord, const char *name, bool weak = false)
 }
 
 static std::string dir_of(const std::string &p) { size_t k = p.find_last_of("\\/"); return k == std::string::npos ? "." : p.substr(0, k); }
+#ifdef _WIN32
 static bool file_exists(const std::string &p) { DWORD a = GetFileAttributesA(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); }
+#else
+static bool file_exists(const std::string &p) { struct stat st; return !stat(p.c_str(), &st) && S_ISREG(st.st_mode); }
+#endif
 static std::string expand(const std::string &p, Image *loader) {
     if (!p.rfind("@executable_path", 0)) return dir_of(g_main->path) + p.substr(16);
     if (!p.rfind("@loader_path", 0)) return dir_of(loader->path) + p.substr(12);
@@ -176,14 +179,14 @@ static std::string locate(const std::string &name, Image *loader) {
         rp.insert(rp.end(), g_main->rpaths.begin(), g_main->rpaths.end());
         for (auto &r : rp) { std::string c = expand(r, loader) + "/" + name.substr(7); if (file_exists(c)) return c; }
         /* rpaths into Apple's system (/usr/lib/swift, Xcode toolchains) mean scion's own copy of the library */
-        std::string leaf = name.substr(name.find_last_of('/') + 1), c = g_lib_dir + "\\" + leaf;
+        std::string leaf = name.substr(name.find_last_of('/') + 1), c = g_lib_dir + "/" + leaf;
         return leaf.find(".dylib") != std::string::npos && file_exists(c) ? c : "";
     }
     if (name[0] == '@') { std::string c = expand(name, loader); return file_exists(c) ? c : ""; }
     std::string base = name.substr(name.find_last_of('/') + 1);
     size_t dot = base.find(".dylib"); if (dot != std::string::npos) base = base.substr(0, dot);
     auto a = alias.find(base); if (a != alias.end()) base = a->second;
-    std::string c = g_lib_dir + "\\" + base + ".dylib";
+    std::string c = g_lib_dir + "/" + base + ".dylib";
     if (file_exists(c)) return c;
     if (name.size() > 2 && name[0] == '/' && isalpha((unsigned char)name[1]) && name[2] == '/') { /* /c/... */
         std::string w = std::string(1, (char)toupper(name[1])) + ":" + name.substr(2);
@@ -204,7 +207,7 @@ static Image *load_rec(const std::string &path, uint32_t cpu) {
         Image *d = f.empty() ? nullptr : load_rec(f, cpu);
         if (!d && !im->dep_weak[k]) {
             TRACE("%s -> %s (not shipped: resolved in libSystem)\n", im->dep_names[k].c_str(), f.c_str());
-            d = g_libsys ? g_libsys : load_rec(g_lib_dir + "\\libSystem.B.dylib", cpu);
+            d = g_libsys ? g_libsys : load_rec(g_lib_dir + "/libSystem.B.dylib", cpu);
         }
         im->deps.push_back(d);
     }
@@ -218,8 +221,8 @@ Image *load_all(const std::string &main_path) {
     if (!main) return nullptr;
     g_main = main;
     uint32_t cpu = main->arm ? CPU_ARM64 : CPU_X86_64;
-    g_libsys = load_rec(g_lib_dir + "\\libSystem.B.dylib", cpu);
-    if (!g_libsys) die("lib\\libSystem.B.dylib is missing next to scion.exe");
+    g_libsys = load_rec(g_lib_dir + "/libSystem.B.dylib", cpu);
+    if (!g_libsys) die("lib/libSystem.B.dylib is missing next to scion");
     for (size_t k = 0; k < main->dep_names.size(); k++) {
         std::string f = locate(main->dep_names[k], main);
         Image *d = f.empty() ? nullptr : load_rec(f, cpu);
