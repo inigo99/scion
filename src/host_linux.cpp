@@ -6,6 +6,8 @@
  * file mappings are real, and x86_64 guests keep %gs for their thread-specific data as on macOS (the gs base is the
  * thread's struct gthread, whose first member is the TSD array). */
 #include "scion.h"
+#include "metal/mtlbridge.h"
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/random.h>
@@ -666,9 +668,28 @@ HC hc_thread_ctl(A port, A op, A flavor, A state, A, A) {
 }
 
 /* ======================================================================= not yet on Linux */
-HC hc_metal(A, A, A, A, A, A) {
-    static std::once_flag once; std::call_once(once, [] { fprintf(stderr, "scion: Metal is not available on the Linux host yet\n"); });
-    return 0;
+/* Metal: the host half lives in scion-metal.so (Indium on Vulkan + AIR -> SPIR-V), loaded on first use */
+bool ui_native_window(uint64_t sdl_window, uint32_t w, uint32_t h, const char *title, MwNativeWindow *out);   /* ui_linux.cpp */
+static std::string exe_dir();
+HC hc_metal(A op, A a, A b, A c, A d, A e) {
+    typedef int64_t (*fn_t)(int, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+    static fn_t fn; static std::once_flag once;
+    std::call_once(once, [] {
+        void *m = dlopen((exe_dir() + "/scion-metal.so").c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (m) fn = (fn_t)dlsym(m, "mw_metal");
+        if (!fn) fprintf(stderr, "scion: could not load scion-metal.so (Metal is not available): %s\n", dlerror());
+    });
+    if (!fn) return 0;
+    MwNativeWindow nw;
+    if (op == MW_NEW_LAYER) {   /* the AppKit window's SDL window (UI_WINDOW_HWND), or a window of the layer's own */
+        if (!ui_native_window((uint64_t)e, (uint32_t)a, (uint32_t)b, (const char *)c, &nw)) return 0;
+        e = (A)&nw;
+    }
+    /* data the guest hands over may lie in a vm_remap alias (arm64); the other arguments are handles and sizes */
+    MwRegionCopy rc;
+    if (op == MW_TEXTURE_REPLACE || op == MW_TEXTURE_GETBYTES) { rc = *(MwRegionCopy *)G(b); rc.bytes = G(rc.bytes); b = (A)&rc; }
+    else b = G(b);
+    return fn((int)op, (uint64_t)G(a), (uint64_t)b, (uint64_t)G(c), (uint64_t)G(d), op == MW_NEW_LAYER ? (uint64_t)e : (uint64_t)G(e));
 }
 
 /* ======================================================================= dyld services for the guest */

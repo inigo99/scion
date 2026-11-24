@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-build libboost-dev \
-            python3 golang wine64 xvfb mesa-vulkan-drivers libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev
+            python3 golang wine64 xvfb mesa-vulkan-drivers libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
 
@@ -34,6 +34,9 @@ jobs:
 
       - name: Build Scion (core)
         run: src/build.sh
+
+      - name: Build scion-metal.so (native Linux host)
+        run: src/build_metal.sh --linux
 
       # The Metal host DLLs and the Swift libraries take hours to build; CI reuses them from the latest release when
       # there is one, and otherwise skips the tests that need them.
@@ -57,11 +60,12 @@ jobs:
           wineboot -i >/dev/null 2>&1 || true
           tests/run.sh
 
-      # Metal and `scion install` are still missing on the native host (the AppKit and drawing tests use Metal views)
+      # Still missing on the native host: the MSL compiler (MSL tests, MetalFX, the AppKit overlay over Metal in the
+      # drawing test) and `scion install`
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: Metal|MSL|AppKit|2D drawing|install
+          SCION_SKIP: MSL|MetalFX|2D drawing|install
         run: tests/run.sh
 
       - name: Upload the build

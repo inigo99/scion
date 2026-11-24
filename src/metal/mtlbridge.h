@@ -6,6 +6,16 @@
 #pragma once
 #include <stdint.h>
 
+/* Linux: the window a layer draws into (an X11 window, from the SDL window of an AppKit window or one of its own) */
+typedef struct {
+    void *display;                                        /* X11 Display* */
+    uint64_t window;                                      /* X11 Window */
+    void (*size)(void *ctx, uint32_t *w, uint32_t *h);   /* its current client size, pixels */
+    int (*closed)(void *ctx);                             /* 1 once the user closed it (a window of the layer's own) */
+    void (*set_size)(void *ctx, uint32_t w, uint32_t h);  /* drawableSize: resize a window of the layer's own (0: an AppKit window's) */
+    void *ctx;
+} MwNativeWindow;
+
 enum {
     MW_RELEASE = 1,           /* h */
     MW_DEVICE_CREATE,         /* -> device */
@@ -45,7 +55,7 @@ enum {
     MW_RE_SET_DEPTH_STENCIL,  /* enc, state */
     MW_RE_DRAW,               /* enc, const MwDraw* */
     MW_BLIT,                  /* enc, const MwBlit* */
-    MW_NEW_LAYER,             /* width, height, const char *title, pixel format, HWND (0: own window) -> layer (CAMetalLayer: Win32 window + Vulkan swapchain) */
+    MW_NEW_LAYER,             /* width, height, const char *title, pixel format, HWND (0: own window) / const MwNativeWindow* (Linux) -> layer (window + Vulkan swapchain) */
     MW_LAYER_NEXT_DRAWABLE,   /* layer, uint64_t out[4] {texture, width, height, pixel format} -> drawable | 0 (timeout); the size follows the window */
     MW_LAYER_POLL,            /* layer -> 0 open, 1 closed by the user */
     MW_DRAWABLE_PRESENT,      /* drawable */

@@ -56,6 +56,16 @@ scripts/build-llvm-mingw.sh    # static LLVM + Clang 20 for MinGW -> deps/llvm20
 src/build_metal.sh             # -> bin/scion-metal.dll, bin/scion-msl.dll
 ```
 
+For the native Linux host, `scion-metal.so` builds in minutes against the system's LLVM 20 and Vulkan headers (no
+LLVM build of your own). The MSL compiler (`scion-msl.so`, a patched Clang) is not built for Linux yet, so Metal apps
+that compile shaders from source at run time still need Wine there.
+
+```sh
+sudo apt install llvm-20-dev libvulkan-dev
+scripts/fetch-deps.sh           # Indium
+src/build_metal.sh --linux      # -> bin/scion-metal.so
+```
+
 ## 5. Swift (optional)
 
 The Swift runtime is built from Apple's open-source Swift 6.1.3 with Swift's own compiler, targeting macOS 14 and
