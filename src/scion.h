@@ -38,6 +38,9 @@ std::string win_to_darwin(const std::string &w);
 std::wstring darwin_to_win(const char *p, int dirfd);
 void *low_alloc(size_t n, DWORD type, DWORD prot); /* guest memory below 2^39 (Windows) */
 void *image_alloc(uint64_t at, uint64_t len);    /* an image's RWX mapping, at its address if free */
+/* the mapping around a: [lo, hi) with D_PROT_* bits; false if nothing is mapped there */
+bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot);
+int host_pid();
 HCABI A hc_ui(A op, A a, A b, A c, A d, A e); /* ui.cpp */
 extern DWORD g_tls_self;
 extern bool g_guest_arm;
@@ -110,4 +113,5 @@ void arm64_alias_set(uint64_t dst, uint64_t len, uint64_t src); /* drop aliases 
 void arm64_mem_changed(void);                         /* mprotect/munmap: forget the validated regions */
 uint64_t arm64_translate(uint64_t a);                  /* guest address -> backing address (vm_remap aliases) */
 size_t arm64_alias_count();
+int arm64_thread_ctl(struct gthread *t, int op, int flavor, void *state);   /* mach thread_suspend/resume/get/set_state */
 bool arm64_thread_peek(struct gthread *t, struct darm_state *st, bool *hostcall, uint64_t *callbacks, uint64_t *code_reads);

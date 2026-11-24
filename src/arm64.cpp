@@ -6,7 +6,7 @@
 #include <type_traits>
 #include <optional>
 #include <algorithm>
-#include <windows.h>
+#include <condition_variable>
 #include <dynarmic/interface/A64/a64.h>
 #include <dynarmic/interface/A64/config.h>
 #include <dynarmic/interface/exclusive_monitor.h>
@@ -67,7 +67,7 @@ void arm64_alias_set(uint64_t dst, uint64_t len, uint64_t src) {
     g_alias = std::move(keep);
     g_alias_n = g_alias.size();
     /* a reader holds a copy for a single lookup (nanoseconds): copies retired more than 10 s ago can go */
-    uint64_t now = GetTickCount64();
+    uint64_t now = (uint64_t)hc_clock(1, 0, 0, 0, 0, 0) / 1000000;
     const std::vector<Alias> *old = g_alias_snap.exchange(g_alias.empty() ? nullptr : new std::vector<Alias>(g_alias));
     if (old) g_alias_old.push_back({old, now});
     while (!g_alias_old.empty() && now - g_alias_old.front().second > 10000) { delete g_alias_old.front().first; g_alias_old.erase(g_alias_old.begin()); }
@@ -95,10 +95,9 @@ struct ArmEnv final : Dynarmic::A64::UserCallbacks {
         if (uint64_t g = g_mem_gen.load(std::memory_order_relaxed); g != gen_seen) { gen_seen = g; invalidate_ok(); }
         if (w ? (a >= okw_lo && a + n <= okw_hi) : (a >= ok_lo && a + n <= ok_hi)) return true;
         if (a < 0x10000) return false;
-        MEMORY_BASIC_INFORMATION mi;
-        if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-        bool wr_ok = mi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
-        uint64_t lo = (uint64_t)mi.BaseAddress, hi = lo + mi.RegionSize;
+        uint64_t lo, hi; int prot;
+        if (!host_mem_query(a, &lo, &hi, &prot) || !(prot & D_PROT_READ)) return false;
+        bool wr_ok = prot & D_PROT_WRITE;
         if (a + n > hi) return valid(a, hi - a, w) && valid(hi, a + n - hi, w);
         if (w && !wr_ok) return false;
         if (w) okw_lo = lo, okw_hi = hi; else ok_lo = lo, ok_hi = hi;
@@ -242,7 +241,12 @@ struct ArmEnv final : Dynarmic::A64::UserCallbacks {
      * blocked inside a hostcall) and publishes its registers in `snap` */
     std::atomic<int> suspend_count{0};
     std::atomic<bool> parked{false}, in_hostcall{false};
-    HANDLE park_ev = CreateEventW(nullptr, TRUE, FALSE, nullptr), resume_ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    struct Event {   /* manual-reset event */
+        std::mutex m; std::condition_variable c; bool on = false;
+        void set() { std::lock_guard<std::mutex> l(m); on = true; c.notify_all(); }
+        void reset() { std::lock_guard<std::mutex> l(m); on = false; }
+        void wait(int ms = -1) { std::unique_lock<std::mutex> l(m); if (ms < 0) c.wait(l, [&] { return on; }); else c.wait_for(l, std::chrono::milliseconds(ms), [&] { return on; }); }
+    } park_ev, resume_ev;
     struct darm_state snap{}; struct darm_neon neon{}; bool snap_dirty = false;
     void take_snapshot() {
         for (int i = 0; i < 29; i++) snap.x[i] = jit->GetRegister(i);
@@ -252,9 +256,9 @@ struct ArmEnv final : Dynarmic::A64::UserCallbacks {
     }
     void park() {
         take_snapshot(); snap_dirty = false;
-        parked = true; SetEvent(park_ev);
-        while (suspend_count > 0) WaitForSingleObject(resume_ev, INFINITE);
-        ResetEvent(resume_ev); parked = false; ResetEvent(park_ev);
+        parked = true; park_ev.set();
+        while (suspend_count > 0) resume_ev.wait();
+        resume_ev.reset(); parked = false; park_ev.reset();
         if (snap_dirty) {
             for (int i = 0; i < 29; i++) jit->SetRegister(i, snap.x[i]);
             jit->SetRegister(29, snap.fp); jit->SetRegister(30, snap.lr); jit->SetSP(snap.sp); jit->SetPC(snap.pc); jit->SetPstate(snap.cpsr);
@@ -301,7 +305,7 @@ void ArmEnv::deliver(int sig, int code, uint64_t addr) {
     uint64_t sp = (a.flags & D_SA_ONSTACK) && alt_ok && !on_alt ? t->alt_sp + t->alt_size : cur - 128;
     SigFrameArm *f = (SigFrameArm *)((sp - sizeof(SigFrameArm)) & ~15ull);
     memset(f, 0, sizeof *f);
-    f->si.signo = sig; f->si.code = code; f->si.addr = addr; f->si.pid = (int32_t)GetCurrentProcessId();
+    f->si.signo = sig; f->si.code = code; f->si.addr = addr; f->si.pid = (int32_t)host_pid();
     f->uc.onstack = on_alt; f->uc.stack.sp = t->alt_sp; f->uc.stack.size = t->alt_size; f->uc.stack.flags = t->alt_flags;
     f->uc.mcsize = sizeof f->mc; f->uc.mcontext = (uint64_t)&f->mc;
     struct dmcontext_arm &m = f->mc;
@@ -368,7 +372,7 @@ static ArmEnv *new_env(struct gthread *t) {
             ArmEnv *e = g_spare.back();
             g_spare.pop_back();
             e->tpidr = 0; e->pending = 0; e->suspend_count = 0; e->parked = false; e->in_hostcall = false; e->snap_dirty = false;
-            ResetEvent(e->park_ev); ResetEvent(e->resume_ev);
+            e->park_ev.reset(); e->resume_ev.reset();
             for (auto r : {Dynarmic::HaltReason::UserDefined2, Dynarmic::HaltReason::UserDefined3}) e->jit->ClearHalt(r);
             return e;
         }
@@ -412,8 +416,8 @@ uint64_t run_arm64(uint64_t pc, const uint64_t *args, int nargs, uint64_t sp, st
         if (Dynarmic::Has(hr, Dynarmic::HaltReason::MemoryAbort)) {
             jit.ClearHalt(Dynarmic::HaltReason::MemoryAbort);
             env.faulted = false;
-            MEMORY_BASIC_INFORMATION mi;
-            int code = VirtualQuery((void *)env.fault_addr, &mi, sizeof mi) && mi.State == MEM_COMMIT ? 2 : 1;
+            uint64_t lo, hi; int prot;
+            int code = host_mem_query(env.fault_addr, &lo, &hi, &prot) ? 2 : 1;   /* SEGV_ACCERR : SEGV_MAPERR */
             TRACE("arm64 SIGSEGV pc=%llx addr=%llx\n", (unsigned long long)jit.GetPC(), (unsigned long long)env.fault_addr);
             env.deliver(D_SIGSEGV, code, env.fault_addr);
             continue;
@@ -441,7 +445,7 @@ uint64_t run_arm64(uint64_t pc, const uint64_t *args, int nargs, uint64_t sp, st
 
 void arm64_init() {
     g_monitor = new Dynarmic::ExclusiveMonitor(MAX_CPUS);
-    g_arm_thunks = (uint32_t *)VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    g_arm_thunks = (uint32_t *)image_alloc(0, 4096);
     for (uint32_t i = 0; i <= HC_COUNT + 1; i++) { g_arm_thunks[2 * i] = 0xD4000001u | (i << 5); g_arm_thunks[2 * i + 1] = 0xD65F03C0u; }
 }
 
@@ -463,11 +467,11 @@ int arm64_thread_ctl(struct gthread *t, int op, int flavor, void *state) {
     case D_THREAD_SUSPEND:
         if (e->suspend_count++ == 0) {
             e->jit->HaltExecution(Dynarmic::HaltReason::UserDefined3);
-            while (!e->parked && !e->in_hostcall) WaitForSingleObject(e->park_ev, 1);
+            while (!e->parked && !e->in_hostcall) e->park_ev.wait(1);
         }
         return 0;
     case D_THREAD_RESUME:
-        if (e->suspend_count > 0 && --e->suspend_count == 0) SetEvent(e->resume_ev);
+        if (e->suspend_count > 0 && --e->suspend_count == 0) e->resume_ev.set();
         return 0;
     }
     if (flavor != D_ARM_THREAD_STATE64 && flavor != D_ARM_NEON_STATE64) return -4;
