@@ -69,8 +69,8 @@ jobs:
           name: scion-tests
           path: out/tests/
 
-  # The same tests on real Windows. No Vulkan driver on GitHub's runners, so the Metal tests are skipped.
-  # Experimental until it has been green for a while.
+  # The same tests on real Windows. GitHub's runners have no Vulkan driver, so the tests that need Metal are skipped
+  # (the AppKit and drawing tests include an MTKView). Experimental until it has been green for a while.
   windows:
     needs: build-and-test
     runs-on: windows-latest
@@ -88,5 +88,5 @@ jobs:
           path: out/tests
       - name: Run the tests (Windows)
         env:
-          SCION_SKIP: Metal|MSL
+          SCION_SKIP: Metal|MSL|AppKit|2D drawing
         run: powershell -ExecutionPolicy Bypass -File tests\run.ps1
