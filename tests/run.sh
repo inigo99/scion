@@ -9,7 +9,7 @@ R=$(pwd); SCION=${SCION:-$R/bin/scion.exe}
 case $SCION in *.exe) RUN=wine;; *) RUN=;; esac   # SCION=bin-linux/scion: the native Linux host (#10), no Wine
 cd out/tests || { echo "out/tests is missing: run tests/build.sh first"; exit 1; }
 export WINEDEBUG=${WINEDEBUG:--all}
-if [ -n "$RUN" ] && [ -z "$DISPLAY" ]; then
+if [ -z "$DISPLAY" ]; then
   pgrep -f "Xvfb :88" >/dev/null || (Xvfb :88 -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 &); sleep 2; export DISPLAY=:88
 fi
 # a wineserver started without a display would hide the GPU from Vulkan

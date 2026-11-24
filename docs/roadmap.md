@@ -28,8 +28,10 @@ These are the areas where work has the most effect. Each is self-contained enoug
 - A cache for translated arm64 code, so arm64 apps start fast on the second run.
 
 **Linux**
-- A native Linux host (no Wine), `src/host_linux.cpp`: command-line programs run, x86_64 and arm64. Next: windows and
-  input on Wayland/X11 (SDL), audio on PipeWire, `scion-metal` as a shared library, `.desktop` integration.
+- A native Linux host (no Wine), `src/host_linux.cpp` and `src/ui_linux.cpp`: command-line programs and AppKit/SwiftUI
+  apps run, x86_64 and arm64, with windows, input, controllers and audio on SDL2. Next: `scion-metal` as a shared
+  library (Vulkan surfaces from SDL windows), a menu bar, status items in the tray (StatusNotifierItem), `.desktop`
+  integration for `scion install`.
 
 **Run more apps**
 - Networking: BSD sockets on Winsock, then `URLSession` (most apps need it, even if only for update checks).

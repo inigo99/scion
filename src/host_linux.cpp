@@ -666,7 +666,6 @@ HC hc_thread_ctl(A port, A op, A flavor, A state, A, A) {
 }
 
 /* ======================================================================= not yet on Linux */
-HCABI A hc_ui(A, A, A, A, A, A) { return 0; }   /* windows, input, audio: #10 */
 HC hc_metal(A, A, A, A, A, A) {
     static std::once_flag once; std::call_once(once, [] { fprintf(stderr, "scion: Metal is not available on the Linux host yet\n"); });
     return 0;
@@ -789,6 +788,7 @@ static std::string exe_dir() {
 std::string mw_bundle_executable(const std::string &app) {
     std::string a = app; while (a.size() > 1 && a.back() == '/') a.pop_back();
     if (a.size() < 4 || strcasecmp(a.c_str() + a.size() - 4, ".app")) return "";
+    char full[PATH_MAX]; if (realpath(a.c_str(), full)) a = full;   /* absolute, as the Windows host's: NSBundle paths build on it */
     std::string dir = a + "/Contents/MacOS/";
     if (FILE *f = fopen((a + "/Contents/Info.plist").c_str(), "rb")) {
         std::string x; char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, f)) > 0) x.append(buf, n); fclose(f);

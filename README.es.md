@@ -67,9 +67,10 @@ wine scion.exe install "ruta/a/Una App.app"    # Wine lo convierte en una entrad
 Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad `Z:` de Wine.
 
 **Anfitrión nativo (vista previa).** Al compilar desde el código fuente también se genera `bin/scion`, un programa de
-Linux que ejecuta programas de macOS sin Wine: `bin/scion ruta/a/herramienta`. Hoy ejecuta programas de línea de
-comandos, de Intel y de Apple Silicon (pasan esbuild, Biome, SwiftFormat, class-dump y las pruebas del runtime); las
-ventanas, la entrada, el audio y Metal todavía necesitan Wine. Se agradece ayuda ([issue](../../issues/10)).
+Linux que ejecuta programas de macOS sin Wine: `bin/scion ruta/a/herramienta` o `bin/scion "ruta/a/Una App.app"`.
+Funcionan programas de línea de comandos y apps de AppKit y SwiftUI, de Intel y de Apple Silicon, con ventanas, entrada,
+mandos y audio a través de SDL2 (pasan sus pruebas Hex Fiend, Itsycal, Reminders MenuBar, SwiftFormat, esbuild y
+Biome). Metal, la barra de menús y `scion install` todavía necesitan Wine. Se agradece ayuda ([issue](../../issues/10)).
 
 ## Cómo funciona
 

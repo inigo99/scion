@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-build libboost-dev \
-            python3 golang wine64 xvfb mesa-vulkan-drivers
+            python3 golang wine64 xvfb mesa-vulkan-drivers libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
 
@@ -57,11 +57,11 @@ jobs:
           wineboot -i >/dev/null 2>&1 || true
           tests/run.sh
 
-      # Everything that needs windows, input, audio or Metal is still missing on the native host
+      # Metal and `scion install` are still missing on the native host (the AppKit and drawing tests use Metal views)
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: Metal|MSL|AppKit|dialogs|2D drawing|VFL|NSStatusItem|GameController|GCKeyboard|AudioToolbox|install|Itsycal|Reminders|Hex Fiend
+          SCION_SKIP: Metal|MSL|AppKit|2D drawing|install
         run: tests/run.sh
 
       - name: Upload the build

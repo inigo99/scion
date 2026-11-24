@@ -66,8 +66,10 @@ wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop
 Linux paths work as they are: Scion turns them into Wine's `Z:` paths.
 
 **Native host (preview).** A build from source also produces `bin/scion`, a Linux program that runs macOS programs
-without Wine: `bin/scion path/to/tool`. Today it runs command-line programs, Intel and Apple Silicon (esbuild, Biome,
-SwiftFormat, class-dump and the runtime tests pass); windows, input, audio and Metal still need Wine. Help is welcome
+without Wine: `bin/scion path/to/tool` or `bin/scion "path/to/Some App.app"`. Command-line programs and AppKit/SwiftUI
+apps run, Intel and Apple Silicon, with windows, input, controllers and audio through SDL2 (Hex Fiend, Itsycal,
+Reminders MenuBar, SwiftFormat, esbuild and Biome pass their tests). Metal, the menu bar and `scion install` still
+need Wine. Help is welcome
 ([issue](../../issues/10)).
 
 ## How it works
