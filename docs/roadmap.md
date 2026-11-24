@@ -28,8 +28,9 @@ These are the areas where work has the most effect. Each is self-contained enoug
 - A cache for translated arm64 code, so arm64 apps start fast on the second run.
 
 **Linux**
-- A native Linux host (no Wine): the host-call table on POSIX, windows and input on Wayland/X11 (SDL), audio on
-  PipeWire, `scion-metal` as a shared library, `.desktop` integration. Command-line programs first.
+- A native Linux host (no Wine), `src/host_linux.cpp`: x86_64 command-line programs run. Next: arm64 guests (dynarmic
+  for Linux), windows and input on Wayland/X11 (SDL), audio on PipeWire, `scion-metal` as a shared library,
+  `.desktop` integration.
 
 **Run more apps**
 - Networking: BSD sockets on Winsock, then `URLSession` (most apps need it, even if only for update checks).
