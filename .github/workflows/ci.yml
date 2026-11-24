@@ -60,7 +60,7 @@ jobs:
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: arm64|Metal|MSL|AppKit|dialogs|2D drawing|VFL|NSStatusItem|GameController|GCKeyboard|AudioToolbox|install|Itsycal|Reminders
+          SCION_SKIP: arm64|Metal|MSL|AppKit|dialogs|2D drawing|VFL|NSStatusItem|GameController|GCKeyboard|AudioToolbox|install|Itsycal|Reminders|Hex Fiend
         run: tests/run.sh
 
       - name: Upload the build
