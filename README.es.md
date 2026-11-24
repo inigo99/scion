@@ -28,8 +28,8 @@ comandos, apps de AppKit y SwiftUI y gráficos Metal, para un conjunto de progra
 | **Swift** | El runtime y la biblioteca estándar de Swift, los overlays de Darwin, Dispatch y Foundation, Swift Concurrency, y Combine y SwiftUI propios de Scion. |
 | **Se siente como Windows** | Ventanas Win32 reales, menús, diálogos de archivo, iconos en el área de notificación, teclado, ratón, mandos XInput con vibración y audio WASAPI. `scion install` añade una app al menú Inicio con su icono y sus tipos de archivo. |
 
-También funciona con [Wine](https://www.winehq.org/) en Linux, que es como se ejecutan las pruebas en la integración
-continua.
+En Linux funciona hoy con [Wine](https://www.winehq.org/) (mira [En Linux](#en-linux)); un anfitrión nativo para Linux está
+en la [hoja de ruta](docs/roadmap.md).
 
 ## Empezar
 
@@ -51,6 +51,22 @@ de opciones están en [docs/environment.md](docs/environment.md).
 
 Scion ejecuta programas que ya tienes. No contiene nada de macOS (solo código que Apple publica como software libre, con
 sus licencias abiertas), y no necesitas un Mac ni el SDK de Apple.
+
+## En Linux
+
+Scion funciona en Linux a través de Wine, igual que las pruebas en la integración continua. Necesitas Wine 9 o más
+reciente y, para las apps que usan Metal, un driver de Vulkan (los de Mesa valen):
+
+```sh
+sudo apt install wine64 mesa-vulkan-drivers    # Debian/Ubuntu; en otras distribuciones, sus paquetes
+wine scion.exe ruta/a/herramienta --help
+wine scion.exe "ruta/a/Una App.app"
+wine scion.exe install "ruta/a/Una App.app"    # Wine lo convierte en una entrada .desktop y asociaciones de archivo
+```
+
+Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad `Z:` de Wine. Hay en marcha un
+anfitrión nativo para Linux, sin Wine: las bibliotecas del lado invitado solo hablan con el anfitrión a través de una
+tabla de llamadas, así que solo hay que portar `scion`. Se agradece ayuda ([issue](../../issues?q=is%3Aissue+native+Linux+host)).
 
 ## Cómo funciona
 

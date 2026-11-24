@@ -1116,8 +1116,20 @@ static std::string exe_dir() {
     std::string s = narrow(w); return s.substr(0, s.find_last_of("\\/"));
 }
 
+/* Under Wine, a Linux path argument ("/home/x/tool") becomes its DOS path ("Z:\home\x\tool"), so it is not taken for a
+   path inside Scion's own root. Elsewhere (and for paths that do not exist on Linux) the argument is unchanged. */
+static std::string from_unix(const std::string &a) {
+    typedef WCHAR *(CDECL *dosname_fn)(const char *);
+    static dosname_fn dosname = (dosname_fn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name");
+    if (!dosname || a.empty() || a[0] != '/' || (a.size() > 1 && a[1] == '/')) return a;
+    WCHAR *w = dosname(a.c_str()); if (!w) return a;
+    std::string r = narrow(w); HeapFree(GetProcessHeap(), 0, w);
+    return GetFileAttributesW(widen(r).c_str()) == INVALID_FILE_ATTRIBUTES ? a : r;
+}
+
 /* Windows-style path arguments become Darwin paths ("C:\a" -> "/c/a", "--x=C:\a" -> "--x=/c/a") */
-static std::string conv_arg(const std::string &a) {
+static std::string conv_arg(const std::string &a0) {
+    std::string a = from_unix(a0);
     auto isdrv = [&](size_t i) { return i + 2 < a.size() + 1 && isalpha((unsigned char)a[i]) && a[i + 1] == ':' && i + 2 < a.size() && (a[i + 2] == '\\' || a[i + 2] == '/'); };
     if (isdrv(0)) return win_to_darwin(a);
     if (a.find('\\') != std::string::npos && GetFileAttributesA(a.c_str()) != INVALID_FILE_ATTRIBUTES) {   /* a relative Windows path */
@@ -1168,7 +1180,7 @@ int wmain(int wargc, wchar_t **wargv) {
       SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt); }
     for (int i = 1; i < 3; i++) { DWORD m; if (GetConsoleMode(g_fds[i].h, &m)) SetConsoleMode(g_fds[i].h, m | 0x4 /* VIRTUAL_TERMINAL_PROCESSING */); }
 
-    std::string mainpath = narrow(wargv[1]);
+    std::string mainpath = from_unix(narrow(wargv[1]));
     { std::string exe = mw_bundle_executable(mainpath); if (!exe.empty()) mainpath = exe; } /* App.app: its Contents/MacOS executable */
     g_lib_dir = exe_dir() + "\\lib";
     Image *main = load_all(mainpath);
