@@ -28,7 +28,8 @@ work today, for a growing set of programs.
 | **Swift** | Swift's runtime and standard library, the Darwin/Dispatch/Foundation overlays, Swift Concurrency, and Scion's own Combine and SwiftUI. |
 | **Feels like Windows** | Real Win32 windows, menus, file dialogs, notification-area icons, keyboard, mouse, XInput gamepads with rumble, WASAPI audio. `scion install` adds an app to the Start menu with its icon and file types. |
 
-It also runs under [Wine](https://www.winehq.org/) on Linux, which is how the test suite runs in CI.
+On Linux it runs under [Wine](https://www.winehq.org/) today (see [On Linux](#on-linux)); a native Linux host is on the
+[roadmap](docs/roadmap.md).
 
 ## Quick start
 
@@ -49,6 +50,22 @@ are in [docs/environment.md](docs/environment.md).
 
 Scion runs programs you already have. It contains nothing from macOS itself (only code Apple publishes as open source,
 under its open licenses), and you do not need a Mac or an Apple SDK.
+
+## On Linux
+
+Scion runs on Linux through Wine, the same way the test suite runs in CI. You need Wine 9 or newer and, for Metal apps,
+a Vulkan driver (Mesa's are fine):
+
+```sh
+sudo apt install wine64 mesa-vulkan-drivers    # Debian/Ubuntu; use your distribution's packages elsewhere
+wine scion.exe path/to/tool --help
+wine scion.exe "path/to/Some App.app"
+wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop entry and file associations
+```
+
+Linux paths work as they are: Scion turns them into Wine's `Z:` paths. A native Linux host, without Wine,
+is being worked on: the guest libraries only talk to the host through one table of host calls, so only `scion` itself
+needs porting. Help is welcome ([issue](../../issues/10)).
 
 ## How it works
 
