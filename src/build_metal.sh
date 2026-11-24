@@ -6,7 +6,8 @@
 # Inputs (scripts/fetch-deps.sh --all, then scripts/build-llvm-mingw.sh): INDIUM (Indium, patched), LLVM20 (llvm-project
 # 20.1.2 with clang/, patched, and build-win/ with its static libraries for MinGW), VKINC (Vulkan headers).
 # build_metal.sh --linux: scion-metal.so for the native Linux host (#10), with the system's LLVM 20 (llvm-20-dev) and
-# Vulkan headers (libvulkan-dev) -> bin/scion-metal.so. ponytail: scion-msl.so (patched clang) is not built yet.
+# Vulkan headers (libvulkan-dev) -> bin/scion-metal.so; and bin/scion-msl.so when the patched Clang has been built for
+# Linux against that LLVM (scripts/build-clang-linux.sh -> deps/llvm20/build-linux).
 set -e
 cd "$(dirname "$0")"
 DEPS=${DEPS:-../deps}
@@ -20,8 +21,15 @@ if [ "$1" = --linux ]; then
     case $f in *air2spv.cpp) C="$CXX $($LC --cxxflags) -fno-rtti -fexceptions";; *) C=$CXX;; esac
     ($C -c $f -o $o || { rm -f $o; touch $O/FAILED; }) &
   done; wait; [ ! -f $O/FAILED ] || { rm $O/FAILED; echo "compilation failed"; exit 1; }
-  g++ -shared -o $OUT/scion-metal.so $O/*.o -L$($LC --libdir) -lLLVM-20 -Wl,-rpath,$($LC --libdir) -ldl -lpthread
-  echo "OK -> $OUT/scion-metal.so"; exit 0
+  g++ -shared -o $OUT/scion-metal.so $(ls $O/*.o | grep -v '/msl.o$') -L$($LC --libdir) -lLLVM-20 -Wl,-rpath,$($LC --libdir) -ldl -lpthread
+  echo "OK -> $OUT/scion-metal.so"
+  CL=${LLVM20:-$DEPS/llvm20}
+  [ -f $CL/build-linux/lib/libclangCodeGen.a ] || { echo "note: no patched Clang for Linux (scripts/build-clang-linux.sh): skipping scion-msl.so"; exit 0; }
+  { echo 'R"__mw('; cat metal/msl/metal_stdlib.h; echo ')__mw"'; } > $O/metal_stdlib.inc
+  $CXX $($LC --cxxflags) -fno-rtti -fexceptions -I$O -I$CL/clang/include -I$CL/build-linux/include -c metal/msl/msl.cpp -o $O/msl.o
+  g++ -shared -o $OUT/scion-msl.so $O/msl.o -Wl,--start-group $CL/build-linux/lib/libclang*.a -Wl,--end-group \
+    -L$($LC --libdir) -lLLVM-20 -Wl,-rpath,$($LC --libdir) -ldl -lpthread
+  echo "OK -> $OUT/scion-msl.so"; exit 0
 fi
 INDIUM=${INDIUM:-$DEPS/indium}
 LLVM20=${LLVM20:-$DEPS/llvm20}
