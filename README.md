@@ -65,7 +65,7 @@ wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop
 
 Linux paths work as they are: Scion turns them into Wine's `Z:` paths. A native Linux host, without Wine,
 is being worked on: the guest libraries only talk to the host through one table of host calls, so only `scion` itself
-needs porting. Help is welcome ([issue](../../issues?q=is%3Aissue+native+Linux+host)).
+needs porting. Help is welcome ([issue](../../issues/10)).
 
 ## How it works
 

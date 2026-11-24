@@ -66,7 +66,7 @@ wine scion.exe install "ruta/a/Una App.app"    # Wine lo convierte en una entrad
 
 Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad `Z:` de Wine. Hay en marcha un
 anfitrión nativo para Linux, sin Wine: las bibliotecas del lado invitado solo hablan con el anfitrión a través de una
-tabla de llamadas, así que solo hay que portar `scion`. Se agradece ayuda ([issue](../../issues?q=is%3Aissue+native+Linux+host)).
+tabla de llamadas, así que solo hay que portar `scion`. Se agradece ayuda ([issue](../../issues/10)).
 
 ## Cómo funciona
 
