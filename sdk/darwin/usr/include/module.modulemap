@@ -1,0 +1,20 @@
+// Clang modules of the scion SDK for Swift (import Darwin, import Dispatch). Apple's SDK splits Darwin into submodules;
+// one is enough here. The other headers stay textual; modules that need Darwin's names (Dispatch's overlay uses
+// mach_timebase_info) import it from their own header and re-export it.
+module Darwin [system] [extern_c] {
+  header "_scion_darwin.h"
+  export *
+  module uuid {
+    header "uuid/uuid.h"
+    export *
+  }
+}
+module Dispatch [system] [extern_c] {
+  header "_scion_dispatch.h"
+  header "dispatch/dispatch.h"
+  export *
+}
+module os [system] [extern_c] {
+  header "_scion_os.h"
+  export *
+}

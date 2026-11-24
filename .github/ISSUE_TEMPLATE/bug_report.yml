@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in Scion behaves differently from macOS, or crashes.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest program or steps that show the problem. A small test program is the best report.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Scion version
+      description: Release name or commit.
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture of the program
+      options: [x86_64, arm64 (SCION_ARCH=arm64 or arm64-only binary), both]
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows version and GPU (or Linux distribution and Wine version).
+  - type: textarea
+    id: log
+    attributes:
+      label: Console output
+      description: Run with scion.exe (not scionw.exe) from a console and paste the output.
+      render: text

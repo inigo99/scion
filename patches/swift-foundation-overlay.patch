@@ -1,0 +1,69 @@
+diff -ruN a/Codable.swift b/Codable.swift
+--- a/Codable.swift	2026-11-05 19:33:19.140186671 +0100
++++ b/Codable.swift	2026-11-05 19:33:19.161777382 +0100
+@@ -56,25 +56,5 @@
+     }
+ }
+ 
+-// Only support 64bit
+-#if !(os(iOS) && (arch(i386) || arch(arm)))
++// scion: no Combine (the TopLevelEncoder/TopLevelDecoder conformances)
+ 
+-import Combine
+-
+-//===----------------------------------------------------------------------===//
+-// Generic Decoding
+-//===----------------------------------------------------------------------===//
+-
+-@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+-extension JSONEncoder: TopLevelEncoder { }
+-
+-@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+-extension PropertyListEncoder: TopLevelEncoder { }
+-
+-@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+-extension JSONDecoder: TopLevelDecoder { }
+-
+-@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
+-extension PropertyListDecoder: TopLevelDecoder { }
+-
+-#endif /* !(os(iOS) && (arch(i386) || arch(arm))) */
+diff -ruN a/NSDictionary.swift b/NSDictionary.swift
+--- a/NSDictionary.swift	2026-11-05 19:33:19.143059433 +0100
++++ b/NSDictionary.swift	2026-11-05 20:31:56.227202331 +0100
+@@ -238,6 +238,7 @@
+       defer { _fixLifetime(d) }
+     
+       let numElems = d.count
++      if numElems == 0 { result = [:]; return } // scion: see _conditionallyBridgeFromObjectiveC
+       
+       // String and NSString have different concepts of equality, so
+       // string-keyed NSDictionaries may generate key collisions when bridged
+@@ -292,6 +293,8 @@
+     defer { _fixLifetime(x) }
+     
+     let numElems = x.count
++    // scion: Swift 6's _unsafeUninitializedCapacity hands a nil buffer to the closure for 0 elements
++    if numElems == 0 { result = [:]; return true }
+     var success = true
+     
+     // String and NSString have different concepts of equality, so
+diff -ruN a/NSError.swift b/NSError.swift
+--- a/NSError.swift	2026-11-05 19:33:19.143085390 +0100
++++ b/NSError.swift	2026-11-05 19:42:14.482108409 +0100
+@@ -2012,14 +2012,7 @@
+     return _nsUserInfo[NSURLErrorFailingURLStringErrorKey as NSString] as? String
+   }
+ 
+-  /// The state of a failed SSL handshake.
+-  public var failureURLPeerTrust: SecTrust? {
+-    if let secTrust = _nsUserInfo[NSURLErrorFailingURLPeerTrustErrorKey as NSString] {
+-      return (secTrust as! SecTrust)
+-    }
+-
+-    return nil
+-  }
++  // scion: no Security framework, so no failureURLPeerTrust (SecTrust)
+ 
+   /// The reason why a background URLSessionTask was cancelled.
+   @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)

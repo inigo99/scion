@@ -1,0 +1,63 @@
+diff --git a/externals/xbyak b/externals/xbyak
+--- a/externals/xbyak
++++ b/externals/xbyak
+@@ -1 +1 @@
+-Subproject commit 8c0098b69f95d02dea47efcdd42ab5aa2d03c72d
++Subproject commit 8c0098b69f95d02dea47efcdd42ab5aa2d03c72d-dirty
+diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
+index b9373f7..dbdb4df 100644
+--- a/src/dynarmic/backend/x64/a64_interface.cpp
++++ b/src/dynarmic/backend/x64/a64_interface.cpp
+@@ -275,8 +275,8 @@ private:
+         Optimization::PolyfillPass(ir_block, polyfill_options);
+         Optimization::A64CallbackConfigPass(ir_block, conf);
+         Optimization::NamingPass(ir_block);
+-        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+-            Optimization::A64GetSetElimination(ir_block);
++        if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
++            Optimization::A64GetSetElimination(ir_block, conf.check_halt_on_memory_access);
+             Optimization::DeadCodeElimination(ir_block);
+         }
+         if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+diff --git a/src/dynarmic/ir/opt/a64_get_set_elimination_pass.cpp b/src/dynarmic/ir/opt/a64_get_set_elimination_pass.cpp
+index f492015..33330c4 100644
+--- a/src/dynarmic/ir/opt/a64_get_set_elimination_pass.cpp
++++ b/src/dynarmic/ir/opt/a64_get_set_elimination_pass.cpp
+@@ -15,7 +15,7 @@
+ 
+ namespace Dynarmic::Optimization {
+ 
+-void A64GetSetElimination(IR::Block& block) {
++void A64GetSetElimination(IR::Block& block, bool precise_memory_aborts) {
+     using Iterator = IR::Block::iterator;
+ 
+     enum class TrackingType {
+@@ -144,6 +144,15 @@ void A64GetSetElimination(IR::Block& block) {
+             break;
+         }
+         default: {
++            if (precise_memory_aborts && inst->IsMemoryReadOrWrite()) {
++                // A memory access may abort (check_halt_on_memory_access): every Set before it must reach the
++                // JIT state, so it is committed here and can no longer be removed by a later Set. Known values
++                // still forward to later Gets.
++                for (auto& r : reg_info) r.set_instruction_present = false;
++                for (auto& r : vec_info) r.set_instruction_present = false;
++                sp_info.set_instruction_present = false;
++                nzcv_info.set_instruction_present = false;
++            }
+             if (inst->ReadsFromCPSR() || inst->WritesToCPSR()) {
+                 nzcv_info = {};
+             }
+diff --git a/src/dynarmic/ir/opt/passes.h b/src/dynarmic/ir/opt/passes.h
+index 703145b..e5e1745 100644
+--- a/src/dynarmic/ir/opt/passes.h
++++ b/src/dynarmic/ir/opt/passes.h
+@@ -36,7 +36,7 @@ void PolyfillPass(IR::Block& block, const PolyfillOptions& opt);
+ void A32ConstantMemoryReads(IR::Block& block, A32::UserCallbacks* cb);
+ void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions opt);
+ void A64CallbackConfigPass(IR::Block& block, const A64::UserConfig& conf);
+-void A64GetSetElimination(IR::Block& block);
++void A64GetSetElimination(IR::Block& block, bool precise_memory_aborts = false);
+ void A64MergeInterpretBlocksPass(IR::Block& block, A64::UserCallbacks* cb);
+ void ConstantPropagation(IR::Block& block);
+ void DeadCodeElimination(IR::Block& block);

@@ -1,0 +1,26 @@
+diff --git a/xbyak/xbyak_util.h b/xbyak/xbyak_util.h
+index a6bae41..be5fd3d 100644
+--- a/xbyak/xbyak_util.h
++++ b/xbyak/xbyak_util.h
+@@ -1295,7 +1295,7 @@ static inline uint32_t getCores(std::vector<LogicalCpu>& cpus, bool isHybrid) {
+ 			LogicalCpu cpu;
+ 			if (!isHybrid) {
+ 				cpu.coreType = Standard;
+-			} else if (core.EfficiencyClass > 0) {
++			} else if (false /* mingw-w64 headers lack EfficiencyClass */) {
+ 				cpu.coreType = Performance;
+ 			} else {
+ 				cpu.coreType = Efficient;
+@@ -1335,10 +1335,10 @@ inline std::vector<uint32_t> getGroupAcc()
+ inline CpuMask convertMask(const std::vector<uint32_t>& groupAcc, const CACHE_RELATIONSHIP& cache)
+ {
+ 	CpuMask out;
+-	const GROUP_AFFINITY* masks = cache.GroupMasks;
++	const GROUP_AFFINITY* masks = &cache.GroupMask;
+ 
+ 	uint32_t acc = 0;
+-	for (WORD i = 0; i < cache.GroupCount; i++) {
++	for (WORD i = 0; i < 1; i++) {
+ 		const WORD group = masks[i].Group;
+ 		const KAFFINITY m = masks[i].Mask;
+ 

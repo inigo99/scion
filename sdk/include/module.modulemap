@@ -1,0 +1,32 @@
+// Clang modules of scion's own SDK headers, for Swift (import ObjectiveC). Header search must include sdk/include.
+module ObjectiveC [system] [extern_c] {
+  header "objc/objc-api.h"
+  header "objc/objc.h"
+  header "objc/runtime.h"
+  header "objc/message.h"
+  module NSObject {
+    requires objc
+    header "objc/NSObject.h"
+    export *
+  }
+  export *
+}
+module CoreFoundation [system] [extern_c] {
+  header "CoreFoundation/CoreFoundation.h"
+  export *
+  link "Foundation"
+}
+module Foundation [system] [extern_c] {
+  header "Foundation/Foundation.h"
+  export *
+  link "Foundation"
+}
+module CoreGraphics [system] [extern_c] {
+  header "CoreGraphics/CoreGraphics.h"
+  export *
+}
+module AppKit [system] [extern_c] {
+  header "AppKit/AppKit.h"
+  export *
+  link "AppKit"
+}

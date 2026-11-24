@@ -1,0 +1,76 @@
+# Scion's regression tests, run by tests/run.sh (Linux + Wine) and tests/run.ps1 (Windows) after tests/build.sh.
+# One test per line:  name | expected output (a substring) | environment (KEY=value ..., or -) | program and arguments
+# Paths are relative to out/tests. {arch} runs the line once for x86_64 and once for arm64. A test whose program (or an
+# apps/ argument) is missing is skipped: Go, Swift, class-dump and the third-party apps (tests/apps/fetch.sh) are optional.
+
+# loader, dyld, libSystem
+hello {arch} (classic binds)       | fib(49) = 7778742049 | - | hello_{arch}
+hello {arch} (chained fixups)      | fib(49) = 7778742049 | - | hello_chained_{arch}
+signals + Mach {arch}              | failures=0           | - | mach_signals_{arch}
+Blocks + GCD {arch}                | failures=0           | - | gcd_{arch}
+dylib via @rpath + TLV {arch}      | dylib @rpath OK      | - | dylib/app_{arch}
+dispatch sources {arch}            | SOURCES OK           | - | sources_{arch}
+code generated at run time {arch}  | JIT OK               | - | jit_{arch}
+vm_remap without copying {arch}    | REMAP OK             | - | remap_{arch}
+Go: signals, preemption {arch}     | goroutines: 2999997 2999997 | - | signals_{arch}
+# C++ and Objective-C
+C++ {arch}                         | CXX OK               | - | cxx_{arch}
+thread stress {arch}               | THREADS OK           | - | threads_{arch} 300
+Objective-C runtime {arch}         | all OK               | - | runtime_{arch}
+Objective-C exceptions {arch}      | EXCEPTIONS OK        | - | exceptions_{arch}
+uncaught exception {arch}          | uncaught exception 'NSRangeException' | - | exceptions_{arch} 1
+Foundation {arch}                  | FOUNDATION OK        | - | foundation_{arch}
+Foundation 2 {arch}                | FOUNDATION2 OK       | - | foundation2_{arch}
+NSRegularExpression {arch}         | REGEX OK             | - | regex_{arch}
+NSInvocation, NSUndoManager {arch} | INVOCATIONS OK       | - | invocations_{arch}
+class-dump (arm64)                 | - (void)throwAt:(int)arg1; | - | class-dump_arm64 exceptions_arm64
+# Metal (on Vulkan)
+Metal compute {arch}               | METAL COMPUTE OK     | - | compute_{arch}
+Metal triangle {arch}              | METAL TRIANGLE OK    | - | triangle_{arch}
+Metal 3D cube {arch}               | METAL CUBE OK        | - | cube_{arch}
+Metal window (CAMetalLayer) {arch} | METAL WINDOW OK      | - | window_{arch} 600
+Metal texture + sampler {arch}     | METAL TEXTURE OK     | - | texture_{arch}
+Metal modern AIR {arch}            | METAL IRIDIUM-NG OK  | - | ng_{arch}
+MSL at run time {arch}             | METAL MSL OK         | - | msl_{arch}
+MetalFX {arch}                     | METALFX OK           | - | metalfx_{arch}
+# AppKit, input, audio
+AppKit {arch}                      | APPKIT OK            | - | appkit_{arch}
+file dialogs, context menus {arch} | DIALOGS OK           | - | dialogs_{arch}
+2D drawing and controls {arch}     | DRAWING OK           | - | drawing_{arch}
+Auto Layout {arch}                 | AUTOLAYOUT OK        | - | autolayout_{arch}
+Auto Layout (VFL) {arch}           | AUTOLAYOUT OK        | - | autolayout2_{arch}
+NSTableView {arch}                 | TABLES OK            | - | table_views_{arch}
+NSStatusItem: icon and click {arch} | visible windows "popover inside"; documents: 0; icons: 1 ( | SCION_TEST_CLICK=3 SCION_TEST_GUI=6 | status_item_{arch}
+GameController + CoreHaptics {arch} | GAMEPAD OK          | - | gamepad_{arch}
+GCKeyboard / GCMouse {arch}        | KEYBOARD OK          | - | keyboard_{arch}
+AudioToolbox {arch}                | AUDIO OK             | - | audio_{arch}
+# Swift (optional: SWIFT_TC)
+Swift language {arch}              | SWIFT OK             | - | swift_language_{arch}
+Swift Concurrency {arch}           | CONCURRENCY OK       | - | swift_concurrency_{arch}
+Combine {arch}                     | COMBINE OK           | - | swift_combine_{arch}
+SwiftUI {arch}                     | SWIFTUI OK           | - | swift_swiftui_{arch}
+Swift: Darwin, Dispatch {arch}     | SYSTEM OK            | - | swift_system_{arch}
+Swift: Foundation {arch}           | FOUNDATION OK        | - | swift_foundation_{arch}
+plist, Bundle, UserDefaults {arch} | PLIST OK             | SCION_ARCH={arch} | Sample.app
+# Windows integration: Start menu shortcut, icon, file types and uninstall entry
+app bundle {arch}                  | fib(49) = 7778742049 | SCION_ARCH={arch} | Hello.app
+scion install                      | Hello installed      | - | install Hello.app
+scion uninstall                    | uninstalled          | - | uninstall dev.scion.hello
+# third-party apps (optional: tests/apps/fetch.sh)
+esbuild x64 --version              | 0.28.2               | - | apps/esbuild_x64 --version
+esbuild arm64 --version            | 0.28.2               | - | apps/esbuild_arm64 --version
+esbuild x64 bundles TypeScript     | Done                 | - | apps/esbuild_x64 ../../tests/apps/esbuild-demo/src/index.ts --bundle --outfile=apps/out_x64.js
+esbuild arm64 bundles TypeScript   | Done                 | - | apps/esbuild_arm64 ../../tests/apps/esbuild-demo/src/index.ts --bundle --outfile=apps/out_arm64.js
+Biome x64 --version                | Version: 2.6.2       | - | apps/biome_x64 --version
+Biome arm64 --version              | Version: 2.6.2       | - | apps/biome_arm64 --version
+Biome x64 format                   | Checked 1 file       | - | apps/biome_x64 format ../../tests/apps/samples/dirty.js
+Biome arm64 format                 | Checked 1 file       | - | apps/biome_arm64 format ../../tests/apps/samples/dirty.js
+SwiftFormat finds a dirty file {arch} | 1/1 files require formatting | SCION_ARCH={arch} | apps/swiftformat --lint ../../tests/apps/samples/dirty.swift
+SwiftFormat passes a clean file {arch} | 0/1 files require formatting | SCION_ARCH={arch} | apps/swiftformat --lint ../../tests/apps/samples/clean.swift
+Hex Fiend opens a file (x86_64)    | documents: 1, sample.bin | SCION_TEST_GUI=12 | "apps/Hex Fiend.app" sample.bin
+Hex Fiend opens a file (arm64)     | documents: 1, sample.bin | SCION_ARCH=arm64 SCION_TEST_GUI=120 | "apps/Hex Fiend.app" sample.bin
+Itsycal: icon and calendar (x86_64) | APP OK: 1 visible windows ""; documents: 0; icons: 1 ( | SCION_TEST_CLICK=6 SCION_TEST_GUI=12 | apps/Itsycal.app
+Itsycal: icon and calendar (arm64) | APP OK: 1 visible windows ""; documents: 0; icons: 1 ( | SCION_ARCH=arm64 SCION_TEST_CLICK=60 SCION_TEST_GUI=66 | apps/Itsycal.app
+images from Assets.car {arch}      | CATALOG OK           | - | asset_catalog2_{arch} apps/Itsycal.app
+Reminders MenuBar: SwiftUI popover (x86_64) | APP OK: 1 visible windows ""; documents: 0; icons: 1 ( | SCION_TEST_CLICK=6 SCION_TEST_GUI=14 | "apps/Reminders MenuBar.app"
+Reminders MenuBar: SwiftUI popover (arm64) | APP OK: 1 visible windows ""; documents: 0; icons: 1 ( | SCION_ARCH=arm64 SCION_TEST_CLICK=40 SCION_TEST_GUI=70 | "apps/Reminders MenuBar.app"

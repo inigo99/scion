@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>Sample</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.scion.sample</string>
+	<key>CFBundleName</key>
+	<string>Sample</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.2</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<!-- a comment -->
+	<key>CFBundleIconFile</key>
+	<string>Sample</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Sample text</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>sample</string>
+				<string>sctxt</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>&#169; 2026 &lt;scion&gt; &amp; co</string>
+</dict>
+</plist>

@@ -1,0 +1,21 @@
+diff --git a/src/dynarmic/frontend/A64/translate/impl/floating_point_compare.cpp b/src/dynarmic/frontend/A64/translate/impl/floating_point_compare.cpp
+index c1835b8..9d39a62 100644
+--- a/src/dynarmic/frontend/A64/translate/impl/floating_point_compare.cpp
++++ b/src/dynarmic/frontend/A64/translate/impl/floating_point_compare.cpp
+@@ -9,9 +9,15 @@ namespace Dynarmic::A64 {
+ namespace {
+ bool FPCompare(TranslatorVisitor& v, Imm<2> type, Vec Vm, Vec Vn, bool exc_on_qnan, bool cmp_with_zero) {
+     const auto datasize = FPGetDataSize(type);
+-    if (!datasize || *datasize == 16) {
++    if (!datasize) {
+         return v.UnallocatedEncoding();
+     }
++    if (*datasize == 16) {  // scion: FEAT_FP16 (Apple CPUs): half widens exactly to single, which compares the same
++        const IR::U32 operand1 = v.ir.FPHalfToSingle(v.V_scalar(16, Vn), FP::RoundingMode::ToNearest_TieEven);
++        const IR::U32 operand2 = cmp_with_zero ? v.ir.Imm32(0) : v.ir.FPHalfToSingle(v.V_scalar(16, Vm), FP::RoundingMode::ToNearest_TieEven);
++        v.ir.SetNZCV(v.ir.FPCompare(operand1, operand2, exc_on_qnan));
++        return true;
++    }
+ 
+     const IR::U32U64 operand1 = v.V_scalar(*datasize, Vn);
+     IR::U32U64 operand2;

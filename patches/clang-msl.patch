@@ -1,0 +1,88 @@
+diff -ru a/lib/AST/Type.cpp b/lib/AST/Type.cpp
+--- clang/lib/AST/Type.cpp	2025-04-02 01:44:12.000000000 +0200
++++ clang/lib/AST/Type.cpp	2026-10-28 17:00:27.047093762 +0100
+@@ -73,7 +73,7 @@
+                                                 const ASTContext &Ctx) {
+   // In OpenCLC v2.0 s6.5.5: every address space except for __constant can be
+   // used as __generic.
+-  return (A == LangAS::opencl_generic && B != LangAS::opencl_constant) ||
++  return (A == LangAS::opencl_generic && (B != LangAS::opencl_constant || Ctx.getLangOpts().OpenCLCPlusPlus /* scion: MSL */)) ||
+          // We also define global_device and global_host address spaces,
+          // to distinguish global pointers allocated on host from pointers
+          // allocated on device, which are a subset of __global.
+diff -ru a/lib/Sema/SemaDecl.cpp b/lib/Sema/SemaDecl.cpp
+--- clang/lib/Sema/SemaDecl.cpp	2025-04-02 01:44:12.000000000 +0200
++++ clang/lib/Sema/SemaDecl.cpp	2026-10-28 17:00:27.041084908 +0100
+@@ -8738,7 +8738,7 @@
+         FunctionDecl *FD = getCurFunctionDecl();
+         // OpenCL v1.1 s6.5.2 and s6.5.3: no local or constant variables
+         // in functions.
+-        if (FD && !FD->hasAttr<OpenCLKernelAttr>()) {
++        if (FD && !FD->hasAttr<OpenCLKernelAttr>() && !getLangOpts().OpenCLCPlusPlus /* scion: MSL threadgroup/constant locals */) {
+           if (T.getAddressSpace() == LangAS::opencl_constant)
+             Diag(NewVD->getLocation(), diag::err_opencl_function_variable)
+                 << 0 /*non-kernel only*/ << "constant";
+diff -ru a/lib/Sema/SemaExpr.cpp b/lib/Sema/SemaExpr.cpp
+--- clang/lib/Sema/SemaExpr.cpp	2025-04-02 01:44:12.000000000 +0200
++++ clang/lib/Sema/SemaExpr.cpp	2026-10-28 17:00:27.037851835 +0100
+@@ -7711,6 +7711,15 @@
+   // In OpenCL, casts between vectors of different types are not allowed.
+   // (See OpenCL 6.2).
+   if (SrcTy->isVectorType()) {
++    /* scion: in MSL a cast between vectors of the same length converts each element */
++    if (getLangOpts().OpenCLCPlusPlus && SrcTy->isExtVectorType() &&
++        SrcTy->castAs<VectorType>()->getNumElements() == DestTy->castAs<VectorType>()->getNumElements() &&
++        !Context.hasSameUnqualifiedType(DestTy, SrcTy)) {
++      ExprResult R2 = DefaultLvalueConversion(CastExpr);
++      if (R2.isInvalid()) return ExprError();
++      Kind = CK_NoOp;
++      return new (Context) clang::ConvertVectorExpr(R2.get(), Context.getTrivialTypeSourceInfo(DestTy), DestTy.getUnqualifiedType(), VK_PRValue, OK_Ordinary, R.getBegin(), R.getEnd());
++    }
+     if (!areLaxCompatibleVectorTypes(SrcTy, DestTy) ||
+         (getLangOpts().OpenCL &&
+          !Context.hasSameUnqualifiedType(DestTy, SrcTy))) {
+@@ -12696,7 +12705,7 @@
+   unsigned TypeSize = Context.getTypeSize(VTy->getElementType());
+ 
+   if (isa<ExtVectorType>(VTy)) {
+-    if (VTy->isExtVectorBoolType())
++    if (VTy->isExtVectorBoolType() || getLangOpts().OpenCLCPlusPlus) /* scion: MSL comparisons give boolN */
+       return Context.getExtVectorType(Context.BoolTy, VTy->getNumElements());
+     if (TypeSize == Context.getTypeSize(Context.CharTy))
+       return Context.getExtVectorType(Context.CharTy, VTy->getNumElements());
+diff -ru a/lib/Sema/SemaExprCXX.cpp b/lib/Sema/SemaExprCXX.cpp
+--- clang/lib/Sema/SemaExprCXX.cpp	2025-04-02 01:44:12.000000000 +0200
++++ clang/lib/Sema/SemaExprCXX.cpp	2026-10-28 17:00:27.044289215 +0100
+@@ -7063,6 +7063,20 @@
+     return QualType();
+   }
+ 
++  /* scion: MSL `c ? prvalue : thread_lvalue` of the same struct: both become prvalues */
++  if (getLangOpts().OpenCLCPlusPlus && LTy->isRecordType() && RTy->isRecordType() && !Context.hasSameType(LTy, RTy) &&
++      Context.hasSameUnqualifiedType(Context.removeAddrSpaceQualType(LTy.getUnqualifiedType()),
++                                     Context.removeAddrSpaceQualType(RTy.getUnqualifiedType()))) {
++    QualType T = Context.removeAddrSpaceQualType(LTy.getUnqualifiedType()).getUnqualifiedType();
++    for (ExprResult *E : {&LHS, &RHS}) {
++      ExprResult R = PerformCopyInitialization(InitializedEntity::InitializeTemporary(T), QuestionLoc, E->get());
++      if (R.isInvalid()) return QualType();
++      *E = R;
++    }
++    LTy = LHS.get()->getType();
++    RTy = RHS.get()->getType();
++  }
++
+   // C++11 [expr.cond]p3
+   //   Otherwise, if the second and third operand have different types, and
+   //   either has (cv) class type [...] an attempt is made to convert each of
+diff -ru a/lib/Sema/SemaType.cpp b/lib/Sema/SemaType.cpp
+--- clang/lib/Sema/SemaType.cpp	2025-04-02 01:44:12.000000000 +0200
++++ clang/lib/Sema/SemaType.cpp	2026-10-28 17:00:27.035144905 +0100
+@@ -2402,7 +2402,7 @@
+   // of bool aren't allowed.
+   //
+   // We explicitly allow bool elements in ext_vector_type for C/C++.
+-  bool IsNoBoolVecLang = getLangOpts().OpenCL || getLangOpts().OpenCLCPlusPlus;
++  bool IsNoBoolVecLang = (getLangOpts().OpenCL || getLangOpts().OpenCLCPlusPlus) && !getLangOpts().OpenCLCPlusPlus; /* scion: MSL boolN */
+   if ((!T->isDependentType() && !T->isIntegerType() &&
+        !T->isRealFloatingType()) ||
+       (IsNoBoolVecLang && T->isBooleanType())) {

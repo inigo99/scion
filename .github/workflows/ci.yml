@@ -1,0 +1,64 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-build libboost-dev \
+            python3 golang wine64 xvfb mesa-vulkan-drivers
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-dynarmic.sh', 'patches/**') }}
+
+      - name: Fetch and build dependencies
+        run: |
+          scripts/fetch-deps.sh
+          [ -f deps/dynarmic/build-win/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh
+
+      - name: Build Scion (core)
+        run: src/build.sh
+
+      # The Metal host DLLs and the Swift libraries take hours to build; CI reuses them from the latest release when
+      # there is one, and otherwise skips the tests that need them.
+      - name: Reuse the Metal and Swift libraries of the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download --repo "$GITHUB_REPOSITORY" --pattern '*windows-x64.zip' --dir /tmp/release 2>/dev/null; then
+            unzip -q /tmp/release/*.zip -d /tmp/release/x
+            cp -n /tmp/release/x/*/scion-metal.dll /tmp/release/x/*/scion-msl.dll bin/ || true
+            cp -n /tmp/release/x/*/lib/*.dylib bin/lib/ || true
+          fi
+          [ -f bin/scion-metal.dll ] || echo "SCION_SKIP=Metal|MSL|AppKit|2D drawing" >> "$GITHUB_ENV"
+
+      - name: Build the tests
+        run: tests/build.sh
+
+      - name: Run the tests (Wine)
+        run: |
+          mkdir -p /run/user/$(id -u) || true
+          wineboot -i >/dev/null 2>&1 || true
+          tests/run.sh
+
+      - name: Upload the build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scion-bin
+          path: bin/

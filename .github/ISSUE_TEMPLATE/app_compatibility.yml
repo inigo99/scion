@@ -1,0 +1,49 @@
+name: App compatibility
+description: Report how a macOS app runs (or does not) on Scion.
+labels: [app]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: App and version
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where to get it
+      description: A link to the official download, so others can reproduce.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: [Does not start, Starts but fails, Works with problems, Works]
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture you ran
+      options: [x86_64, arm64, both]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Scion version
+    validations:
+      required: true
+  - type: textarea
+    id: missing
+    attributes:
+      label: Missing symbols
+      description: Output of `python3 tests/missing_symbols.py "App.app" arm64` if you can run it.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Console output
+      description: Run with scion.exe from a console (SCION_TOLERANT=1 helps) and paste the end of the output.
+      render: text

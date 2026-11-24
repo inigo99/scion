@@ -1,0 +1,2708 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8d95863..a22a3b7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -159,7 +159,7 @@ if (NOT DARLING)
+ endif()
+ 
+ execute_process(
+-	COMMAND llvm-config --link-shared --libnames
++	COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-shared --libnames
+ 	OUTPUT_VARIABLE HOST_LLVM_LIBNAME
+ 	OUTPUT_STRIP_TRAILING_WHITESPACE
+ )
+diff --git a/include/indium/render-command-encoder.hpp b/include/indium/render-command-encoder.hpp
+index d17993c..4b753a3 100644
+--- a/include/indium/render-command-encoder.hpp
++++ b/include/indium/render-command-encoder.hpp
+@@ -36,6 +36,7 @@ namespace Indium {
+ 		virtual void setStencilReferenceValue(uint32_t value) = 0;
+ 		virtual void setStencilReferenceValue(uint32_t front, uint32_t back) = 0;
+ 		virtual void setVisibilityResultMode(VisibilityResultMode mode, size_t offset) = 0;
++		virtual void barrier() = 0; // scion: memory barrier between draws
+ 
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount, size_t baseInstance) = 0;
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) = 0;
+diff --git a/include/indium/render-pass.hpp b/include/indium/render-pass.hpp
+index 490d089..73d882b 100644
+--- a/include/indium/render-pass.hpp
++++ b/include/indium/render-pass.hpp
+@@ -63,6 +63,7 @@ namespace Indium {
+ 		std::optional<RenderPassDepthAttachmentDescriptor> depthAttachment;
+ 		std::optional<RenderPassStencilAttachmentDescriptor> stencilAttachment;
+ 		std::shared_ptr<Buffer> visibilityResultBuffer;
++		bool visibilityAccumulate = false; // scion: Metal 4 MTLVisibilityResultTypeAccumulate (else each pass resets its offsets)
+ 		size_t renderTargetArrayLength;
+ 		size_t imageblockSampleLength;
+ 		size_t threadgroupMemoryLength;
+diff --git a/include/indium/types.hpp b/include/indium/types.hpp
+index 0e75e54..7bf479d 100644
+--- a/include/indium/types.hpp
++++ b/include/indium/types.hpp
+@@ -347,6 +347,8 @@ namespace Indium {
+ 		UShortNormalized = 51,
+ 		ShortNormalized = 52,
+ 		Half = 53,
++		FloatRG11B10 = 54, // scion
++		FloatRGB9E5 = 55,
+ 	};
+ 
+ 	enum class VertexStepFunction: size_t {
+diff --git a/include/iridium/iridium.hpp b/include/iridium/iridium.hpp
+index 900d03a..d071634 100644
+--- a/include/iridium/iridium.hpp
++++ b/include/iridium/iridium.hpp
+@@ -3,6 +3,8 @@
+ #include <cstddef>
+ 
+ #include <vector>
++#include <map>
++#include <array>
+ #include <unordered_map>
+ #include <string>
+ 
+@@ -94,6 +96,12 @@ namespace Iridium {
+ 		FunctionType type;
+ 		std::vector<BindingInfo> bindings;
+ 		std::vector<EmbeddedSampler> embeddedSamplers;
++		// scion: Metal function constants (name, index); the SPIR-V reads index i from specialization constant 1000 + i
++		std::vector<std::pair<std::string, size_t>> functionConstants;
++		bool writesDepth = false; // scion: a fragment function with a [[depth]] output
++		// scion: argument buffers by [[buffer(n)]]: {id, byte offset, kind (0 data, 1 buffer, 2 texture, 3 sampler), count}, and size
++		std::map<size_t, std::vector<std::array<int64_t, 4>>> argumentIds;
++		std::map<size_t, size_t> argumentSizes;
+ 	};
+ 
+ 	struct OutputInfo {
+diff --git a/private-include/indium-kit/layer.private.hpp b/private-include/indium-kit/layer.private.hpp
+index b8aa21f..97b6cbb 100644
+--- a/private-include/indium-kit/layer.private.hpp
++++ b/private-include/indium-kit/layer.private.hpp
+@@ -67,5 +67,16 @@ namespace IndiumKit {
+ 		virtual void setPixelFormat(Indium::PixelFormat pixelFormat) override;
+ 
+ 		std::shared_ptr<Indium::Device> device();
++		size_t width() const { return _width; }
++		size_t height() const { return _height; }
++
++		// scion: swapchain rebuilt on resize / pixel format change
++		void resize(size_t width, size_t height);
++		void createSwapchain();
++		void destroySwapchain(bool keepSwapchain);
++
++		// scion: the semaphore a present waits on can only be reused once its image is acquired again
++		std::vector<std::shared_ptr<Indium::BinarySemaphore>> presentSemaphores, retiredSemaphores;
++		size_t _requestedWidth = 0, _requestedHeight = 0;
+ 	};
+ };
+diff --git a/private-include/indium/blit-command-encoder.private.hpp b/private-include/indium/blit-command-encoder.private.hpp
+index d6e71b2..cf6489c 100644
+--- a/private-include/indium/blit-command-encoder.private.hpp
++++ b/private-include/indium/blit-command-encoder.private.hpp
+@@ -18,6 +18,7 @@ namespace Indium {
+ 		std::weak_ptr<PrivateCommandBuffer> _privateCommandBuffer;
+ 		std::shared_ptr<PrivateDevice> _privateDevice;
+ 		BlitPassDescriptor _descriptor;
++		std::vector<std::shared_ptr<void>> _keepAlive; // scion: Metal command buffers retain what they reference
+ 
+ 		void copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size);
+ 
+diff --git a/private-include/indium/buffer.private.hpp b/private-include/indium/buffer.private.hpp
+index a348b2b..e75a21b 100644
+--- a/private-include/indium/buffer.private.hpp
++++ b/private-include/indium/buffer.private.hpp
+@@ -13,10 +13,12 @@ namespace Indium {
+ 		size_t _length;
+ 		StorageMode _storageMode;
+ 		void* _mapped = nullptr;
++		bool _imported = false; // scion: memory imported from the caller (never unmapped)
+ 
+ 	public:
+ 		PrivateBuffer(std::shared_ptr<PrivateDevice> device, size_t length, ResourceOptions options);
+ 		PrivateBuffer(std::shared_ptr<PrivateDevice> device, const void* pointer, size_t length, ResourceOptions options);
++		PrivateBuffer(std::shared_ptr<PrivateDevice> device, void* hostPointer, size_t length, ResourceOptions options, bool noCopy);
+ 		~PrivateBuffer();
+ 
+ 		virtual std::shared_ptr<Device> device() override;
+diff --git a/private-include/indium/command-buffer.private.hpp b/private-include/indium/command-buffer.private.hpp
+index b7ffcce..4921449 100644
+--- a/private-include/indium/command-buffer.private.hpp
++++ b/private-include/indium/command-buffer.private.hpp
+@@ -22,6 +22,9 @@ namespace Indium {
+ 		std::vector<std::shared_ptr<Drawable>> _drawablesToPresent;
+ 		std::vector<Handler> _scheduledHandlers;
+ 		std::vector<Handler> _completedHandlers;
++	public:
++		std::vector<std::function<void()>> resultHandlers; // scion: run on completion before waiters and handlers see it (results the GPU leaves for the CPU to finish)
++	private:
+ 		bool _committed = false;
+ 		std::condition_variable _completedCondvar;
+ 		bool _completed = false;
+@@ -46,6 +49,18 @@ namespace Indium {
+ 		virtual std::shared_ptr<CommandQueue> commandQueue() override;
+ 		virtual std::shared_ptr<Device> device() override;
+ 
++		// scion: Metal orders the work of a command buffer (hazard tracking): a full memory barrier before each encoder and dispatch
++		void fullBarrier();
++
++		// scion: GPU timestamps (Metal 4 counter heaps, commit feedback): writeTimestamp() records one where the command
++		// buffer is now and returns its index (UINT32_MAX when full); after completion `timestamps` holds them in ns
++		uint32_t writeTimestamp();
++		std::vector<uint64_t> timestamps;
++	private:
++		VkQueryPool _timestampPool = VK_NULL_HANDLE;
++		uint32_t _timestampCount = 0;
++	public:
++
+ 		void addScheduledHandlerLocked(std::function<void(std::shared_ptr<CommandBuffer>)> handler);
+ 		void addCompletedHandlerLocked(std::function<void(std::shared_ptr<CommandBuffer>)> handler);
+ 
+@@ -53,5 +68,6 @@ namespace Indium {
+ 		INDIUM_PROPERTY_READONLY_OBJECT(PrivateDevice, p, P,rivateDevice);
+ 
+ 		INDIUM_PROPERTY(VkCommandBuffer, c, C,ommandBuffer) = VK_NULL_HANDLE;
++		VkCommandPool _commandPool = VK_NULL_HANDLE; // scion: one pool per command buffer (freed from the completion thread)
+ 	};
+ };
+diff --git a/private-include/indium/command-encoder.private.hpp b/private-include/indium/command-encoder.private.hpp
+index c3b1b93..598a596 100644
+--- a/private-include/indium/command-encoder.private.hpp
++++ b/private-include/indium/command-encoder.private.hpp
+@@ -68,19 +68,38 @@ namespace Indium {
+ 		};
+ 	};
+ 
++	// scion: bit n set = the function writes texture n through the UNORM view of an sRGB texture (pushed as a constant)
++	inline uint32_t srgbWriteMask(const FunctionResources& resources, const FunctionInfo& info) {
++		uint32_t mask = 0;
++		for (auto& b: info.bindings) {
++			if (b.type != Iridium::BindingType::Texture || b.textureAccessType == Iridium::TextureAccessType::Sample || b.index >= 32 || b.index >= resources.textures.size()) continue;
++			auto t = std::dynamic_pointer_cast<PrivateTexture>(resources.textures[b.index]);
++			if (t && t->srgbStorage()) mask |= 1u << b.index;
++		}
++		return mask;
++	}
++
++	// scion: an encoder allocates its descriptor sets from a list of pools, adding one when the last is full
++	// (drivers enforce maxSets: 64 sets is fewer than 32 draws)
++	inline VkDescriptorPool newDescriptorPool(VkDevice device);
++
+ 	template<size_t setCount>
+-	std::array<VkDescriptorSet, setCount> createDescriptorSets(std::array<VkDescriptorSetLayout, setCount>& setLayouts, VkDescriptorPool pool, std::shared_ptr<PrivateDevice> privateDevice, const std::array<std::reference_wrapper<const FunctionResources>, setCount>& funcResources, const std::array<std::reference_wrapper<const FunctionInfo>, setCount>& functionInfos, std::vector<std::shared_ptr<Buffer>>& keepAliveBuffers) {
++	std::array<VkDescriptorSet, setCount> createDescriptorSets(std::array<VkDescriptorSetLayout, setCount>& setLayouts, std::vector<VkDescriptorPool>& pools, std::shared_ptr<PrivateDevice> privateDevice, const std::array<std::reference_wrapper<const FunctionResources>, setCount>& funcResources, const std::array<std::reference_wrapper<const FunctionInfo>, setCount>& functionInfos, std::vector<std::shared_ptr<Buffer>>& keepAliveBuffers) {
+ 		std::array<VkDescriptorSet, setCount> descriptorSets {};
+ 
+ 		VkDescriptorSetAllocateInfo setAllocateInfo {};
+ 		setAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+-		setAllocateInfo.descriptorPool = pool;
+ 		setAllocateInfo.descriptorSetCount = descriptorSets.size();
+ 		setAllocateInfo.pSetLayouts = setLayouts.data();
+ 
++		if (pools.empty()) pools.push_back(newDescriptorPool(privateDevice->device()));
++		setAllocateInfo.descriptorPool = pools.back();
+ 		if (DynamicVK::vkAllocateDescriptorSets(privateDevice->device(), &setAllocateInfo, descriptorSets.data()) != VK_SUCCESS) {
+-			// TODO
+-			abort();
++			pools.push_back(newDescriptorPool(privateDevice->device()));
++			setAllocateInfo.descriptorPool = pools.back();
++			if (DynamicVK::vkAllocateDescriptorSets(privateDevice->device(), &setAllocateInfo, descriptorSets.data()) != VK_SUCCESS) {
++				throw std::runtime_error("vkAllocateDescriptorSets failed in a new pool");
++			}
+ 		}
+ 
+ 		for (size_t i = 0; i < descriptorSets.size(); ++i) {
+@@ -91,7 +110,11 @@ namespace Indium {
+ 			const FunctionResources& functionResources = funcResources[i];
+ 			const FunctionInfo& funcInfo = functionInfos[i];
+ 
+-			if (functionResources.buffers.size() > 0) {
++			// scion: only when the function has buffers (binding 0 is something else otherwise), and the address
++			// buffer holds exactly the function's buffers (it was sized by what the encoder had bound)
++			bool hasBuffers = false;
++			for (auto& b: funcInfo.bindings) if (b.type == Iridium::BindingType::Buffer) hasBuffers = true;
++			if (hasBuffers) {
+ 				std::vector<uint64_t> addresses;
+ 
+ 				// find the right buffer for each binding (using the binding index)
+@@ -108,10 +131,10 @@ namespace Indium {
+ 					}
+ 
+ 					auto privateBuf = std::dynamic_pointer_cast<PrivateBuffer>(functionResources.buffers[bindingInfo.index].first);
+-					addresses.push_back(privateBuf->gpuAddress() + functionResources.buffers[bindingInfo.index].second);
++					addresses.push_back(privateBuf ? privateBuf->gpuAddress() + functionResources.buffers[bindingInfo.index].second : 0);
+ 				}
+ 
+-				auto addressBuffer = privateDevice->newBuffer(addresses.data(), functionResources.buffers.size() * 8, ResourceOptions::StorageModeShared);
++				auto addressBuffer = privateDevice->newBuffer(addresses.data(), addresses.size() * 8, ResourceOptions::StorageModeShared);
+ 				auto privateAddrBuf = std::dynamic_pointer_cast<PrivateBuffer>(addressBuffer);
+ 
+ 				// we need to keep this buffer alive until the operation is completed
+@@ -144,7 +167,7 @@ namespace Indium {
+ 					auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
+ 
+ 					auto& info = imageInfos.emplace_front();
+-					info.imageView = privateTexture->imageView();
++					info.imageView = (bindingInfo.textureAccessType == Iridium::TextureAccessType::Sample) ? privateTexture->imageView() : privateTexture->storageView(); // scion
+ 					info.imageLayout = privateTexture->imageLayout();
+ 
+ 					auto& descSet = writeDescSet.emplace_back();
+@@ -194,4 +217,17 @@ namespace Indium {
+ 		VkDescriptorPoolSize { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 512 },
+ 		VkDescriptorPoolSize { VK_DESCRIPTOR_TYPE_SAMPLER, 512 },
+ 	};
++
++	inline VkDescriptorPool newDescriptorPool(VkDevice device) {
++		VkDescriptorPoolCreateInfo info {};
++		info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
++		info.poolSizeCount = poolSizes.size();
++		info.pPoolSizes = poolSizes.data();
++		info.maxSets = 64;
++		VkDescriptorPool pool = VK_NULL_HANDLE;
++		if (DynamicVK::vkCreateDescriptorPool(device, &info, nullptr, &pool) != VK_SUCCESS) {
++			throw std::runtime_error("vkCreateDescriptorPool failed");
++		}
++		return pool;
++	};
+ };
+diff --git a/private-include/indium/compute-command-encoder.private.hpp b/private-include/indium/compute-command-encoder.private.hpp
+index 8546daa..1d73071 100644
+--- a/private-include/indium/compute-command-encoder.private.hpp
++++ b/private-include/indium/compute-command-encoder.private.hpp
+@@ -14,7 +14,7 @@ namespace Indium {
+ 		ComputePassDescriptor _descriptor;
+ 		FunctionResources _functionResources;
+ 		std::shared_ptr<PrivateComputePipelineState> _pso;
+-		VkDescriptorPool _pool = VK_NULL_HANDLE;
++		std::vector<VkDescriptorPool> _pools; // scion: see createDescriptorSets
+ 
+ 		// XXX: not sure if we actually need to store pipelines until the command buffer finishes executing,
+ 		//      but let's do it just in case.
+@@ -47,6 +47,8 @@ namespace Indium {
+ 
+ 		virtual void dispatchThreadgroups(Size threadgroupsPerGrid, Size threadsPerThreadgroup) override;
+ 		virtual void dispatchThreads(Size threadsPerGrid, Size threadsPerThreadgroup) override;
++		void dispatch(Size threadgroupsPerGrid, Size threadsPerThreadgroup, Size gridLimit); // scion
++		void dispatchIndirect(std::shared_ptr<Buffer> indirectBuffer, size_t indirectOffset, Size threadsPerThreadgroup); // scion: VkDispatchIndirectCommand layout
+ 
+ 		virtual void setImageblockSize(size_t width, size_t height) override;
+ 
+diff --git a/private-include/indium/compute-pipeline.private.hpp b/private-include/indium/compute-pipeline.private.hpp
+index 759a4df..05bfe0d 100644
+--- a/private-include/indium/compute-pipeline.private.hpp
++++ b/private-include/indium/compute-pipeline.private.hpp
+@@ -20,7 +20,7 @@ namespace Indium {
+ 		// shader compilation time. however, Vulkan *does* allow it to be set with a specialization constant within the shader, which means
+ 		// that we can set it at pipeline-creation time. thus, we have to create a new pipeline with an updated set of specialization constants
+ 		// when dispatching the work.
+-		VkPipeline createPipeline(Size threadsPerThreadgroup);
++		VkPipeline createPipeline(Size threadsPerThreadgroup, Size gridLimit = {0, 0, 0}); // scion: gridLimit = real grid of a partial dispatch
+ 
+ 		const FunctionInfo& functionInfo() const;
+ 
+@@ -33,5 +33,6 @@ namespace Indium {
+ 
+ 		INDIUM_PROPERTY_REF(DescriptorSetLayouts<1>, d,D,escriptorSetLayouts);
+ 		INDIUM_PROPERTY_READONLY(VkPipelineLayout, l,L,ayout) = VK_NULL_HANDLE;
++		bool _require32 = false; // scion: 32-lane subgroups (Metal SIMD-group width)
+ 	};
+ };
+diff --git a/private-include/indium/device.private.hpp b/private-include/indium/device.private.hpp
+index 58f1794..433a7ec 100644
+--- a/private-include/indium/device.private.hpp
++++ b/private-include/indium/device.private.hpp
+@@ -36,14 +36,38 @@ namespace Indium {
+ 		std::vector<std::function<void()>> _eventLoopCallbacks;
+ 
+ 	public:
++		// scion: the memory type for a resource (SIZE_MAX: none), see device.cpp
++		size_t memoryTypeFor(uint32_t typeBits, StorageMode mode);
++		// scion: allocate from the first suitable type that has room (a full heap moves on to the next); throws when none
++		VkDeviceMemory allocate(VkMemoryRequirements req, StorageMode mode, const void* pNext, const char* what);
++
+ 		PrivateDevice(VkPhysicalDevice physicalDevice);
+ 		~PrivateDevice();
+ 
++		// scion: VK_EXT_extended_dynamic_state3 parts that Metal's encoder state needs (fill mode, depth clip mode)
++		bool dynamicPolygonMode = false;
++		bool dynamicDepthClamp = false;
++
++		// scion: bindless resources (Metal resource IDs in argument buffers): one descriptor set, bound as set 2 of every
++		// pipeline: binding 0 sampled images, 1 storage images, 2 samplers. A resource ID is its index there (0: none).
++		static constexpr uint32_t bindlessImageCount = 8192, bindlessSamplerCount = 1024, bindlessSetIndex = 2;
++		VkDescriptorSetLayout bindlessLayout = VK_NULL_HANDLE, emptyLayout = VK_NULL_HANDLE;
++		VkDescriptorPool bindlessPool = VK_NULL_HANDLE;
++		VkDescriptorSet bindlessSet = VK_NULL_HANDLE; // null: the GPU lacks descriptor indexing
++		std::mutex bindlessMutex;
++		std::vector<uint32_t> bindlessFree[2];
++		uint32_t bindlessNext[2] = { 1, 1 };
++		uint32_t bindlessAlloc(int kind); // 0 image, 1 sampler; 0 when full
++		void bindlessRelease(int kind, uint32_t index);
++		void bindlessWrite(uint32_t index, VkImageView sampledView, VkImageView storageView, VkSampler sampler);
++		void initBindless();
++
+ 		enum class Feature: uint64_t {
+ 			Swapchain           = 1 << 0,
+ 			ExternalMemoryFD    = 1 << 1,
+ 			ExternalSemaphoreFD = 1 << 2,
+ 			NonSemanticInfo     = 1 << 3,
++			ExternalMemoryHost  = 1 << 4, // scion: buffers over the caller's memory (newBufferWithBytesNoCopy)
+ 		};
+ 
+ 		friend inline Feature operator|(Feature lhs, Feature rhs) {
+@@ -65,6 +89,9 @@ namespace Indium {
+ 		virtual std::shared_ptr<ComputePipelineState> newComputePipelineState(std::shared_ptr<Function> computeFunction, PipelineOption options = PipelineOption::None, std::shared_ptr<ComputePipelineReflection> reflection = nullptr) override;
+ 		virtual std::shared_ptr<Buffer> newBuffer(size_t length, ResourceOptions options) override;
+ 		virtual std::shared_ptr<Buffer> newBuffer(const void* pointer, size_t length, ResourceOptions options) override;
++		// scion: a buffer over `pointer` itself (VK_EXT_external_memory_host); null when the device cannot import it
++		std::shared_ptr<Buffer> newBufferNoCopy(void* pointer, size_t length, ResourceOptions options);
++		uint64_t hostPointerAlignment = 0;
+ 		virtual std::shared_ptr<Library> newLibrary(const void* data, size_t length) override;
+ 		virtual std::shared_ptr<Texture> newTexture(const TextureDescriptor& descriptor) override;
+ 		virtual std::shared_ptr<SamplerState> newSamplerState(const SamplerDescriptor& descriptor) override;
+@@ -89,6 +116,8 @@ namespace Indium {
+ 		std::shared_ptr<TimelineSemaphore> getWrappedTimelineSemaphore();
+ 
+ 		BinarySemaphore getBinarySemaphore(bool exportable = false);
++		// scion: VkQueue and the oneshot command pool need external synchronization (Metal is multithreaded)
++		std::mutex queueMutex;
+ 		void putBinarySemaphore(const BinarySemaphore& semaphore);
+ 
+ 		std::shared_ptr<BinarySemaphore> getWrappedBinarySemaphore(bool exportable = false);
+diff --git a/private-include/indium/dynamic-vk.hpp b/private-include/indium/dynamic-vk.hpp
+index 4957eca..2390d15 100644
+--- a/private-include/indium/dynamic-vk.hpp
++++ b/private-include/indium/dynamic-vk.hpp
+@@ -67,6 +67,19 @@ namespace Indium {
+ 		};
+ 
+ 		#define INDIUM_DYNAMICVK_FUNCTION_FOREACH(_macro) \
++			_macro(vkCmdSetPolygonModeEXT) \
++			_macro(vkCmdPushConstants) \
++			_macro(vkCmdWriteTimestamp) \
++			_macro(vkCmdDrawIndirect) \
++			_macro(vkCmdDrawIndexedIndirect) \
++			_macro(vkCmdDispatchIndirect) \
++			_macro(vkCreateQueryPool) \
++			_macro(vkDestroyQueryPool) \
++			_macro(vkResetQueryPool) \
++			_macro(vkCmdBeginQuery) \
++			_macro(vkCmdEndQuery) \
++			_macro(vkGetQueryPoolResults) \
++			_macro(vkCmdSetDepthClampEnableEXT) \
+ 			_macro(vkAcquireNextImageKHR) \
+ 			_macro(vkAllocateCommandBuffers) \
+ 			_macro(vkAllocateDescriptorSets) \
+@@ -95,6 +108,7 @@ namespace Indium {
+ 			_macro(vkCmdSetDepthBias) \
+ 			_macro(vkCmdSetDepthBiasEnable) \
+ 			_macro(vkCmdSetDepthBoundsTestEnable) \
++			_macro(vkCmdSetDepthBounds) \
+ 			_macro(vkCmdSetDepthCompareOp) \
+ 			_macro(vkCmdSetDepthTestEnable) \
+ 			_macro(vkCmdSetDepthWriteEnable) \
+@@ -145,6 +159,7 @@ namespace Indium {
+ 			_macro(vkDestroyShaderModule) \
+ 			_macro(vkDestroySurfaceKHR) \
+ 			_macro(vkDestroySwapchainKHR) \
++			_macro(vkDeviceWaitIdle) \
+ 			_macro(vkEndCommandBuffer) \
+ 			_macro(vkEnumerateDeviceExtensionProperties) \
+ 			_macro(vkEnumeratePhysicalDevices) \
+@@ -153,9 +168,11 @@ namespace Indium {
+ 			_macro(vkFreeMemory) \
+ 			_macro(vkGetBufferDeviceAddress) \
+ 			_macro(vkGetBufferMemoryRequirements) \
++			_macro(vkGetMemoryHostPointerPropertiesEXT) \
+ 			_macro(vkGetDeviceQueue) \
+ 			_macro(vkGetImageMemoryRequirements) \
+ 			_macro(vkGetPhysicalDeviceFeatures2) \
++			_macro(vkGetPhysicalDeviceFormatProperties) \
+ 			_macro(vkGetPhysicalDeviceMemoryProperties) \
+ 			_macro(vkGetPhysicalDeviceProperties) \
+ 			_macro(vkGetPhysicalDeviceProperties2) \
+diff --git a/private-include/indium/library.private.hpp b/private-include/indium/library.private.hpp
+index 8752aa2..23c81fd 100644
+--- a/private-include/indium/library.private.hpp
++++ b/private-include/indium/library.private.hpp
+@@ -7,6 +7,8 @@
+ #include <unordered_map>
+ #include <string>
+ #include <vector>
++#include <map>
++#include <array>
+ 
+ #include <indium/types.hpp>
+ 
+@@ -26,6 +28,10 @@ namespace Indium {
+ 		std::vector<Iridium::BindingInfo> bindings;
+ 		std::vector<Iridium::EmbeddedSampler> embeddedSamplers;
+ 		std::vector<std::shared_ptr<SamplerState>> embeddedSamplerStates;
++		std::vector<std::pair<std::string, size_t>> functionConstants; // scion: Metal function constants (name, index)
++		bool writesDepth = false; // scion
++		std::map<size_t, std::vector<std::array<int64_t, 4>>> argumentIds; // scion: see Iridium::FunctionInfo
++		std::map<size_t, size_t> argumentSizes;
+ 	};
+ 
+ 	class PrivateFunction: public Function {
+@@ -38,6 +44,34 @@ namespace Indium {
+ 
+ 		INDIUM_PROPERTY_OBJECT(PrivateLibrary, l, L,ibrary);
+ 		INDIUM_PROPERTY_READONLY(const FunctionInfo&, f, F,unctionInfo);
++
++	public:
++		// scion: Metal function constant values (index, 32-bit value) -> Vulkan specialization constants 1000 + index,
++		// after `prefix` constants 0..n-1 (the compute local size)
++		std::vector<std::pair<uint32_t, uint32_t>> specConstants;
++		std::vector<VkSpecializationMapEntry> specEntries;
++		std::vector<uint32_t> specData;
++		VkSpecializationInfo specInfo {};
++		const VkSpecializationInfo* specializationInfo(const uint32_t* prefix = nullptr, uint32_t prefixCount = 0) {
++			specEntries.clear();
++			specData.clear();
++			for (uint32_t i = 0; i < prefixCount; ++i) {
++				specEntries.push_back({ i, uint32_t(specData.size() * 4), 4 });
++				specData.push_back(prefix[i]);
++			}
++			for (const auto& [index, value]: specConstants) {
++				specEntries.push_back({ 1000 + index, uint32_t(specData.size() * 4), 4 });
++				specData.push_back(value);
++			}
++			if (specEntries.empty()) {
++				return nullptr;
++			}
++			specInfo.mapEntryCount = specEntries.size();
++			specInfo.pMapEntries = specEntries.data();
++			specInfo.dataSize = specData.size() * 4;
++			specInfo.pData = specData.data();
++			return &specInfo;
++		};
+ 	};
+ 
+ 	class PrivateLibrary: public Library, public std::enable_shared_from_this<PrivateLibrary> {
+diff --git a/private-include/indium/pipeline.private.hpp b/private-include/indium/pipeline.private.hpp
+index a43f532..611c6fe 100644
+--- a/private-include/indium/pipeline.private.hpp
++++ b/private-include/indium/pipeline.private.hpp
+@@ -39,7 +39,8 @@ namespace Indium {
+ 
+ 			bool needUBO = false;
+ 
+-			for (const auto bindingInfo: function->functionInfo().bindings) {
++			static const FunctionInfo none {}; // scion: a render pipeline may have no fragment function
++			for (const auto bindingInfo: (function ? function->functionInfo() : none).bindings) {
+ 				if (bindingInfo.type == Iridium::BindingType::Buffer) {
+ 					needUBO = true;
+ 				} else if (bindingInfo.type == Iridium::BindingType::Texture) {
+diff --git a/private-include/indium/render-command-encoder.private.hpp b/private-include/indium/render-command-encoder.private.hpp
+index a41b951..6a637fe 100644
+--- a/private-include/indium/render-command-encoder.private.hpp
++++ b/private-include/indium/render-command-encoder.private.hpp
+@@ -27,8 +27,22 @@ namespace Indium {
+ 		std::shared_ptr<PrivateDevice> _privateDevice;
+ 		std::shared_ptr<PrivateRenderPipelineState> _privatePSO;
+ 		VkFramebuffer _framebuffer = VK_NULL_HANDLE;
++		std::vector<VkImageView> _attachmentViews; // scion
++		// scion: visibility results = one occlusion query per setVisibilityResultMode span, summed per offset on completion
++		VkQueryPool _visPool = VK_NULL_HANDLE;
++		uint32_t _visUsed = 0;
++		bool _visActive = false;
++		std::vector<std::pair<size_t, bool>> _visSlots; // buffer offset, boolean mode
++		VkImageView attachmentView(const RenderPassAttachmentDescriptor& attachment);
+ 		VkRenderPass _renderPass = VK_NULL_HANDLE;
+-		VkDescriptorPool _pool = VK_NULL_HANDLE;
++		VkRenderPass _loadPass = VK_NULL_HANDLE; // scion: barrier()
++		std::vector<VkAttachmentDescription> _attachmentDescs;
++		std::vector<VkAttachmentReference> _colorRefs;
++		bool _hasDS = false;
++		uint32_t _passWidth = 0, _passHeight = 0;
++		size_t _viewportCount = 1; // scion: scissors follow the viewport count
++		std::vector<ScissorRect> _scissors;
++		std::vector<VkDescriptorPool> _pools; // scion: see createDescriptorSets
+ 
+ 		std::vector<FunctionResources> _savedFunctionResources;
+ 
+@@ -58,10 +72,13 @@ namespace Indium {
+ 		virtual void setStencilReferenceValue(uint32_t value) override;
+ 		virtual void setStencilReferenceValue(uint32_t front, uint32_t back) override;
+ 		virtual void setVisibilityResultMode(VisibilityResultMode mode, size_t offset) override;
++		virtual void barrier() override;
+ 
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount, size_t baseInstance) override;
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) override;
+ 		virtual void drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount) override;
++		// scion: Metal's indirect argument layouts are Vulkan's (VkDraw[Indexed]IndirectCommand); no index buffer: not indexed
++		void drawIndirect(PrimitiveType primitiveType, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, std::shared_ptr<Buffer> indirectBuffer, size_t indirectOffset);
+ 
+ 		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount, int64_t baseVertex, size_t baseInstance) override;
+ 		virtual void drawIndexedPrimitives(PrimitiveType primitiveType, size_t indexCount, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, size_t instanceCount) override;
+diff --git a/private-include/indium/sampler.private.hpp b/private-include/indium/sampler.private.hpp
+index 8969b26..2bf4252 100644
+--- a/private-include/indium/sampler.private.hpp
++++ b/private-include/indium/sampler.private.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <vulkan/vulkan.h>
++#include <mutex>
+ 
+ #include <indium/sampler.hpp>
+ 
+@@ -20,6 +21,11 @@ namespace Indium {
+ 
+ 		std::shared_ptr<PrivateSamplerState> cloneWithClamps(float lodMinClamp, float lodMaxClamp);
+ 
++		// scion: this sampler's slot in the device's bindless table (its Metal resource ID); 0: none
++		uint32_t bindlessIndex();
++		uint32_t _bindless = 0;
++		std::once_flag _bindlessOnce;
++
+ 		INDIUM_PROPERTY(VkSampler, s, S,ampler) = VK_NULL_HANDLE;
+ 	};
+ };
+diff --git a/private-include/indium/texture.private.hpp b/private-include/indium/texture.private.hpp
+index ccc27bb..894bd99 100644
+--- a/private-include/indium/texture.private.hpp
++++ b/private-include/indium/texture.private.hpp
+@@ -31,6 +31,16 @@ namespace Indium {
+ 		explicit PrivateTexture(std::shared_ptr<PrivateDevice> device);
+ 		virtual ~PrivateTexture() = 0;
+ 
++		// scion: this texture's slot in the device's bindless table (its Metal resource ID), made on first use; 0: none
++		uint32_t bindlessIndex();
++		// scion: the view shaders write through (an sRGB texture: a UNORM view, and the shader encodes; see air2spv srgbEncode)
++		virtual VkImageView storageView() { return imageView(); }
++		virtual bool srgbStorage() const { return false; }
++	private:
++		std::once_flag _bindlessOnce;
++		uint32_t _bindless = 0;
++	public:
++
+ 		virtual std::shared_ptr<Texture> newTextureView(PixelFormat pixelFormat) override;
+ 		virtual std::shared_ptr<Texture> newTextureView(PixelFormat pixelFormat, TextureType textureType, const Range<size_t>& levels, const Range<size_t>& layers) override;
+ 		virtual std::shared_ptr<Texture> newTextureView(PixelFormat pixelFormat, TextureType textureType, const Range<size_t>& levels, const Range<size_t>& layers, const TextureSwizzleChannels& swizzle) override;
+@@ -80,6 +90,8 @@ namespace Indium {
+ 		 *                         then you don't actually need to signal the semaphore when you're done.
+ 		 */
+ 		virtual const TimelineSemaphore& acquire(uint64_t& waitValue, std::shared_ptr<BinarySemaphore>& extraWaitSemaphore, uint64_t& signalValue);
++		/** The texture that owns the image and its synchronization (a view's original). */
++		virtual PrivateTexture* root() { return this; }
+ 
+ 		// TODO: optimize this better to avoid blocking callers of `synchronizePresentation` while someone is updating the presentation semaphore
+ 		virtual void beginUpdatingPresentationSemaphore(std::shared_ptr<BinarySemaphore> presentationSemaphore);
+@@ -130,6 +142,7 @@ namespace Indium {
+ 		virtual VkImageLayout imageLayout() override;
+ 
+ 		virtual const TimelineSemaphore& acquire(uint64_t& waitValue, std::shared_ptr<BinarySemaphore>& extraWaitSemaphore, uint64_t& signalValue) override;
++		virtual PrivateTexture* root() override { return _original->root(); }
+ 		virtual void beginUpdatingPresentationSemaphore(std::shared_ptr<BinarySemaphore> presentationSemaphore) override;
+ 		virtual void endUpdatingPresentationSemaphore() override;
+ 		virtual std::shared_ptr<BinarySemaphore> synchronizePresentation() override;
+@@ -148,6 +161,8 @@ namespace Indium {
+ 		TextureDescriptor _descriptor;
+ 		VkImage _image;
+ 		VkImageView _imageView;
++		VkImageView _storageView = VK_NULL_HANDLE; // scion: UNORM view of an sRGB texture
++		VkFormat _srgbUnorm = VK_FORMAT_UNDEFINED;
+ 		VkDeviceMemory _memory;
+ 		StorageMode _storageMode;
+ 
+@@ -155,6 +170,8 @@ namespace Indium {
+ 		ConcreteTexture(std::shared_ptr<PrivateDevice> device, const TextureDescriptor& descriptor);
+ 		virtual ~ConcreteTexture();
+ 
++		virtual VkImageView storageView() override { return _storageView ? _storageView : _imageView; }
++		virtual bool srgbStorage() const override { return _storageView != VK_NULL_HANDLE; }
+ 		virtual TextureType textureType() const override;
+ 		virtual PixelFormat pixelFormat() const override;
+ 		virtual size_t width() const override;
+diff --git a/private-include/indium/types.private.hpp b/private-include/indium/types.private.hpp
+index d49b5f4..9ac1380 100644
+--- a/private-include/indium/types.private.hpp
++++ b/private-include/indium/types.private.hpp
+@@ -716,8 +716,9 @@ namespace Indium {
+ 			case VertexFormat::UInt2:                 return VK_FORMAT_R32G32_UINT;
+ 			case VertexFormat::UInt3:                 return VK_FORMAT_R32G32B32_UINT;
+ 			case VertexFormat::UInt4:                 return VK_FORMAT_R32G32B32A32_UINT;
+-			case VertexFormat::Int1010102Normalized:  return VK_FORMAT_A2R10G10B10_SINT_PACK32;
+-			case VertexFormat::UInt1010102Normalized: return VK_FORMAT_A2R10G10B10_UINT_PACK32;
++			// scion: normalized, red in the low bits (was A2R10G10B10 *INT: integers, red and blue swapped)
++			case VertexFormat::Int1010102Normalized:  return VK_FORMAT_A2B10G10R10_SNORM_PACK32;
++			case VertexFormat::UInt1010102Normalized: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+ 			case VertexFormat::UChar4Normalized_BGRA: return VK_FORMAT_B8G8R8A8_UNORM;
+ 			case VertexFormat::UChar:                 return VK_FORMAT_R8_UINT;
+ 			case VertexFormat::Char:                  return VK_FORMAT_R8_SINT;
+@@ -728,6 +729,8 @@ namespace Indium {
+ 			case VertexFormat::UShortNormalized:      return VK_FORMAT_R16_UNORM;
+ 			case VertexFormat::ShortNormalized:       return VK_FORMAT_R16_SNORM;
+ 			case VertexFormat::Half:                  return VK_FORMAT_R16_SFLOAT;
++			case VertexFormat::FloatRG11B10:          return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
++			case VertexFormat::FloatRGB9E5:           return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+ 		}
+ 		throw BadEnumValue();
+ 	};
+diff --git a/private-include/iridium/air.hpp b/private-include/iridium/air.hpp
+index 1ba86b7..2bb65ee 100644
+--- a/private-include/iridium/air.hpp
++++ b/private-include/iridium/air.hpp
+@@ -41,6 +41,7 @@ namespace Iridium {
+ 			size_t _positionOutputIndex = SIZE_MAX;
+ 			size_t _vertexIDInputIndex = SIZE_MAX;
+ 			std::vector<SPIRV::ResultID> _outputValueIDs;
++			std::vector<SPIRV::ResultID> _outputTypes; // non-zero: output widened from half to float (store needs OpFConvert)
+ 			std::vector<SPIRV::ResultID> _parameterIDs;
+ 
+ 		public:
+diff --git a/src/indium-kit/layer.cpp b/src/indium-kit/layer.cpp
+index 8d00405..bad18d8 100644
+--- a/src/indium-kit/layer.cpp
++++ b/src/indium-kit/layer.cpp
+@@ -1,6 +1,8 @@
+ #include <indium-kit/layer.private.hpp>
+ #include <indium/dynamic-vk.hpp>
+ #include <stdexcept>
++#include <algorithm>
++#include <cstdio>
+ 
+ namespace DynamicVK = Indium::DynamicVK;
+ 
+@@ -105,10 +107,12 @@ void IndiumKit::PrivateDrawable::present() {
+ 	info.pImageIndices = &_swapchainImageIndex;
+ 	info.pResults = nullptr;
+ 
+-	if (DynamicVK::vkQueuePresentKHR(privateDevice->graphicsQueue(), &info) != VK_SUCCESS) {
+-		// TODO
+-		abort();
++	// out-of-date / minimized windows just drop the frame (scion: no abort)
++	{
++		std::scoped_lock qlock(privateDevice->queueMutex);
++		DynamicVK::vkQueuePresentKHR(privateDevice->graphicsQueue(), &info);
+ 	}
++	_layer->presentSemaphores[_swapchainImageIndex] = sema;
+ };
+ 
+ void IndiumKit::PrivateDrawable::replaceRegion(Indium::Region region, size_t mipmapLevel, const void* bytes, size_t bytesPerRow) {
+@@ -127,6 +131,8 @@ IndiumKit::PrivateLayer::PrivateLayer(VkSurfaceKHR surface, std::shared_ptr<Indi
+ 	_surface(surface),
+ 	_device(device),
+ 	_width(framebufferWidth),
++	_requestedWidth(framebufferWidth),
++	_requestedHeight(framebufferHeight),
+ 	_height(framebufferHeight)
+ {
+ 	auto privateDevice = std::dynamic_pointer_cast<Indium::PrivateDevice>(device);
+@@ -134,47 +140,84 @@ IndiumKit::PrivateLayer::PrivateLayer(VkSurfaceKHR surface, std::shared_ptr<Indi
+ 	if (!(privateDevice->features() & Indium::PrivateDevice::Feature::Swapchain)) {
+ 		throw std::runtime_error("Device does not support swapchains");
+ 	}
++	createSwapchain();
++};
++
++// scion: the swapchain is rebuilt when the window is resized or the pixel format changes
++void IndiumKit::PrivateLayer::destroySwapchain(bool keepSwapchain) {
++	auto privateDevice = std::dynamic_pointer_cast<Indium::PrivateDevice>(_device);
++	{
++		std::scoped_lock qlock(privateDevice->queueMutex);
++		DynamicVK::vkDeviceWaitIdle(privateDevice->device());
++	}
++	for (auto& imageView: _imageViews) {
++		DynamicVK::vkDestroyImageView(privateDevice->device(), imageView, nullptr);
++	}
++	_imageViews.clear();
++	_images.clear();
++	// a present may still hold its wait semaphore after the device is idle: keep the last generation alive
++	retiredSemaphores = std::move(presentSemaphores);
++	presentSemaphores.clear();
++	if (!keepSwapchain && _swapchain) {
++		DynamicVK::vkDestroySwapchainKHR(privateDevice->device(), _swapchain, nullptr);
++		_swapchain = VK_NULL_HANDLE;
++	}
++};
+ 
++void IndiumKit::PrivateLayer::createSwapchain() {
++	auto privateDevice = std::dynamic_pointer_cast<Indium::PrivateDevice>(_device);
+ 	VkSurfaceCapabilitiesKHR surfaceCaps;
+ 
+ 	DynamicVK::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(privateDevice->physicalDevice(), _surface, &surfaceCaps);
+ 
+-	std::vector<VkPresentModeKHR> presentModes;
+ 	std::vector<VkSurfaceFormatKHR> surfaceFormats;
+ 	uint32_t count;
+ 
+-	DynamicVK::vkGetPhysicalDeviceSurfacePresentModesKHR(privateDevice->physicalDevice(), _surface, &count, nullptr);
+-	presentModes.resize(count);
+-	DynamicVK::vkGetPhysicalDeviceSurfacePresentModesKHR(privateDevice->physicalDevice(), _surface, &count, presentModes.data());
+-
+ 	DynamicVK::vkGetPhysicalDeviceSurfaceFormatsKHR(privateDevice->physicalDevice(), _surface, &count, nullptr);
+-	surfaceFormats.reserve(count);
++	surfaceFormats.resize(count);
+ 	DynamicVK::vkGetPhysicalDeviceSurfaceFormatsKHR(privateDevice->physicalDevice(), _surface, &count, surfaceFormats.data());
+ 
++	// the requested format if the surface can show it, otherwise BGRA8 (the app's pipelines must then match it)
++	VkFormat want = Indium::pixelFormatToVkFormat(_pixelFormat);
++	VkColorSpaceKHR colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++	bool found = false;
++	for (auto& f: surfaceFormats) {
++		if (f.format == want && (!found || f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)) { found = true; colorSpace = f.colorSpace; }
++	}
++	if (!found) {
++		fprintf(stderr, "scion-metal: the window does not take pixel format %d; using BGRA8Unorm\n", (int)_pixelFormat);
++		_pixelFormat = Indium::PixelFormat::BGRA8Unorm;
++	}
++
++	VkSwapchainKHR old = _swapchain;
+ 	VkSwapchainCreateInfoKHR swapchainInfo {};
+ 	swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+ 	swapchainInfo.surface = _surface;
+-	swapchainInfo.minImageCount = 5;
++	swapchainInfo.minImageCount = std::max(3u, surfaceCaps.minImageCount);
++	if (surfaceCaps.maxImageCount && swapchainInfo.minImageCount > surfaceCaps.maxImageCount) swapchainInfo.minImageCount = surfaceCaps.maxImageCount;
++	if (surfaceCaps.currentExtent.width != UINT32_MAX) { _width = surfaceCaps.currentExtent.width; _height = surfaceCaps.currentExtent.height; }
++	if (_width == 0 || _height == 0) { _width = std::max<size_t>(_width, 1); _height = std::max<size_t>(_height, 1); }
+ 	swapchainInfo.imageFormat = Indium::pixelFormatToVkFormat(_pixelFormat);
+-	swapchainInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++	swapchainInfo.imageColorSpace = colorSpace;
+ 	swapchainInfo.imageExtent.width = _width;
+ 	swapchainInfo.imageExtent.height = _height;
+ 	swapchainInfo.imageArrayLayers = 1;
+-	swapchainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++	swapchainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (surfaceCaps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+ 	swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+ 	swapchainInfo.preTransform = surfaceCaps.currentTransform;
+ 	swapchainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+-	// TODO: allow vsync to be configured
+-	swapchainInfo.presentMode = /*(std::find(presentModes.begin(), presentModes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != presentModes.end()) ? VK_PRESENT_MODE_MAILBOX_KHR :*/ VK_PRESENT_MODE_FIFO_KHR;
++	swapchainInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+ 	swapchainInfo.clipped = VK_TRUE;
++	swapchainInfo.oldSwapchain = old;
+ 
+ 	if (DynamicVK::vkCreateSwapchainKHR(privateDevice->device(), &swapchainInfo, nullptr, &_swapchain) != VK_SUCCESS) {
+-		// TODO
+-		abort();
++		throw std::runtime_error("vkCreateSwapchainKHR");
+ 	}
++	if (old) DynamicVK::vkDestroySwapchainKHR(privateDevice->device(), old, nullptr);
+ 
+ 	DynamicVK::vkGetSwapchainImagesKHR(privateDevice->device(), _swapchain, &count, nullptr);
+ 	_images.resize(count);
++	presentSemaphores.resize(count);
+ 	DynamicVK::vkGetSwapchainImagesKHR(privateDevice->device(), _swapchain, &count, _images.data());
+ 
+ 	for (auto& image: _images) {
+@@ -195,37 +238,50 @@ IndiumKit::PrivateLayer::PrivateLayer(VkSurfaceKHR surface, std::shared_ptr<Indi
+ 		viewInfo.subresourceRange.layerCount = 1;
+ 
+ 		if (DynamicVK::vkCreateImageView(privateDevice->device(), &viewInfo, nullptr, &_imageViews.emplace_back()) != VK_SUCCESS) {
+-			// TODO
+-			abort();
++			throw std::runtime_error("vkCreateImageView (swapchain)");
+ 		}
+ 	}
+ };
+ 
+-IndiumKit::PrivateLayer::~PrivateLayer() {
+-	auto privateDevice = std::dynamic_pointer_cast<Indium::PrivateDevice>(_device);
+-
+-	for (auto& imageView: _imageViews) {
+-		DynamicVK::vkDestroyImageView(privateDevice->device(), imageView, nullptr);
+-	}
+-
+-	DynamicVK::vkDestroySwapchainKHR(privateDevice->device(), _swapchain, nullptr);
++void IndiumKit::PrivateLayer::resize(size_t width, size_t height) {
++	// compare with what was asked last time: the surface may round the size differently (DPI), and rebuilding the
++	// swapchain every frame because of that would be slow and fragile
++	if (width == _requestedWidth && height == _requestedHeight) return;
++	_requestedWidth = width;
++	_requestedHeight = height;
++	if (width == _width && height == _height) return;
++	_width = width;
++	_height = height;
++	destroySwapchain(false);
++	createSwapchain();
++};
+ 
++IndiumKit::PrivateLayer::~PrivateLayer() {
++	destroySwapchain(false);
+ 	DynamicVK::vkDestroySurfaceKHR(Indium::globalInstance, _surface, nullptr);
+ };
+ 
+ std::shared_ptr<IndiumKit::Drawable> IndiumKit::PrivateLayer::nextDrawable() {
+ 	auto privateDevice = std::dynamic_pointer_cast<Indium::PrivateDevice>(_device);
+-	auto binarySemaphore = privateDevice->getWrappedBinarySemaphore();
+-	uint32_t index;
++	for (int attempt = 0; attempt < 2; attempt++) {
++		auto binarySemaphore = privateDevice->getWrappedBinarySemaphore();
++		uint32_t index;
+ 
+-	auto result = DynamicVK::vkAcquireNextImageKHR(privateDevice->device(), _swapchain, /* 1 sec = 1e9 nsec */ 1000000000ULL, binarySemaphore->semaphore, nullptr, &index);
++		auto result = DynamicVK::vkAcquireNextImageKHR(privateDevice->device(), _swapchain, /* 1 sec = 1e9 nsec */ 1000000000ULL, binarySemaphore->semaphore, nullptr, &index);
+ 
+-	if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+-		// none was available
+-		return nullptr;
+-	}
++		if (result == VK_ERROR_OUT_OF_DATE_KHR) { // the window changed under us: rebuild and try again
++			destroySwapchain(false);
++			createSwapchain();
++			continue;
++		}
++		if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
++			// none was available
++			return nullptr;
++		}
+ 
+-	return std::make_shared<IndiumKit::PrivateDrawable>(shared_from_this(), _swapchain, index, _imageViews[index], _images[index], binarySemaphore, _width, _height, _pixelFormat);
++		return std::make_shared<IndiumKit::PrivateDrawable>(shared_from_this(), _swapchain, index, _imageViews[index], _images[index], binarySemaphore, _width, _height, _pixelFormat);
++	}
++	return nullptr;
+ };
+ 
+ Indium::PixelFormat IndiumKit::PrivateLayer::pixelFormat() {
+@@ -233,8 +289,10 @@ Indium::PixelFormat IndiumKit::PrivateLayer::pixelFormat() {
+ };
+ 
+ void IndiumKit::PrivateLayer::setPixelFormat(Indium::PixelFormat pixelFormat) {
+-	// TODO
+-	abort();
++	if (pixelFormat == _pixelFormat) return;
++	_pixelFormat = pixelFormat;
++	destroySwapchain(false);
++	createSwapchain();
+ };
+ 
+ std::shared_ptr<Indium::Device> IndiumKit::PrivateLayer::device() {
+diff --git a/src/indium/blit-command-encoder.cpp b/src/indium/blit-command-encoder.cpp
+index e58f0ba..0091574 100644
+--- a/src/indium/blit-command-encoder.cpp
++++ b/src/indium/blit-command-encoder.cpp
+@@ -23,6 +23,8 @@ Indium::PrivateBlitCommandEncoder::~PrivateBlitCommandEncoder() {
+ 
+ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t size) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(source); _keepAlive.push_back(destination);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
+ 	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
+ 
+@@ -37,18 +39,49 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 	DynamicVK::vkCmdCopyBuffer(cmdbuf->commandBuffer(), privateSource->buffer(), privateDest->buffer(), 1, &info);
+ };
+ 
++// scion: block-compressed formats: bytes per block and block size in texels (false: not compressed)
++static bool blockInfo(VkFormat f, size_t& bytes, uint32_t& bw, uint32_t& bh) {
++	bw = bh = 4;
++	if (f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK) {
++		bytes = (f <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK || f == VK_FORMAT_BC4_UNORM_BLOCK || f == VK_FORMAT_BC4_SNORM_BLOCK) ? 8 : 16;
++		return true;
++	}
++	if (f >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK && f <= VK_FORMAT_EAC_R11G11_SNORM_BLOCK) {
++		bytes = (f <= VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK || f == VK_FORMAT_EAC_R11_UNORM_BLOCK || f == VK_FORMAT_EAC_R11_SNORM_BLOCK) ? 8 : 16;
++		return true;
++	}
++	if (f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) {
++		static const uint8_t dims[14][2] = {{4,4},{5,4},{5,5},{6,5},{6,6},{8,5},{8,6},{8,8},{10,5},{10,6},{10,8},{10,10},{12,10},{12,12}};
++		auto d = dims[(f - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) / 2];
++		bytes = 16; bw = d[0]; bh = d[1];
++		return true;
++	}
++	bw = bh = 1;
++	return false;
++}
++
++// scion: the aspect a buffer<->texture copy moves (one plane of a depth/stencil format, chosen by the blit options)
++// and its bytes per texel there (0: tightly packed rows, e.g. compressed formats)
++static VkImageAspectFlags copyAspect(Indium::PixelFormat f, Indium::BlitOption o, size_t& bytes) {
++	auto all = Indium::pixelFormatToVkImageAspectFlags(f);
++	bool ds = (all & VK_IMAGE_ASPECT_DEPTH_BIT) && (all & VK_IMAGE_ASPECT_STENCIL_BIT);
++	bool stencil = (all == VK_IMAGE_ASPECT_STENCIL_BIT) || (ds && (o & Indium::BlitOption::StencilFromDepthStencil) != Indium::BlitOption::None);
++	if (stencil) { bytes = 1; return VK_IMAGE_ASPECT_STENCIL_BIT; }
++	if (all & VK_IMAGE_ASPECT_DEPTH_BIT) { bytes = f == Indium::PixelFormat::Depth16Unorm ? 2 : 4; return VK_IMAGE_ASPECT_DEPTH_BIT; }
++	bytes = Indium::pixelFormatToByteCount(f);
++	return all;
++}
++
+ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, size_t sourceOffset, size_t sourceBytesPerRow, size_t sourceBytesPerImage, Size sourceSize, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, BlitOption options) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(source); _keepAlive.push_back(destination);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateSource = std::dynamic_pointer_cast<PrivateBuffer>(source);
+ 	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
+ 
+-	if (options != BlitOption::None) {
+-		throw std::runtime_error("TODO: support blit options");
+-	}
+-
+ 	auto aspect = pixelFormatToVkImageAspectFlags(privateDest->pixelFormat());
+-	// FIXME: handle compressed formats
+-	size_t bytesPerPixel = pixelFormatToByteCount(privateDest->pixelFormat());
++	size_t bytesPerPixel = 0;
++	auto copyAspectBits = copyAspect(privateDest->pixelFormat(), options, bytesPerPixel);
+ 
+ 	// first, transition the image to the optimal layout for transfer destinations
+ 	VkImageMemoryBarrier barrier {};
+@@ -71,10 +104,12 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 
+ 	// now encode the copy
+ 	VkBufferImageCopy copyInfo {};
+-	copyInfo.bufferOffset = 0;
+-	copyInfo.bufferRowLength = sourceBytesPerRow / bytesPerPixel;
+-	copyInfo.bufferImageHeight = sourceBytesPerImage / sourceBytesPerRow;
+-	copyInfo.imageSubresource.aspectMask = aspect;
++	copyInfo.bufferOffset = sourceOffset;
++	size_t blockBytes; uint32_t bw, bh;
++	if (blockInfo(pixelFormatToVkFormat(privateDest->pixelFormat()), blockBytes, bw, bh)) { bytesPerPixel = blockBytes; } // per block row, below
++	copyInfo.bufferRowLength = bytesPerPixel ? sourceBytesPerRow / bytesPerPixel * bw : 0;
++	copyInfo.bufferImageHeight = sourceBytesPerRow ? sourceBytesPerImage / sourceBytesPerRow * bh : 0;
++	copyInfo.imageSubresource.aspectMask = copyAspectBits;
+ 	copyInfo.imageSubresource.mipLevel = destinationLevel;
+ 	copyInfo.imageSubresource.baseArrayLayer = destinationSlice;
+ 	copyInfo.imageSubresource.layerCount = 1;
+@@ -97,16 +132,14 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Buffer> source, siz
+ 
+ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, Size sourceSize, std::shared_ptr<Buffer> destination, size_t destinationOffset, size_t destinationBytesPerRow, size_t destinationBytesPerImage, BlitOption options) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(source); _keepAlive.push_back(destination);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+ 	auto privateDest = std::dynamic_pointer_cast<PrivateBuffer>(destination);
+ 
+-	if (options != BlitOption::None) {
+-		throw std::runtime_error("TODO: support blit options");
+-	}
+-
+ 	auto aspect = pixelFormatToVkImageAspectFlags(privateSource->pixelFormat());
+-	// FIXME: handle compressed formats
+-	size_t bytesPerPixel = pixelFormatToByteCount(privateSource->pixelFormat());
++	size_t bytesPerPixel = 0;
++	auto copyAspectBits = copyAspect(privateSource->pixelFormat(), options, bytesPerPixel);
+ 
+ 	// first, transition the image to the optimal layout for transfer sources
+ 	VkImageMemoryBarrier barrier {};
+@@ -129,10 +162,12 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 
+ 	// now encode the copy
+ 	VkBufferImageCopy copyInfo {};
+-	copyInfo.bufferOffset = 0;
+-	copyInfo.bufferRowLength = destinationBytesPerRow / bytesPerPixel;
+-	copyInfo.bufferImageHeight = destinationBytesPerImage / destinationBytesPerRow;
+-	copyInfo.imageSubresource.aspectMask = aspect;
++	copyInfo.bufferOffset = destinationOffset;
++	size_t blockBytes; uint32_t bw, bh;
++	if (blockInfo(pixelFormatToVkFormat(privateSource->pixelFormat()), blockBytes, bw, bh)) { bytesPerPixel = blockBytes; } // per block row, below
++	copyInfo.bufferRowLength = bytesPerPixel ? destinationBytesPerRow / bytesPerPixel * bw : 0;
++	copyInfo.bufferImageHeight = destinationBytesPerRow ? destinationBytesPerImage / destinationBytesPerRow * bh : 0;
++	copyInfo.imageSubresource.aspectMask = copyAspectBits;
+ 	copyInfo.imageSubresource.mipLevel = sourceLevel;
+ 	copyInfo.imageSubresource.baseArrayLayer = sourceSlice;
+ 	copyInfo.imageSubresource.layerCount = 1;
+@@ -155,6 +190,8 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 
+ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, size_t sourceSlice, size_t sourceLevel, Origin sourceOrigin, std::shared_ptr<Texture> destination, size_t destinationSlice, size_t destinationLevel, Origin destinationOrigin, size_t sliceCount, size_t levelCount, Size size) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(source); _keepAlive.push_back(destination);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+ 	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
+ 
+@@ -184,6 +221,10 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 	barriers[1].oldLayout = privateDest->imageLayout();
+ 	barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+ 	barriers[1].image = privateDest->image();
++	// scion: the destination's own level and slice (it took the source's)
++	barriers[1].subresourceRange.aspectMask = pixelFormatToVkImageAspectFlags(privateDest->pixelFormat());
++	barriers[1].subresourceRange.baseMipLevel = destinationLevel;
++	barriers[1].subresourceRange.baseArrayLayer = destinationSlice;
+ 
+ 	DynamicVK::vkCmdPipelineBarrier(cmdbuf->commandBuffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, sizeof(barriers) / sizeof(*barriers), barriers);
+ 
+@@ -233,6 +274,8 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 
+ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, std::shared_ptr<Texture> destination) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(source); _keepAlive.push_back(destination);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateSource = std::dynamic_pointer_cast<PrivateTexture>(source);
+ 	auto privateDest = std::dynamic_pointer_cast<PrivateTexture>(destination);
+ 	size_t sourceMipLevel = SIZE_MAX;
+@@ -293,6 +336,8 @@ void Indium::PrivateBlitCommandEncoder::copy(std::shared_ptr<Texture> source, si
+ 
+ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffer, Range<size_t> range, uint8_t value) {
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(buffer);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 	auto privateBuffer = std::dynamic_pointer_cast<PrivateBuffer>(buffer);
+ 	uint32_t value32 =
+ 		((uint32_t)value << 24) |
+@@ -317,6 +362,8 @@ void Indium::PrivateBlitCommandEncoder::fillBuffer(std::shared_ptr<Buffer> buffe
+ void Indium::PrivateBlitCommandEncoder::generateMipmapsForTexture(std::shared_ptr<Texture> texture) {
+ 	auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
+ 	auto cmdbuf = _privateCommandBuffer.lock();
++	_keepAlive.push_back(texture);
++	cmdbuf->fullBarrier(); // scion: Metal orders blit commands; Vulkan does not
+ 
+ 	auto aspect = pixelFormatToVkImageAspectFlags(privateTexture->pixelFormat());
+ 
+diff --git a/src/indium/buffer.cpp b/src/indium/buffer.cpp
+index 23fd2d3..6856158 100644
+--- a/src/indium/buffer.cpp
++++ b/src/indium/buffer.cpp
+@@ -1,3 +1,5 @@
++#include <string>
++#include <stdexcept>
+ #include <indium/buffer.private.hpp>
+ #include <indium/device.private.hpp>
+ #include <indium/dynamic-vk.hpp>
+@@ -34,56 +36,20 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, size
+ 	//       that info is available in the PrivateDevice instance.
+ 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+ 
+-	if (DynamicVK::vkCreateBuffer(_privateDevice->device(), &info, nullptr, &_buffer) != VK_SUCCESS) {
+-		// TODO
+-		abort();
++	if (VkResult res = DynamicVK::vkCreateBuffer(_privateDevice->device(), &info, nullptr, &_buffer); res != VK_SUCCESS) { // scion
++		throw std::runtime_error("vkCreateBuffer failed: " + std::to_string(length) + " bytes, VkResult " + std::to_string(res));
+ 	}
+ 
+ 	VkMemoryRequirements requirements;
+ 
+ 	DynamicVK::vkGetBufferMemoryRequirements(_privateDevice->device(), _buffer, &requirements);
+ 
+-	size_t targetIndex = SIZE_MAX;
+-
+-	for (size_t i = 0; i < _privateDevice->memoryProperties().memoryTypeCount; ++i) {
+-		const auto& type = _privateDevice->memoryProperties().memoryTypes[i];
+-
+-		if ((requirements.memoryTypeBits & (1 << i)) == 0) {
+-			continue;
+-		}
+-
+-		if ((_storageMode == StorageMode::Managed || _storageMode == StorageMode::Shared) && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
+-		}
+-
+-		if (_storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+-			continue;
+-		}
+-
+-		// okay, this is good enough
+-		targetIndex = i;
+-		break;
+-	}
+-
+-	if (targetIndex == SIZE_MAX) {
+-		throw std::runtime_error("No suitable memory region found for buffer with requested storage mode");
+-	}
+-
+-	VkMemoryAllocateInfo allocateInfo {};
+-	allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+-	allocateInfo.allocationSize = requirements.size;
+-	allocateInfo.memoryTypeIndex = targetIndex;
+-
+ 	VkMemoryAllocateFlagsInfo allocateFlags {};
+ 	allocateFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+ 	allocateFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+ 
+-	allocateInfo.pNext = &allocateFlags;
+-
+-	if (DynamicVK::vkAllocateMemory(_privateDevice->device(), &allocateInfo, nullptr, &_memory) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
++	try { _memory = _privateDevice->allocate(requirements, _storageMode, &allocateFlags, "buffer"); } // scion
++	catch (...) { DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr); throw; }
+ 
+ 	DynamicVK::vkBindBufferMemory(_privateDevice->device(), _buffer, _memory, 0);
+ };
+@@ -113,8 +79,63 @@ Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, cons
+ 	}
+ };
+ 
++// scion: the buffer's memory is the caller's (VK_EXT_external_memory_host): what the CPU writes there the GPU reads,
++// without copies; the caller keeps it alive while the buffer lives. Throws when the driver cannot import it.
++Indium::PrivateBuffer::PrivateBuffer(std::shared_ptr<PrivateDevice> device, void* hostPointer, size_t length, ResourceOptions options, bool):
++	_privateDevice(device),
++	_length(length)
++{
++	_storageMode = StorageMode::Shared;
++	VkExternalMemoryBufferCreateInfo ext {};
++	ext.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
++	ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++	VkBufferCreateInfo info {};
++	info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
++	info.pNext = &ext;
++	info.size = length;
++	info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
++		VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
++		VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
++		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++	if (DynamicVK::vkCreateBuffer(_privateDevice->device(), &info, nullptr, &_buffer) != VK_SUCCESS) throw std::runtime_error("host buffer");
++	VkMemoryRequirements req;
++	DynamicVK::vkGetBufferMemoryRequirements(_privateDevice->device(), _buffer, &req);
++	VkMemoryHostPointerPropertiesEXT hp {};
++	hp.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
++	if (DynamicVK::vkGetMemoryHostPointerPropertiesEXT(_privateDevice->device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, hostPointer, &hp) != VK_SUCCESS) {
++		DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr);
++		throw std::runtime_error("host pointer");
++	}
++	size_t type = _privateDevice->memoryTypeFor(req.memoryTypeBits & hp.memoryTypeBits, StorageMode::Shared);
++	if (type == SIZE_MAX || req.size > length) {
++		DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr);
++		throw std::runtime_error("host memory type");
++	}
++	VkImportMemoryHostPointerInfoEXT imp {};
++	imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
++	imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++	imp.pHostPointer = hostPointer;
++	VkMemoryAllocateFlagsInfo flags {};
++	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
++	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
++	flags.pNext = &imp;
++	VkMemoryAllocateInfo alloc {};
++	alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++	alloc.pNext = &flags;
++	alloc.allocationSize = length;
++	alloc.memoryTypeIndex = (uint32_t)type;
++	if (DynamicVK::vkAllocateMemory(_privateDevice->device(), &alloc, nullptr, &_memory) != VK_SUCCESS) {
++		DynamicVK::vkDestroyBuffer(_privateDevice->device(), _buffer, nullptr);
++		throw std::runtime_error("host import");
++	}
++	DynamicVK::vkBindBufferMemory(_privateDevice->device(), _buffer, _memory, 0);
++	_mapped = hostPointer;
++	_imported = true;
++};
++
+ Indium::PrivateBuffer::~PrivateBuffer() {
+-	if (_mapped) {
++	if (_mapped && !_imported) {
+ 		DynamicVK::vkUnmapMemory(_privateDevice->device(), _memory);
+ 	}
+ 
+diff --git a/src/indium/command-buffer.cpp b/src/indium/command-buffer.cpp
+index 43f4a84..3acb017 100644
+--- a/src/indium/command-buffer.cpp
++++ b/src/indium/command-buffer.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <indium/command-buffer.private.hpp>
+ #include <indium/command-queue.private.hpp>
+ #include <indium/device.private.hpp>
+@@ -26,7 +27,14 @@ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateComman
+ 
+ 	VkCommandBufferAllocateInfo allocInfo {};
+ 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+-	allocInfo.commandPool = _privateCommandQueue->commandPool();
++	VkCommandPoolCreateInfo poolInfo {};
++	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
++	poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
++	poolInfo.queueFamilyIndex = _privateDevice->graphicsQueueFamilyIndex() ? *_privateDevice->graphicsQueueFamilyIndex() : *_privateDevice->computeQueueFamilyIndex();
++	if (DynamicVK::vkCreateCommandPool(_privateDevice->device(), &poolInfo, nullptr, &_commandPool) != VK_SUCCESS) {
++		abort();
++	}
++	allocInfo.commandPool = _commandPool;
+ 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+ 	allocInfo.commandBufferCount = 1;
+ 
+@@ -43,11 +51,37 @@ Indium::PrivateCommandBuffer::PrivateCommandBuffer(std::shared_ptr<PrivateComman
+ 	}
+ };
+ 
++// ponytail: everything waits for everything before it; per-resource barriers when GPU time matters
++void Indium::PrivateCommandBuffer::fullBarrier() {
++	VkMemoryBarrier barrier {};
++	barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++	barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
++	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++	DynamicVK::vkCmdPipelineBarrier(_commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
++};
++
+ Indium::PrivateCommandBuffer::~PrivateCommandBuffer() {
+-	DynamicVK::vkFreeCommandBuffers(_privateDevice->device(), _privateCommandQueue->commandPool(), 1, &_commandBuffer);
++	if (_timestampPool) DynamicVK::vkDestroyQueryPool(_privateDevice->device(), _timestampPool, nullptr);
++	DynamicVK::vkDestroyCommandPool(_privateDevice->device(), _commandPool, nullptr);
++};
++
++uint32_t Indium::PrivateCommandBuffer::writeTimestamp() {
++	static constexpr uint32_t maxTimestamps = 512;
++	if (!_timestampPool) {
++		VkQueryPoolCreateInfo info {};
++		info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++		info.queryType = VK_QUERY_TYPE_TIMESTAMP;
++		info.queryCount = maxTimestamps;
++		if (DynamicVK::vkCreateQueryPool(_privateDevice->device(), &info, nullptr, &_timestampPool) != VK_SUCCESS) { _timestampPool = VK_NULL_HANDLE; return UINT32_MAX; }
++		DynamicVK::vkResetQueryPool(_privateDevice->device(), _timestampPool, 0, maxTimestamps);
++	}
++	if (_timestampCount == maxTimestamps) return UINT32_MAX;
++	DynamicVK::vkCmdWriteTimestamp(_commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, _timestampPool, _timestampCount);
++	return _timestampCount++;
+ };
+ 
+ std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::renderCommandEncoder(const RenderPassDescriptor& descriptor) {
++	fullBarrier();
+ 	auto encoder = std::make_shared<Indium::PrivateRenderCommandEncoder>(shared_from_this(), descriptor);
+ 	{
+ 		std::scoped_lock lock(_mutex);
+@@ -57,6 +91,7 @@ std::shared_ptr<Indium::RenderCommandEncoder> Indium::PrivateCommandBuffer::rend
+ };
+ 
+ std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoder() {
++	fullBarrier();
+ 	auto encoder = std::make_shared<Indium::PrivateBlitCommandEncoder>(shared_from_this());
+ 	{
+ 		std::scoped_lock lock(_mutex);
+@@ -66,6 +101,7 @@ std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCo
+ };
+ 
+ std::shared_ptr<Indium::BlitCommandEncoder> Indium::PrivateCommandBuffer::blitCommandEncoder(const BlitPassDescriptor& descriptor) {
++	fullBarrier();
+ 	auto encoder = std::make_shared<Indium::PrivateBlitCommandEncoder>(shared_from_this(), descriptor);
+ 	{
+ 		std::scoped_lock lock(_mutex);
+@@ -79,6 +115,7 @@ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::com
+ };
+ 
+ std::shared_ptr<Indium::ComputeCommandEncoder> Indium::PrivateCommandBuffer::computeCommandEncoder(const ComputePassDescriptor& descriptor) {
++	fullBarrier();
+ 	auto encoder = std::make_shared<Indium::PrivateComputeCommandEncoder>(shared_from_this(), descriptor);
+ 	{
+ 		std::scoped_lock lock(_mutex);
+@@ -113,6 +150,9 @@ void Indium::PrivateCommandBuffer::commit() {
+ 		// TODO: same for other encoders
+ 	}
+ 
++	// scion: device writes become visible to the host (Shared buffers read after completion)
++	VkMemoryBarrier hostBarrier { VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_HOST_READ_BIT };
++	DynamicVK::vkCmdPipelineBarrier(_commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hostBarrier, 0, nullptr, 0, nullptr);
+ 	if (DynamicVK::vkEndCommandBuffer(_commandBuffer) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+@@ -141,6 +181,24 @@ void Indium::PrivateCommandBuffer::commit() {
+ 		// TODO: implement this for other encoders (we need to synchronize those texture accesses as well)
+ 	}
+ 
++	// scion: one entry per image. Several passes on the same target in one command buffer (a game's passes, an
++	// overlay over a drawable) would otherwise wait on their own signal and lock the presentation mutex twice.
++	{
++		std::vector<PrivateTexture*> seen;
++		const auto dedupe = [&](std::vector<std::shared_ptr<Texture>>& list) {
++			std::vector<std::shared_ptr<Texture>> out;
++			for (const auto& t: list) {
++				auto root = std::dynamic_pointer_cast<PrivateTexture>(t)->root();
++				if (std::find(seen.begin(), seen.end(), root) != seen.end()) continue;
++				seen.push_back(root);
++				out.push_back(t);
++			}
++			list = std::move(out);
++		};
++		dedupe(readWriteTextures);
++		dedupe(readOnlyTextures);
++	}
++
+ 	for (const auto& texture: readWriteTextures) {
+ 		auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(texture);
+ 		auto sema = _privateDevice->getWrappedBinarySemaphore(privateTexture->needsExportablePresentationSemaphore());
+@@ -216,6 +274,17 @@ void Indium::PrivateCommandBuffer::commit() {
+ 	//        i've observed this in the cube example, and it happens more than once (because the example display semaphore is exhausted and never signaled).
+ 	// UPDATE: upon further testing, it seems that this only occurs when the view is off-screen/hidden. weird.
+ 	_privateDevice->waitForSemaphore(timelineSemaphore->semaphore, timelineSemaphore->count, [self, timelineSemaphore, extraWaitSemaphores, presentationSemaphores]() {
++		if (self->_timestampCount) { // scion: GPU ticks -> ns
++			std::vector<uint64_t> ticks(self->_timestampCount);
++			DynamicVK::vkGetQueryPoolResults(self->_privateDevice->device(), self->_timestampPool, 0, self->_timestampCount, ticks.size() * 8, ticks.data(), 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
++			double period = self->_privateDevice->properties().limits.timestampPeriod;
++			self->timestamps.resize(ticks.size());
++			for (size_t i = 0; i < ticks.size(); i++) self->timestamps[i] = uint64_t(double(ticks[i]) * period);
++		}
++		for (const auto& handler: self->resultHandlers) {
++			handler();
++		}
++		self->resultHandlers.clear();
+ 		{
+ 			std::unique_lock lock(self->_mutex);
+ 			self->_completed = true;
+@@ -252,7 +321,10 @@ void Indium::PrivateCommandBuffer::commit() {
+ 	//        the Device constructor tries to choose command queues that support as many operations as possible, but it's possible
+ 	//        that a particular device only supports certain operations on certain queues (e.g. maybe it only supports transfer operations
+ 	//        on an exclusive queue that doesn't support graphics or compute).
+-	if (DynamicVK::vkQueueSubmit2(_privateDevice->graphicsQueue(), 1, &info, VK_NULL_HANDLE) != VK_SUCCESS) {
++	std::unique_lock qlock(_privateDevice->queueMutex);
++	auto submitted = DynamicVK::vkQueueSubmit2(_privateDevice->graphicsQueue(), 1, &info, VK_NULL_HANDLE);
++	qlock.unlock();
++	if (submitted != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+ 	}
+diff --git a/src/indium/compute-command-encoder.cpp b/src/indium/compute-command-encoder.cpp
+index 5f62ad0..a9a2810 100644
+--- a/src/indium/compute-command-encoder.cpp
++++ b/src/indium/compute-command-encoder.cpp
+@@ -1,6 +1,7 @@
+ #include <indium/compute-command-encoder.private.hpp>
+ #include <indium/device.private.hpp>
+ #include <indium/dynamic-vk.hpp>
++#include <indium/buffer.private.hpp>
+ 
+ Indium::ComputeCommandEncoder::~ComputeCommandEncoder() {};
+ 
+@@ -9,23 +10,14 @@ Indium::PrivateComputeCommandEncoder::PrivateComputeCommandEncoder(std::shared_p
+ 	_privateDevice(std::dynamic_pointer_cast<PrivateDevice>(commandBuffer->device())),
+ 	_descriptor(descriptor)
+ {
+-	VkDescriptorPoolCreateInfo poolCreateInfo {};
+-	poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+-	poolCreateInfo.poolSizeCount = poolSizes.size();
+-	poolCreateInfo.pPoolSizes = poolSizes.data();
+-	poolCreateInfo.maxSets = 64;
+-
+-	if (DynamicVK::vkCreateDescriptorPool(_privateDevice->device(), &poolCreateInfo, nullptr, &_pool) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
++	_pools.push_back(newDescriptorPool(_privateDevice->device())); // scion: more are added when it fills up
+ };
+ 
+ Indium::PrivateComputeCommandEncoder::~PrivateComputeCommandEncoder() {
+ 	for (auto& pipeline: _savedPipelines) {
+ 		DynamicVK::vkDestroyPipeline(_privateDevice->device(), pipeline, nullptr);
+ 	}
+-	DynamicVK::vkDestroyDescriptorPool(_privateDevice->device(), _pool, 0);
++	for (auto pool: _pools) DynamicVK::vkDestroyDescriptorPool(_privateDevice->device(), pool, nullptr);
+ };
+ 
+ void Indium::PrivateComputeCommandEncoder::endEncoding() {
+@@ -89,9 +81,14 @@ void Indium::PrivateComputeCommandEncoder::setThreadgroupMemoryLength(size_t len
+ };
+ 
+ void Indium::PrivateComputeCommandEncoder::dispatchThreadgroups(Size threadgroupsPerGrid, Size threadsPerThreadgroup) {
++	dispatch(threadgroupsPerGrid, threadsPerThreadgroup, Size { 0, 0, 0 });
++};
++
++// scion: gridLimit (0 = whole threadgroups) reaches the shader as specialization constants 3..5
++void Indium::PrivateComputeCommandEncoder::dispatch(Size threadgroupsPerGrid, Size threadsPerThreadgroup, Size gridLimit) {
+ 	auto buf = _privateCommandBuffer.lock();
+ 
+-	auto pipeline = _pso->createPipeline(threadsPerThreadgroup);
++	auto pipeline = _pso->createPipeline(threadsPerThreadgroup, gridLimit);
+ 	_savedPipelines.push_back(pipeline);
+ 
+ 	DynamicVK::vkCmdBindPipeline(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+@@ -99,28 +96,38 @@ void Indium::PrivateComputeCommandEncoder::dispatchThreadgroups(Size threadgroup
+ 	// TODO: avoid re-binding descriptors on every dispatch
+ 	updateBindings();
+ 
++	buf->fullBarrier();
+ 	DynamicVK::vkCmdDispatch(buf->commandBuffer(), threadgroupsPerGrid.width, threadgroupsPerGrid.height, threadgroupsPerGrid.depth);
+ 
+ 	// see PrivateRenderCommandEncoder::drawPrimitives() for why we do this
+ 	_savedFunctionResources.push_back(_functionResources);
+ };
+ 
++void Indium::PrivateComputeCommandEncoder::dispatchIndirect(std::shared_ptr<Buffer> indirectBuffer, size_t indirectOffset, Size threadsPerThreadgroup) {
++	auto buf = _privateCommandBuffer.lock();
++	auto pipeline = _pso->createPipeline(threadsPerThreadgroup);
++	_savedPipelines.push_back(pipeline);
++	DynamicVK::vkCmdBindPipeline(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++	updateBindings();
++	_keepAliveBuffers.push_back(indirectBuffer);
++	buf->fullBarrier();
++	DynamicVK::vkCmdDispatchIndirect(buf->commandBuffer(), std::dynamic_pointer_cast<PrivateBuffer>(indirectBuffer)->buffer(), indirectOffset);
++	_savedFunctionResources.push_back(_functionResources);
++};
++
+ void Indium::PrivateComputeCommandEncoder::dispatchThreads(Size threadsPerGrid, Size threadsPerThreadgroup) {
++	auto up = [](size_t n, size_t d) { return d ? (n + d - 1) / d : 0; };
+ 	Size threadgroupsPerGrid {
+-		threadsPerGrid.width / threadsPerThreadgroup.width,
+-		threadsPerGrid.height / threadsPerThreadgroup.height,
+-		threadsPerGrid.depth / threadsPerThreadgroup.depth,
++		up(threadsPerGrid.width, threadsPerThreadgroup.width),
++		up(threadsPerGrid.height, threadsPerThreadgroup.height),
++		up(threadsPerGrid.depth, threadsPerThreadgroup.depth),
+ 	};
+-
+-	if (
++	bool partial =
+ 		(threadgroupsPerGrid.width * threadsPerThreadgroup.width != threadsPerGrid.width) ||
+ 		(threadgroupsPerGrid.height * threadsPerThreadgroup.height != threadsPerGrid.height) ||
+-		(threadgroupsPerGrid.depth * threadsPerThreadgroup.depth != threadsPerGrid.depth)
+-	) {
+-		throw std::runtime_error("TODO: support partial threadgroups");
+-	}
+-
+-	return dispatchThreadgroups(threadgroupsPerGrid, threadsPerThreadgroup);
++		(threadgroupsPerGrid.depth * threadsPerThreadgroup.depth != threadsPerGrid.depth);
++	if (!threadgroupsPerGrid.width || !threadgroupsPerGrid.height || !threadgroupsPerGrid.depth) return;
++	dispatch(threadgroupsPerGrid, threadsPerThreadgroup, partial ? threadsPerGrid : Size { 0, 0, 0 });
+ };
+ 
+ void Indium::PrivateComputeCommandEncoder::setImageblockSize(size_t width, size_t height) {
+@@ -138,7 +145,10 @@ Indium::DispatchType Indium::PrivateComputeCommandEncoder::dispatchType() {
+ void Indium::PrivateComputeCommandEncoder::updateBindings() {
+ 	auto buf = _privateCommandBuffer.lock();
+ 
+-	std::array<VkDescriptorSet, 1> descriptorSets = createDescriptorSets(_pso->descriptorSetLayouts().layouts, _pool, _privateDevice, { _functionResources }, { _pso->functionInfo() }, _keepAliveBuffers);
++	std::array<VkDescriptorSet, 1> descriptorSets = createDescriptorSets(_pso->descriptorSetLayouts().layouts, _pools, _privateDevice, { _functionResources }, { _pso->functionInfo() }, _keepAliveBuffers);
+ 
+ 	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
++	if (_privateDevice->bindlessSet) DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_COMPUTE, _pso->layout(), PrivateDevice::bindlessSetIndex, 1, &_privateDevice->bindlessSet, 0, nullptr); // scion
++	uint32_t srgbMasks[2] = { srgbWriteMask(_functionResources, _pso->functionInfo()), 0 };
++	DynamicVK::vkCmdPushConstants(buf->commandBuffer(), _pso->layout(), VK_SHADER_STAGE_ALL, 0, sizeof srgbMasks, srgbMasks);
+ };
+diff --git a/src/indium/compute-pipeline.cpp b/src/indium/compute-pipeline.cpp
+index e89f5d5..b87b53f 100644
+--- a/src/indium/compute-pipeline.cpp
++++ b/src/indium/compute-pipeline.cpp
+@@ -23,8 +23,16 @@ Indium::PrivateComputePipelineState::PrivateComputePipelineState(std::shared_ptr
+ 
+ 	VkPipelineLayoutCreateInfo layoutInfo {};
+ 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-	layoutInfo.setLayoutCount = _descriptorSetLayouts.layouts.size();
+-	layoutInfo.pSetLayouts = _descriptorSetLayouts.layouts.data();
++	std::vector<VkDescriptorSetLayout> setLayouts(_descriptorSetLayouts.layouts.begin(), _descriptorSetLayouts.layouts.end());
++	if (_privateDevice->bindlessSet) { // scion: set 1 unused, set 2 bindless resources
++		setLayouts.push_back(_privateDevice->emptyLayout);
++		setLayouts.push_back(_privateDevice->bindlessLayout);
++	}
++	layoutInfo.setLayoutCount = setLayouts.size();
++	layoutInfo.pSetLayouts = setLayouts.data();
++	VkPushConstantRange pushRange { VK_SHADER_STAGE_ALL, 0, 8 }; // scion: sRGB write mask
++	layoutInfo.pushConstantRangeCount = 1;
++	layoutInfo.pPushConstantRanges = &pushRange;
+ 
+ 	if (DynamicVK::vkCreatePipelineLayout(_privateDevice->device(), &layoutInfo, nullptr, &_layout) != VK_SUCCESS) {
+ 		// TODO
+@@ -36,11 +44,17 @@ Indium::PrivateComputePipelineState::PrivateComputePipelineState(std::shared_ptr
+ 	vk13Props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+ 	VkPhysicalDeviceProperties2 props {};
+ 	props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++	VkPhysicalDeviceVulkan11Properties vk11Props {};
++	vk11Props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
++	vk13Props.pNext = &vk11Props;
+ 	props.pNext = &vk13Props;
+ 	DynamicVK::vkGetPhysicalDeviceProperties2(_privateDevice->physicalDevice(), &props);
+ 
+-	_maxTotalThreadsPerThreadgroup = vk13Props.maxSubgroupSize;
+-	_threadExecutionWidth = props.properties.limits.maxComputeWorkGroupInvocations;
++	// scion: these two were swapped. Metal SIMD groups are 32 wide: ask Vulkan for 32-lane subgroups when the GPU can
++	// (NVIDIA always is; AMD RDNA and Intel can be told), so simd_* operations keep Metal's semantics.
++	_maxTotalThreadsPerThreadgroup = props.properties.limits.maxComputeWorkGroupInvocations;
++	_require32 = vk13Props.minSubgroupSize <= 32 && vk13Props.maxSubgroupSize >= 32 && (vk13Props.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
++	_threadExecutionWidth = _require32 ? 32 : vk11Props.subgroupSize;
+ 	_staticThreadgroupMemoryLength = props.properties.limits.maxComputeSharedMemorySize; // not entirely sure about this one, but it seems close enough
+ };
+ 
+@@ -50,7 +64,7 @@ Indium::PrivateComputePipelineState::~PrivateComputePipelineState() {
+ 	}
+ };
+ 
+-VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerThreadgroup) {
++VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerThreadgroup, Size gridLimit) {
+ 	// TODO: optimize this by using pipeline caches.
+ 	//       also, we can store the most recent pipeline and, if the number of threads per threadgroup stays the same,
+ 	//       we can just return that instead (wrapped in a reference counting object).
+@@ -60,7 +74,8 @@ VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerTh
+ 	auto func = std::dynamic_pointer_cast<PrivateFunction>(_descriptor.computeFunction);
+ 	auto funcName = func->name();
+ 
+-	std::array<uint32_t, 3> threadsPerThreadgroupData = { static_cast<uint32_t>(threadsPerThreadgroup.width), static_cast<uint32_t>(threadsPerThreadgroup.height), static_cast<uint32_t>(threadsPerThreadgroup.depth) };
++	std::array<uint32_t, 6> threadsPerThreadgroupData = { static_cast<uint32_t>(threadsPerThreadgroup.width), static_cast<uint32_t>(threadsPerThreadgroup.height), static_cast<uint32_t>(threadsPerThreadgroup.depth),
++		static_cast<uint32_t>(gridLimit.width), static_cast<uint32_t>(gridLimit.height), static_cast<uint32_t>(gridLimit.depth) };
+ 
+ 	std::array<VkSpecializationMapEntry, 3> mapEntries {};
+ 
+@@ -82,7 +97,13 @@ VkPipeline Indium::PrivateComputePipelineState::createPipeline(Size threadsPerTh
+ 	info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+ 	info.stage.module = func->library()->shaderModule();
+ 	info.stage.pName = funcName.c_str();
+-	info.stage.pSpecializationInfo = &specInfo;
++	info.stage.pSpecializationInfo = func->specializationInfo(threadsPerThreadgroupData.data(), 6); // local size, grid limit + function constants
++	VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroupInfo {};
++	subgroupInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
++	subgroupInfo.requiredSubgroupSize = 32;
++	if (_require32) {
++		info.stage.pNext = &subgroupInfo;
++	}
+ 	info.layout = _layout;
+ 
+ 	if (DynamicVK::vkCreateComputePipelines(_privateDevice->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+diff --git a/src/indium/device.cpp b/src/indium/device.cpp
+index 322e186..43e6f06 100644
+--- a/src/indium/device.cpp
++++ b/src/indium/device.cpp
+@@ -222,6 +222,7 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+ 		{ VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, Feature::ExternalMemoryFD },
+ 		{ VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME, Feature::ExternalSemaphoreFD },
+ 		{ VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME, Feature::NonSemanticInfo },
++		{ VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, Feature::ExternalMemoryHost },
+ 	};
+ 
+ 	for (const auto& prop: extProps) {
+@@ -233,6 +234,33 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+ 		}
+ 	}
+ 
++	// scion: float atomics (Metal's atomic<float>) when the GPU has them
++	VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloat {};
++	atomicFloat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
++	for (const auto& prop: extProps) {
++		if (strcmp(prop.extensionName, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME) == 0) {
++			extensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
++			features13.pNext = &atomicFloat;
++			DynamicVK::vkGetPhysicalDeviceFeatures2(_physicalDevice, &features);
++		}
++	}
++
++	// scion: fill mode and depth clip mode as dynamic state, when the driver has them
++	VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3 {};
++	eds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
++	for (const auto& prop: extProps) {
++		if (strcmp(prop.extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME) == 0) {
++			void** tail = &features13.pNext;
++			while (*tail) tail = reinterpret_cast<void**>(&reinterpret_cast<VkBaseOutStructure*>(*tail)->pNext);
++			*tail = &eds3;
++			DynamicVK::vkGetPhysicalDeviceFeatures2(_physicalDevice, &features);
++			dynamicPolygonMode = eds3.extendedDynamicState3PolygonMode && features.features.fillModeNonSolid;
++			dynamicDepthClamp = eds3.extendedDynamicState3DepthClampEnable && features.features.depthClamp;
++			if (dynamicPolygonMode || dynamicDepthClamp) extensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
++			else *tail = nullptr;
++		}
++	}
++
+ 	VkDeviceCreateInfo deviceCreateInfo {};
+ 	deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+ 	deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
+@@ -246,6 +274,16 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+ 	}
+ 
+ 	_features = indiumFeatures;
++	if (!!(_features & Feature::ExternalMemoryHost)) { // scion
++		VkPhysicalDeviceExternalMemoryHostPropertiesEXT host {};
++		host.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
++		VkPhysicalDeviceProperties2 props2 {};
++		props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++		props2.pNext = &host;
++		DynamicVK::vkGetPhysicalDeviceProperties2(_physicalDevice, &props2);
++		hostPointerAlignment = host.minImportedHostPointerAlignment;
++	}
++	initBindless(); // scion
+ 
+ 	for (const auto& index: queueFamilyIndices) {
+ 		VkQueue queue;
+@@ -296,6 +334,104 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
+ 	}
+ };
+ 
++void Indium::PrivateDevice::initBindless() {
++	VkPhysicalDeviceVulkan12Features f12 {};
++	f12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
++	VkPhysicalDeviceFeatures2 f {};
++	f.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
++	f.pNext = &f12;
++	DynamicVK::vkGetPhysicalDeviceFeatures2(_physicalDevice, &f);
++	VkPhysicalDeviceVulkan12Properties p12 {};
++	p12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
++	VkPhysicalDeviceProperties2 p {};
++	p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++	p.pNext = &p12;
++	DynamicVK::vkGetPhysicalDeviceProperties2(_physicalDevice, &p);
++	bool ok = f12.descriptorBindingPartiallyBound && f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingStorageImageUpdateAfterBind &&
++		f12.shaderSampledImageArrayNonUniformIndexing && p12.maxPerStageDescriptorUpdateAfterBindSampledImages >= bindlessImageCount &&
++		p12.maxPerStageDescriptorUpdateAfterBindStorageImages >= bindlessImageCount && p12.maxPerStageDescriptorUpdateAfterBindSamplers >= bindlessSamplerCount;
++
++	VkDescriptorSetLayoutCreateInfo emptyInfo {};
++	emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
++	DynamicVK::vkCreateDescriptorSetLayout(_device, &emptyInfo, nullptr, &emptyLayout);
++	if (!ok) return;
++
++	VkDescriptorSetLayoutBinding bindings[3] {};
++	VkDescriptorType types[3] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER };
++	VkDescriptorBindingFlags flags[3];
++	VkDescriptorPoolSize sizes[3];
++	for (uint32_t i = 0; i < 3; i++) {
++		bindings[i].binding = i;
++		bindings[i].descriptorType = types[i];
++		bindings[i].descriptorCount = i == 2 ? bindlessSamplerCount : bindlessImageCount;
++		bindings[i].stageFlags = VK_SHADER_STAGE_ALL;
++		flags[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
++		sizes[i] = { types[i], bindings[i].descriptorCount };
++	}
++	VkDescriptorSetLayoutBindingFlagsCreateInfo flagInfo {};
++	flagInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
++	flagInfo.bindingCount = 3;
++	flagInfo.pBindingFlags = flags;
++	VkDescriptorSetLayoutCreateInfo layoutInfo {};
++	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
++	layoutInfo.pNext = &flagInfo;
++	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
++	layoutInfo.bindingCount = 3;
++	layoutInfo.pBindings = bindings;
++	if (DynamicVK::vkCreateDescriptorSetLayout(_device, &layoutInfo, nullptr, &bindlessLayout) != VK_SUCCESS) { bindlessLayout = VK_NULL_HANDLE; return; }
++	VkDescriptorPoolCreateInfo poolInfo {};
++	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
++	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
++	poolInfo.maxSets = 1;
++	poolInfo.poolSizeCount = 3;
++	poolInfo.pPoolSizes = sizes;
++	if (DynamicVK::vkCreateDescriptorPool(_device, &poolInfo, nullptr, &bindlessPool) != VK_SUCCESS) { bindlessPool = VK_NULL_HANDLE; return; }
++	VkDescriptorSetAllocateInfo allocInfo {};
++	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
++	allocInfo.descriptorPool = bindlessPool;
++	allocInfo.descriptorSetCount = 1;
++	allocInfo.pSetLayouts = &bindlessLayout;
++	if (DynamicVK::vkAllocateDescriptorSets(_device, &allocInfo, &bindlessSet) != VK_SUCCESS) bindlessSet = VK_NULL_HANDLE;
++};
++
++uint32_t Indium::PrivateDevice::bindlessAlloc(int kind) {
++	if (!bindlessSet) return 0;
++	std::lock_guard lock(bindlessMutex);
++	if (!bindlessFree[kind].empty()) { auto i = bindlessFree[kind].back(); bindlessFree[kind].pop_back(); return i; }
++	if (bindlessNext[kind] >= (kind ? bindlessSamplerCount : bindlessImageCount)) return 0;
++	return bindlessNext[kind]++;
++};
++
++void Indium::PrivateDevice::bindlessRelease(int kind, uint32_t index) {
++	if (!index) return;
++	std::lock_guard lock(bindlessMutex);
++	bindlessFree[kind].push_back(index);
++};
++
++void Indium::PrivateDevice::bindlessWrite(uint32_t index, VkImageView sampledView, VkImageView storageView, VkSampler sampler) {
++	VkDescriptorImageInfo infos[3] {};
++	VkWriteDescriptorSet writes[3] {};
++	uint32_t n = 0;
++	auto add = [&](uint32_t binding, VkDescriptorType type, VkDescriptorImageInfo info) {
++		infos[n] = info;
++		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++		writes[n].dstSet = bindlessSet;
++		writes[n].dstBinding = binding;
++		writes[n].dstArrayElement = index;
++		writes[n].descriptorCount = 1;
++		writes[n].descriptorType = type;
++		writes[n].pImageInfo = &infos[n];
++		n++;
++	};
++	if (sampledView) add(0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, { VK_NULL_HANDLE, sampledView, VK_IMAGE_LAYOUT_GENERAL });
++	if (storageView) add(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, { VK_NULL_HANDLE, storageView, VK_IMAGE_LAYOUT_GENERAL });
++	if (sampler) add(2, VK_DESCRIPTOR_TYPE_SAMPLER, { sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED });
++	if (n) {
++		std::lock_guard lock(bindlessMutex);
++		DynamicVK::vkUpdateDescriptorSets(_device, n, writes, 0, nullptr);
++	}
++};
++
+ Indium::PrivateDevice::~PrivateDevice() {
+ 	if (_oneshotCommandPool) {
+ 		DynamicVK::vkDestroyCommandPool(_device, _oneshotCommandPool, nullptr);
+@@ -335,6 +471,12 @@ std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBuffer(const void* poi
+ 	return std::make_shared<PrivateBuffer>(shared_from_this(), pointer, length, options);
+ };
+ 
++std::shared_ptr<Indium::Buffer> Indium::PrivateDevice::newBufferNoCopy(void* pointer, size_t length, ResourceOptions options) {
++	auto a = hostPointerAlignment;
++	if (!(_features & Feature::ExternalMemoryHost) || !a || (uintptr_t)pointer % a || !length || length % a) return nullptr;
++	try { return std::make_shared<PrivateBuffer>(shared_from_this(), pointer, length, options, true); } catch (...) { return nullptr; }
++};
++
+ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* data, size_t length) {
+ 	// TODO: cache translated libraries
+ 	size_t translatedSize = 0;
+@@ -359,6 +501,10 @@ std::shared_ptr<Indium::Library> Indium::PrivateDevice::newLibrary(const void* d
+ 
+ 		funcInfo.bindings.insert(funcInfo.bindings.end(), info.bindings.begin(), info.bindings.end());
+ 		funcInfo.embeddedSamplers.insert(funcInfo.embeddedSamplers.end(), info.embeddedSamplers.begin(), info.embeddedSamplers.end());
++		funcInfo.functionConstants = info.functionConstants;
++		funcInfo.writesDepth = info.writesDepth;
++		funcInfo.argumentIds = info.argumentIds;
++		funcInfo.argumentSizes = info.argumentSizes;
+ 	}
+ 
+ 	auto lib = std::make_shared<PrivateLibrary>(shared_from_this(), static_cast<const char*>(translatedData), translatedSize, funcInfoMap);
+@@ -551,3 +697,48 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::PrivateDevice::getWrappedBinary
+ 		delete ptr;
+ 	});
+ };
++
++// scion: Private memory is device-local when the GPU has it (discrete GPUs list system memory types too); Managed and
++// Shared need host-visible memory, Shared also coherent, in the first such type. Never AMD device-coherent/uncached types
++// (they need a feature that is not enabled) or protected memory.
++size_t Indium::PrivateDevice::memoryTypeFor(uint32_t typeBits, StorageMode mode) {
++	const auto& props = memoryProperties();
++	size_t fallback = SIZE_MAX;
++	for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
++		auto f = props.memoryTypes[i].propertyFlags;
++		if (!(typeBits & (1u << i)) || (f & (VK_MEMORY_PROPERTY_PROTECTED_BIT | VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD | VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD))) continue;
++		if (mode == StorageMode::Private || mode == StorageMode::Memoryless) {
++			if (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) return i;
++			if (fallback == SIZE_MAX) fallback = i;
++			continue;
++		}
++		if (!(f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) || (mode == StorageMode::Shared && !(f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) continue;
++		return i;
++	}
++	return fallback;
++};
++
++VkDeviceMemory Indium::PrivateDevice::allocate(VkMemoryRequirements req, StorageMode mode, const void* pNext, const char* what) {
++	uint32_t bits = req.memoryTypeBits;
++	VkResult res = VK_ERROR_OUT_OF_DEVICE_MEMORY;
++	for (;;) {
++		size_t type = memoryTypeFor(bits, mode);
++		if (type == SIZE_MAX && mode != StorageMode::Private) type = memoryTypeFor(bits, StorageMode::Private) ; // textures: any device memory
++		if (type == SIZE_MAX) break;
++		if (mode != StorageMode::Private && mode != StorageMode::Memoryless && !(memoryProperties().memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && strcmp(what, "image")) break;
++		VkMemoryAllocateInfo info {};
++		info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++		info.pNext = pNext;
++		info.allocationSize = req.size;
++		info.memoryTypeIndex = type;
++		VkDeviceMemory memory = VK_NULL_HANDLE;
++		res = DynamicVK::vkAllocateMemory(device(), &info, nullptr, &memory);
++		if (res == VK_SUCCESS) return memory;
++		bits &= ~(1u << type);
++	}
++	std::string types;
++	for (uint32_t i = 0; i < memoryProperties().memoryTypeCount; ++i)
++		types += " " + std::to_string(i) + ":" + std::to_string(memoryProperties().memoryTypes[i].propertyFlags) + "/heap" + std::to_string(memoryProperties().memoryTypes[i].heapIndex);
++	throw std::runtime_error(std::string("vkAllocateMemory failed for ") + what + ": " + std::to_string(req.size) + " bytes, storage " +
++		std::to_string((int)mode) + ", VkResult " + std::to_string(res) + ", memoryTypeBits " + std::to_string(req.memoryTypeBits) + ", types" + types);
++}
+diff --git a/src/indium/indium.cpp b/src/indium/indium.cpp
+index e7c06fe..3082ab4 100644
+--- a/src/indium/indium.cpp
++++ b/src/indium/indium.cpp
+@@ -59,7 +59,7 @@ void Indium::init(const char** additionalExtensions, size_t additionalExtensionC
+ 		}
+ 	}
+ 
+-	if (!foundValidationLayer) {
++	if (enableValidation && !foundValidationLayer) {
+ 		std::cerr << "Validation layer requested but not available. Ignoring..." << std::endl;
+ 		enableValidation = false;
+ 	}
+diff --git a/src/indium/library.cpp b/src/indium/library.cpp
+index d56a213..4f2df2c 100644
+--- a/src/indium/library.cpp
++++ b/src/indium/library.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include <indium/library.private.hpp>
+ #include <indium/device.private.hpp>
+ #include <indium/sampler.hpp>
+@@ -31,7 +32,9 @@ Indium::PrivateLibrary::PrivateLibrary(std::shared_ptr<PrivateDevice> device, co
+ 	createInfo.codeSize = dataLength;
+ 	createInfo.pCode = reinterpret_cast<const uint32_t*>(data);
+ 
+-	if (DynamicVK::vkCreateShaderModule(_privateDevice->device(), &createInfo, nullptr, &_shaderModule) != VK_SUCCESS) {
++	// scion: a library whose functions all failed to translate has no entry points: no module (it is invalid SPIR-V)
++	static const bool noModule = getenv("SCION_DIAG_NOMODULE") != nullptr; // scion: diagnostic (memory)
++	if (!_functionInfos.empty() && !noModule && DynamicVK::vkCreateShaderModule(_privateDevice->device(), &createInfo, nullptr, &_shaderModule) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+ 	}
+diff --git a/src/indium/render-command-encoder.cpp b/src/indium/render-command-encoder.cpp
+index b27ffe5..39741ab 100644
+--- a/src/indium/render-command-encoder.cpp
++++ b/src/indium/render-command-encoder.cpp
+@@ -1,3 +1,4 @@
++#include <optional>
+ #include <indium/render-command-encoder.private.hpp>
+ #include <indium/command-buffer.private.hpp>
+ #include <indium/render-pass.hpp>
+@@ -8,6 +9,8 @@
+ #include <indium/types.private.hpp>
+ #include <indium/buffer.private.hpp>
+ #include <indium/library.private.hpp>
++#include <unordered_map>
++#include <cstring>
+ #include <indium/sampler.private.hpp>
+ #include <indium/depth-stencil.private.hpp>
+ #include <indium/command-encoder.private.hpp>
+@@ -26,34 +29,54 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	auto vkDevice = _privateDevice->device();
+ 	auto vkCmdBuf = buf->commandBuffer();
+ 
+-	VkDescriptorPoolCreateInfo poolCreateInfo {};
+-	poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+-	poolCreateInfo.poolSizeCount = poolSizes.size();
+-	poolCreateInfo.pPoolSizes = poolSizes.data();
+-	poolCreateInfo.maxSets = 64; // i guess
+-
+-	if (DynamicVK::vkCreateDescriptorPool(vkDevice, &poolCreateInfo, nullptr, &_pool) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
+-
+-	auto firstTexture = descriptor.colorAttachments.front().texture;
++	_pools.push_back(newDescriptorPool(_privateDevice->device())); // scion: more are added when it fills up
++
++	// scion: the first attachment (a pass may have no colour attachments) sizes the pass at the attachment's level
++	// (colour attachments may have gaps: no texture at an index is VK_ATTACHMENT_UNUSED)
++	const RenderPassAttachmentDescriptor* firstColor = nullptr;
++	for (const auto& color: descriptor.colorAttachments) if (color.texture) { firstColor = &color; break; }
++	const RenderPassAttachmentDescriptor* firstAttachment = firstColor ? firstColor
++		: descriptor.depthAttachment ? static_cast<const RenderPassAttachmentDescriptor*>(&*descriptor.depthAttachment)
++		: descriptor.stencilAttachment ? static_cast<const RenderPassAttachmentDescriptor*>(&*descriptor.stencilAttachment) : nullptr;
++	// scion: no attachments (vertex-only work, rasterization counted by visibility queries): renderTargetWidth/Height
++	if ((!firstAttachment || !firstAttachment->texture) && (!descriptor.renderTargetWidth || !descriptor.renderTargetHeight)) {
++		throw std::runtime_error("render pass without attachments or render target size");
++	}
++	auto firstTexture = firstAttachment ? firstAttachment->texture : nullptr;
++	size_t passWidth = firstTexture ? std::max<size_t>(1, firstTexture->width() >> firstAttachment->level) : descriptor.renderTargetWidth;
++	size_t passHeight = firstTexture ? std::max<size_t>(1, firstTexture->height() >> firstAttachment->level) : descriptor.renderTargetHeight;
++	// a depth-only stencil attachment, or a stencil attachment sharing the depth texture, is one Vulkan depth/stencil attachment
++	bool stencilOnly = !descriptor.depthAttachment && descriptor.stencilAttachment && descriptor.stencilAttachment->texture;
++	bool sharedStencil = descriptor.depthAttachment && descriptor.stencilAttachment && descriptor.stencilAttachment->texture == descriptor.depthAttachment->texture;
++	const RenderPassAttachmentDescriptor* dsAttachment = descriptor.depthAttachment ? static_cast<const RenderPassAttachmentDescriptor*>(&*descriptor.depthAttachment)
++		: stencilOnly ? static_cast<const RenderPassAttachmentDescriptor*>(&*descriptor.stencilAttachment) : nullptr;
+ 	std::vector<VkClearValue> clearValues;
+ 
+ 	for (const auto& color: descriptor.colorAttachments) {
++		if (!color.texture) continue;
+ 		auto clearColor = color.clearColor;
+ 		VkClearValue clearValue {};
+ 		clearValue.color.float32[0] = clearColor.red;
+ 		clearValue.color.float32[1] = clearColor.green;
+ 		clearValue.color.float32[2] = clearColor.blue;
+ 		clearValue.color.float32[3] = clearColor.alpha;
++		// scion: integer formats clear with integer values
++		using PF = PixelFormat;
++		auto f = color.texture ? color.texture->pixelFormat() : PF::Invalid;
++		bool sint = f == PF::R8Sint || f == PF::R16Sint || f == PF::R32Sint || f == PF::RG8Sint || f == PF::RG16Sint || f == PF::RG32Sint || f == PF::RGBA8Sint || f == PF::RGBA16Sint || f == PF::RGBA32Sint;
++		bool uint = f == PF::R8Uint || f == PF::R16Uint || f == PF::R32Uint || f == PF::RG8Uint || f == PF::RG16Uint || f == PF::RG32Uint || f == PF::RGBA8Uint || f == PF::RGBA16Uint || f == PF::RGBA32Uint || f == PF::RGB10A2Uint;
++		double cc[4] = { clearColor.red, clearColor.green, clearColor.blue, clearColor.alpha };
++		for (int k = 0; k < 4; k++) {
++			if (uint) clearValue.color.uint32[k] = cc[k] <= 0 ? 0 : cc[k] >= 4294967295.0 ? 0xffffffffu : uint32_t(cc[k]);
++			else if (sint) clearValue.color.int32[k] = cc[k] <= -2147483648.0 ? INT32_MIN : cc[k] >= 2147483647.0 ? INT32_MAX : int32_t(cc[k]);
++		}
+ 		clearValues.push_back(clearValue);
+ 
+ 		// TODO: distinguish between read-only and read-write textures
+ 		_readWriteTextures.push_back(color.texture);
+ 	}
+ 
+-	if (descriptor.depthAttachment || descriptor.stencilAttachment) {
++	if (dsAttachment) {
+ 		VkClearValue clearValue {};
+ 		clearValue.depthStencil.depth = descriptor.depthAttachment ? descriptor.depthAttachment->clearDepth : 1.0;
+ 		clearValue.depthStencil.stencil = descriptor.stencilAttachment ? descriptor.stencilAttachment->clearStencil : 0;
+@@ -65,12 +88,13 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	std::vector<VkSubpassDependency> dependencies;
+ 
+ 	for (const auto& color: descriptor.colorAttachments) {
++		if (!color.texture) continue;
+ 		auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(color.texture);
+ 		VkAttachmentDescription desc {};
+ 		desc.format = pixelFormatToVkFormat(color.texture->pixelFormat());
+ 		desc.samples = VK_SAMPLE_COUNT_1_BIT; // TODO: support multisampling
+ 		desc.loadOp = loadActionToVkAttachmentLoadOp(color.loadAction, true);
+-		desc.storeOp = storeActionToVkAttachmentStoreOp(color.storeAction, true);
++		desc.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // scion: barrier() may split the pass, the first part keeps what it drew
+ 		desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+ 		desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+ 		desc.initialLayout = (color.loadAction == LoadAction::Load) ? privateTexture->imageLayout() : VK_IMAGE_LAYOUT_UNDEFINED;
+@@ -78,37 +102,49 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 		renderPassAttachments.push_back(desc);
+ 	}
+ 
+-	if (descriptor.depthAttachment) {
+-		auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(descriptor.depthAttachment->texture);
++	if (dsAttachment) {
++		auto privateTexture = std::dynamic_pointer_cast<PrivateTexture>(dsAttachment->texture);
+ 		VkAttachmentDescription desc {};
+ 		desc.format = pixelFormatToVkFormat(privateTexture->pixelFormat());
+ 		desc.samples = VK_SAMPLE_COUNT_1_BIT;
+-		desc.loadOp = loadActionToVkAttachmentLoadOp(descriptor.depthAttachment->loadAction, false);
+-		desc.storeOp = storeActionToVkAttachmentStoreOp(descriptor.depthAttachment->storeAction, false);
++		if (descriptor.depthAttachment) {
++			desc.loadOp = loadActionToVkAttachmentLoadOp(descriptor.depthAttachment->loadAction, false);
++			desc.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // scion: see barrier()
++		} else {
++			// stencil only: whatever depth the texture holds is kept
++			desc.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++			desc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++		}
++		bool load = desc.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
+ 		desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+ 		desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+-		desc.initialLayout = (descriptor.depthAttachment->loadAction == LoadAction::Load) ? privateTexture->imageLayout() : VK_IMAGE_LAYOUT_UNDEFINED;
++		if (stencilOnly || sharedStencil) {
++			desc.stencilLoadOp = loadActionToVkAttachmentLoadOp(descriptor.stencilAttachment->loadAction, false);
++			desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE; // scion: see barrier()
++			load = load || desc.stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
++		} else if (descriptor.depthAttachment) {
++			// a depth/stencil format whose stencil this pass does not use keeps it
++			desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++			desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
++			load = true;
++		}
++		desc.initialLayout = load ? privateTexture->imageLayout() : VK_IMAGE_LAYOUT_UNDEFINED;
+ 		desc.finalLayout = privateTexture->imageLayout();
+ 		renderPassAttachments.push_back(desc);
+ 	}
+ 
+-	if (descriptor.stencilAttachment) {
+-		throw std::runtime_error("TODO: support stencil attachments");
+-	}
+-
+ 	std::vector<VkAttachmentReference> colorAttachments;
+ 	VkAttachmentReference depthStencilAttachment {};
+ 
+ 	size_t index = 0;
+ 	for (const auto& color: descriptor.colorAttachments) {
+ 		VkAttachmentReference ref {};
+-		ref.attachment = index;
++		ref.attachment = color.texture ? uint32_t(index++) : VK_ATTACHMENT_UNUSED;
+ 		ref.layout = VK_IMAGE_LAYOUT_GENERAL;
+ 		colorAttachments.push_back(ref);
+-		++index;
+ 	}
+ 
+-	if (descriptor.depthAttachment) {
++	if (dsAttachment) {
+ 		depthStencilAttachment.attachment = index;
+ 		depthStencilAttachment.layout = VK_IMAGE_LAYOUT_GENERAL;
+ 		++index;
+@@ -118,7 +154,7 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+ 	subpassDesc.colorAttachmentCount = colorAttachments.size();
+ 	subpassDesc.pColorAttachments = colorAttachments.data();
+-	subpassDesc.pDepthStencilAttachment = (descriptor.depthAttachment || descriptor.stencilAttachment) ? &depthStencilAttachment : nullptr;
++	subpassDesc.pDepthStencilAttachment = dsAttachment ? &depthStencilAttachment : nullptr;
+ 
+ 	VkRenderPassCreateInfo renderPassInfo {};
+ 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+@@ -129,6 +165,10 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	renderPassInfo.dependencyCount = dependencies.size();
+ 	renderPassInfo.pDependencies = dependencies.data();
+ 
++	_attachmentDescs = renderPassAttachments; // scion: for the load pass of barrier()
++	_colorRefs = colorAttachments;
++	_hasDS = dsAttachment != nullptr;
++	_passWidth = passWidth; _passHeight = passHeight;
+ 	if (DynamicVK::vkCreateRenderPass(vkDevice, &renderPassInfo, nullptr, &_renderPass) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+@@ -137,11 +177,11 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	std::vector<VkImageView> framebufferAttachments;
+ 
+ 	for (const auto& colorAttachment: descriptor.colorAttachments) {
+-		framebufferAttachments.push_back(std::dynamic_pointer_cast<PrivateTexture>(colorAttachment.texture)->imageView());
++		if (colorAttachment.texture) framebufferAttachments.push_back(attachmentView(colorAttachment));
+ 	}
+ 
+-	if (descriptor.depthAttachment) {
+-		framebufferAttachments.push_back(std::dynamic_pointer_cast<PrivateTexture>(descriptor.depthAttachment->texture)->imageView());
++	if (dsAttachment) {
++		framebufferAttachments.push_back(attachmentView(*dsAttachment));
+ 	}
+ 
+ 	VkFramebufferCreateInfo framebufferInfo {};
+@@ -149,9 +189,9 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	framebufferInfo.renderPass = _renderPass;
+ 	framebufferInfo.attachmentCount = framebufferAttachments.size();
+ 	framebufferInfo.pAttachments = framebufferAttachments.data();
+-	framebufferInfo.width = firstTexture->width();
+-	framebufferInfo.height = firstTexture->height();
+-	framebufferInfo.layers = std::dynamic_pointer_cast<PrivateTexture>(firstTexture)->vulkanArrayLength();
++	framebufferInfo.width = passWidth;
++	framebufferInfo.height = passHeight;
++	framebufferInfo.layers = descriptor.renderTargetArrayLength > 1 ? descriptor.renderTargetArrayLength : 1; // scion: layered rendering
+ 	if (DynamicVK::vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &_framebuffer) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+@@ -161,16 +201,16 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+ 	renderPassBeginInfo.renderPass = _renderPass;
+ 	renderPassBeginInfo.framebuffer = _framebuffer;
+-	renderPassBeginInfo.renderArea.extent.width = firstTexture->width();
+-	renderPassBeginInfo.renderArea.extent.height = firstTexture->height();
++	renderPassBeginInfo.renderArea.extent.width = passWidth;
++	renderPassBeginInfo.renderArea.extent.height = passHeight;
+ 	renderPassBeginInfo.clearValueCount = clearValues.size();
+ 	renderPassBeginInfo.pClearValues = clearValues.data();
+ 	DynamicVK::vkCmdBeginRenderPass(vkCmdBuf, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+ 
+ 	// set default values
+ 
+-	setViewport(Viewport { 0, 0, static_cast<double>(firstTexture->width()), static_cast<double>(firstTexture->height()), 0, 1 });
+-	setScissorRect(ScissorRect { firstTexture->height(), firstTexture->width(), 0, 0 });
++	setViewport(Viewport { 0, 0, static_cast<double>(passWidth), static_cast<double>(passHeight), 0, 1 });
++	setScissorRect(ScissorRect { passHeight, passWidth, 0, 0 });
+ 	setCullMode(CullMode::None);
+ 	setFrontFacingWinding(Winding::Clockwise);
+ 
+@@ -181,19 +221,64 @@ Indium::PrivateRenderCommandEncoder::PrivateRenderCommandEncoder(std::shared_ptr
+ 	DynamicVK::vkCmdSetDepthBoundsTestEnable(vkCmdBuf, false);
+ 
+ 	DynamicVK::vkCmdSetStencilTestEnable(vkCmdBuf, false);
++	// scion: every dynamic state must be set before the first draw (Vulkan), also those a pipeline does not use
++	DynamicVK::vkCmdSetStencilOp(vkCmdBuf, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
++	DynamicVK::vkCmdSetStencilCompareMask(vkCmdBuf, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
++	DynamicVK::vkCmdSetStencilWriteMask(vkCmdBuf, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
++	DynamicVK::vkCmdSetStencilReference(vkCmdBuf, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
++	DynamicVK::vkCmdSetDepthBias(vkCmdBuf, 0, 0, 0);
++	DynamicVK::vkCmdSetDepthBounds(vkCmdBuf, 0, 1);
+ 
+ 	setBlendColor(0, 0, 0, 0);
+ 	DynamicVK::vkCmdSetRasterizerDiscardEnable(vkCmdBuf, false);
++	if (_privateDevice->dynamicPolygonMode) DynamicVK::vkCmdSetPolygonModeEXT(vkCmdBuf, VK_POLYGON_MODE_FILL); // scion
++	if (_privateDevice->dynamicDepthClamp) DynamicVK::vkCmdSetDepthClampEnableEXT(vkCmdBuf, VK_FALSE);
++};
++
++// scion: a framebuffer attachment is one level and one layer: the texture's own view when it is exactly that,
++// else a 2D view of the attachment's level and slice (kept until the encoder goes away with its command buffer)
++VkImageView Indium::PrivateRenderCommandEncoder::attachmentView(const RenderPassAttachmentDescriptor& attachment) {
++	auto texture = std::dynamic_pointer_cast<PrivateTexture>(attachment.texture);
++	auto type = texture->textureType();
++	bool cube = type == TextureType::eCube || type == TextureType::eCubeArray;
++	size_t layers = texture->vulkanArrayLength() * (cube ? 6 : 1);
++	size_t layer = type == TextureType::e3D ? attachment.depthPlane : attachment.slice; // 3D images are 2D-array-compatible (texture.cpp)
++	size_t arrayLength = _descriptor.renderTargetArrayLength > 1 && type != TextureType::e3D ? _descriptor.renderTargetArrayLength : 1; // scion: layered pass
++	if (attachment.level == 0 && layer == 0 && texture->mipmapLevelCount() <= 1 && layers <= 1 && type != TextureType::e3D) {
++		return texture->imageView();
++	}
++	VkImageViewCreateInfo info {};
++	info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++	info.image = texture->image();
++	info.viewType = arrayLength > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
++	info.format = pixelFormatToVkFormat(texture->pixelFormat());
++	info.subresourceRange.aspectMask = pixelFormatToVkImageAspectFlags(texture->pixelFormat());
++	info.subresourceRange.baseMipLevel = texture->parentRelativeLevel() + attachment.level;
++	info.subresourceRange.levelCount = 1;
++	info.subresourceRange.baseArrayLayer = texture->parentRelativeSlice() + layer;
++	info.subresourceRange.layerCount = arrayLength;
++	VkImageView view = VK_NULL_HANDLE;
++	if (DynamicVK::vkCreateImageView(_privateDevice->device(), &info, nullptr, &view) != VK_SUCCESS) {
++		throw std::runtime_error("could not create a render target view");
++	}
++	_attachmentViews.push_back(view);
++	return view;
+ };
+ 
+ Indium::PrivateRenderCommandEncoder::~PrivateRenderCommandEncoder() {
++	for (auto view: _attachmentViews) {
++		DynamicVK::vkDestroyImageView(_privateDevice->device(), view, nullptr);
++	}
+ 	if (_framebuffer) {
+ 		DynamicVK::vkDestroyFramebuffer(_privateDevice->device(), _framebuffer, nullptr);
+ 	}
+ 	if (_renderPass) {
+ 		DynamicVK::vkDestroyRenderPass(_privateDevice->device(), _renderPass, nullptr);
+ 	}
+-	DynamicVK::vkDestroyDescriptorPool(_privateDevice->device(), _pool, 0);
++	if (_loadPass) {
++		DynamicVK::vkDestroyRenderPass(_privateDevice->device(), _loadPass, nullptr);
++	}
++	for (auto pool: _pools) DynamicVK::vkDestroyDescriptorPool(_privateDevice->device(), pool, nullptr);
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::setRenderPipelineState(std::shared_ptr<RenderPipelineState> renderPipelineState) {
+@@ -220,8 +305,9 @@ void Indium::PrivateRenderCommandEncoder::setDepthBias(float depthBias, float sl
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::setDepthClipMode(DepthClipMode depthClipMode) {
+-	if (depthClipMode != DepthClipMode::Clip) {
+-		throw std::runtime_error("TODO: support setting depth clip mode");
++	// scion: clamping needs VK_EXT_extended_dynamic_state3 (ponytail: ignored without it)
++	if (_privateDevice->dynamicDepthClamp) {
++		DynamicVK::vkCmdSetDepthClampEnableEXT(_privateCommandBuffer.lock()->commandBuffer(), depthClipMode == DepthClipMode::Clamp ? VK_TRUE : VK_FALSE);
+ 	}
+ };
+ 
+@@ -239,7 +325,7 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
+ 		//       so we use a Vulkan 1.1 feature here and just flip the Y-axis of the viewport
+ 		//       (with a corresponding change in the origin).
+ 		vkViewport.x = viewport.originX;
+-		vkViewport.y = viewport.height - viewport.originY;
++		vkViewport.y = viewport.originY + viewport.height; // scion: the bottom edge (was height - originY)
+ 		vkViewport.width = viewport.width;
+ 		vkViewport.height = -viewport.height;
+ 		// the documentation for setViewport and setViewports states that znear and zfar must be between
+@@ -252,6 +338,9 @@ void Indium::PrivateRenderCommandEncoder::setViewports(const Viewport* viewports
+ 		tmp.push_back(vkViewport);
+ 	}
+ 	DynamicVK::vkCmdSetViewportWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
++	// scion: Vulkan wants as many scissors as viewports
++	_viewportCount = tmp.size();
++	if (_scissors.size() != _viewportCount) setScissorRects(std::vector<ScissorRect>(_scissors));
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::setViewports(const std::vector<Viewport>& viewports) {
+@@ -274,6 +363,10 @@ void Indium::PrivateRenderCommandEncoder::setScissorRects(const ScissorRect* sci
+ 		vkRect.extent.height = scissorRect.height;
+ 		tmp.push_back(vkRect);
+ 	}
++	// scion: one per viewport (missing ones repeat the last)
++	_scissors.assign(scissorRects, scissorRects + count);
++	if (tmp.empty()) return;
++	tmp.resize(_viewportCount, tmp.back());
+ 	DynamicVK::vkCmdSetScissorWithCount(buf->commandBuffer(), tmp.size(), tmp.data());
+ };
+ 
+@@ -292,9 +385,12 @@ void Indium::PrivateRenderCommandEncoder::updateBindings() {
+ 
+ 	auto buf = _privateCommandBuffer.lock();
+ 
+-	std::array<VkDescriptorSet, 2> descriptorSets = createDescriptorSets(_privatePSO->descriptorSetLayouts().layouts, _pool, _privateDevice, { _functionResources[0], _functionResources[1] }, { _privatePSO->vertexFunctionInfo(), _privatePSO->fragmentFunctionInfo() }, _keepAliveBuffers);
++	std::array<VkDescriptorSet, 2> descriptorSets = createDescriptorSets(_privatePSO->descriptorSetLayouts().layouts, _pools, _privateDevice, { _functionResources[0], _functionResources[1] }, { _privatePSO->vertexFunctionInfo(), _privatePSO->fragmentFunctionInfo() }, _keepAliveBuffers);
+ 
+ 	DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, _privatePSO->pipelineLayout(), 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
++	if (_privateDevice->bindlessSet) DynamicVK::vkCmdBindDescriptorSets(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, _privatePSO->pipelineLayout(), PrivateDevice::bindlessSetIndex, 1, &_privateDevice->bindlessSet, 0, nullptr); // scion
++	uint32_t srgbMasks[2] = { srgbWriteMask(_functionResources[0], _privatePSO->vertexFunctionInfo()), srgbWriteMask(_functionResources[1], _privatePSO->fragmentFunctionInfo()) };
++	DynamicVK::vkCmdPushConstants(buf->commandBuffer(), _privatePSO->pipelineLayout(), VK_SHADER_STAGE_ALL, 0, sizeof srgbMasks, srgbMasks);
+ 
+ 	const auto& vertexInputBindings = _privatePSO->vertexInputBindings();
+ 	if (vertexInputBindings.size() > 0) {
+@@ -359,6 +455,25 @@ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitive
+ 	_savedFunctionResources.push_back(_functionResources[1]);
+ };
+ 
++void Indium::PrivateRenderCommandEncoder::drawIndirect(PrimitiveType primitiveType, IndexType indexType, std::shared_ptr<Buffer> indexBuffer, size_t indexBufferOffset, std::shared_ptr<Buffer> indirectBuffer, size_t indirectOffset) {
++	auto buf = _privateCommandBuffer.lock();
++	auto cls = primitiveType == PrimitiveType::Point ? 0 : (primitiveType == PrimitiveType::Line || primitiveType == PrimitiveType::LineStrip) ? 1 : 2;
++	DynamicVK::vkCmdBindPipeline(buf->commandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, _privatePSO->pipelines()[cls]);
++	DynamicVK::vkCmdSetPrimitiveTopology(buf->commandBuffer(), primitiveTypeToVkPrimitiveTopology(primitiveType));
++	updateBindings();
++	_keepAliveBuffers.push_back(indirectBuffer);
++	auto args = std::dynamic_pointer_cast<PrivateBuffer>(indirectBuffer)->buffer();
++	if (indexBuffer) {
++		_keepAliveBuffers.push_back(indexBuffer);
++		DynamicVK::vkCmdBindIndexBuffer(buf->commandBuffer(), std::dynamic_pointer_cast<PrivateBuffer>(indexBuffer)->buffer(), indexBufferOffset, indexTypeToVkIndexType(indexType));
++		DynamicVK::vkCmdDrawIndexedIndirect(buf->commandBuffer(), args, indirectOffset, 1, 20);
++	} else {
++		DynamicVK::vkCmdDrawIndirect(buf->commandBuffer(), args, indirectOffset, 1, 16);
++	}
++	_savedFunctionResources.push_back(_functionResources[0]);
++	_savedFunctionResources.push_back(_functionResources[1]);
++};
++
+ void Indium::PrivateRenderCommandEncoder::drawPrimitives(PrimitiveType primitiveType, size_t vertexStart, size_t vertexCount, size_t instanceCount) {
+ 	drawPrimitives(primitiveType, vertexStart, vertexCount, instanceCount, 0);
+ };
+@@ -374,7 +489,32 @@ void Indium::PrivateRenderCommandEncoder::setVertexBytes(const void* bytes, size
+ 
+ void Indium::PrivateRenderCommandEncoder::endEncoding() {
+ 	auto buf = _privateCommandBuffer.lock();
++	if (_visActive) {
++		DynamicVK::vkCmdEndQuery(buf->commandBuffer(), _visPool, _visUsed - 1);
++		_visActive = false;
++	}
+ 	DynamicVK::vkCmdEndRenderPass(buf->commandBuffer());
++	if (_visUsed) {
++		// scion: sum each offset's spans into the visibility buffer when the GPU is done
++		// (ponytail: on the CPU, so later GPU work in the same command buffer does not see the results)
++		auto pool = _visPool; auto slots = _visSlots; auto device = _privateDevice;
++		auto target = _descriptor.visibilityResultBuffer; bool accumulate = _descriptor.visibilityAccumulate;
++		_visPool = VK_NULL_HANDLE; _visUsed = 0; _visSlots.clear();
++		buf->resultHandlers.push_back([=]() {
++			std::vector<uint64_t> counts(slots.size());
++			DynamicVK::vkGetQueryPoolResults(device->device(), pool, 0, counts.size(), counts.size() * 8, counts.data(), 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
++			auto base = static_cast<uint8_t*>(target->contents());
++			std::unordered_map<size_t, uint64_t> sums;
++			for (size_t i = 0; i < slots.size(); ++i) sums[slots[i].first] += slots[i].second ? (counts[i] ? 1 : 0) : counts[i];
++			for (auto& [offset, sum]: sums) {
++				if (!base || offset + 8 > target->length()) continue;
++				uint64_t value = sum;
++				if (accumulate) { uint64_t old; memcpy(&old, base + offset, 8); value += old; }
++				memcpy(base + offset, &value, 8);
++			}
++			DynamicVK::vkDestroyQueryPool(device->device(), pool, nullptr);
++		});
++	}
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::setVertexBuffer(std::shared_ptr<Buffer> buffer, size_t offset, size_t index) {
+@@ -564,12 +704,9 @@ void Indium::PrivateRenderCommandEncoder::setDepthStencilState(std::shared_ptr<D
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::setTriangleFillMode(TriangleFillMode triangleFillMode) {
+-	if (triangleFillMode != TriangleFillMode::Fill) {
+-		// we might have to just create duplicate pipelines for each possible fill mode;
+-		// there's only 2 at the moment, but this has to multiplied by the number of pipelines required
+-		// for other combinations. for example, we currently have to create a pipeline for each topology class
+-		// and there's 3 of those, so we would need 6 pipelines total. yikes.
+-		throw std::runtime_error("TODO: support changing fill mode");
++	// scion: wireframe needs VK_EXT_extended_dynamic_state3 (ponytail: ignored without it)
++	if (_privateDevice->dynamicPolygonMode) {
++		DynamicVK::vkCmdSetPolygonModeEXT(_privateCommandBuffer.lock()->commandBuffer(), triangleFillMode == TriangleFillMode::Lines ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL);
+ 	}
+ };
+ 
+@@ -584,11 +721,80 @@ void Indium::PrivateRenderCommandEncoder::setStencilReferenceValue(uint32_t fron
+ 	DynamicVK::vkCmdSetStencilReference(buf->commandBuffer(), VK_STENCIL_FACE_BACK_BIT, back);
+ };
+ 
+-void Indium::PrivateRenderCommandEncoder::setVisibilityResultMode(VisibilityResultMode mode, size_t offset) {
++// scion: a barrier between draws of one pass (Metal 4 barrierAfterEncoderStages, Metal 3 memoryBarrier). Vulkan only allows
++// limited barriers inside a render pass (no vertex -> index fetch, no fragment -> vertex), so the pass is split: end it, wait
++// for everything, and go on in a render pass that loads the attachments (compatible: the pipelines, bindings and dynamic
++// state carry over). A visibility span goes on in a new query at the same offset.
++void Indium::PrivateRenderCommandEncoder::barrier() {
+ 	auto buf = _privateCommandBuffer.lock();
++	auto vkCmdBuf = buf->commandBuffer();
++	std::optional<std::pair<size_t, bool>> visibility;
++	if (_visActive) {
++		DynamicVK::vkCmdEndQuery(vkCmdBuf, _visPool, _visUsed - 1);
++		_visActive = false;
++		visibility = _visSlots.back();
++	}
++	DynamicVK::vkCmdEndRenderPass(vkCmdBuf);
++	buf->fullBarrier();
++	if (!_loadPass) {
++		auto attachments = _attachmentDescs;
++		for (auto& a: attachments) {
++			a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++			a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++			a.initialLayout = a.finalLayout;
++		}
++		const auto& colorRefs = _colorRefs;
++		VkAttachmentReference dsRef { uint32_t(attachments.size() - 1), VK_IMAGE_LAYOUT_GENERAL };
++		VkSubpassDescription subpass {};
++		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++		subpass.colorAttachmentCount = colorRefs.size();
++		subpass.pColorAttachments = colorRefs.data();
++		subpass.pDepthStencilAttachment = _hasDS ? &dsRef : nullptr;
++		VkRenderPassCreateInfo info {};
++		info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
++		info.attachmentCount = attachments.size();
++		info.pAttachments = attachments.data();
++		info.subpassCount = 1;
++		info.pSubpasses = &subpass;
++		if (DynamicVK::vkCreateRenderPass(_privateDevice->device(), &info, nullptr, &_loadPass) != VK_SUCCESS) {
++			throw std::runtime_error("could not create the render pass to continue after a barrier");
++		}
++	}
++	VkRenderPassBeginInfo begin {};
++	begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
++	begin.renderPass = _loadPass;
++	begin.framebuffer = _framebuffer;
++	begin.renderArea.extent.width = _passWidth;
++	begin.renderArea.extent.height = _passHeight;
++	DynamicVK::vkCmdBeginRenderPass(vkCmdBuf, &begin, VK_SUBPASS_CONTENTS_INLINE);
++	if (visibility) setVisibilityResultMode(visibility->second ? VisibilityResultMode::Boolean : VisibilityResultMode::Counting, visibility->first);
++};
+ 
+-	// TODO: this can be implemented using Vulkan's occlusion queries
+-	throw std::runtime_error("TODO: support visibility results");
++void Indium::PrivateRenderCommandEncoder::setVisibilityResultMode(VisibilityResultMode mode, size_t offset) {
++	static constexpr uint32_t maxQueries = 4096; // ponytail: spans past this many in one encoder are not counted
++	auto buf = _privateCommandBuffer.lock();
++	if (_visActive) {
++		DynamicVK::vkCmdEndQuery(buf->commandBuffer(), _visPool, _visUsed - 1);
++		_visActive = false;
++	}
++	if (mode == VisibilityResultMode::Disabled || !_descriptor.visibilityResultBuffer || _visUsed == maxQueries) {
++		return;
++	}
++	if (!_visPool) {
++		VkQueryPoolCreateInfo info {};
++		info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++		info.queryType = VK_QUERY_TYPE_OCCLUSION;
++		info.queryCount = maxQueries;
++		if (DynamicVK::vkCreateQueryPool(_privateDevice->device(), &info, nullptr, &_visPool) != VK_SUCCESS) {
++			_visPool = VK_NULL_HANDLE;
++			return;
++		}
++		DynamicVK::vkResetQueryPool(_privateDevice->device(), _visPool, 0, maxQueries); // host reset (Vulkan 1.2): we are inside a render pass
++	}
++	DynamicVK::vkCmdBeginQuery(buf->commandBuffer(), _visPool, _visUsed, mode == VisibilityResultMode::Counting ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
++	_visSlots.push_back({ offset, mode == VisibilityResultMode::Boolean });
++	++_visUsed;
++	_visActive = true;
+ };
+ 
+ void Indium::PrivateRenderCommandEncoder::useResource(std::shared_ptr<Resource> resource, ResourceUsage usage, RenderStages stages) {
+diff --git a/src/indium/render-pipeline.cpp b/src/indium/render-pipeline.cpp
+index 1b6bb3b..f9aa07e 100644
+--- a/src/indium/render-pipeline.cpp
++++ b/src/indium/render-pipeline.cpp
+@@ -60,7 +60,7 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 	}
+ 
+ 	auto vertexFunctionName = _vertexFunction->name();
+-	auto fragmentFunctionName = _fragmentFunction->name();
++	auto fragmentFunctionName = _fragmentFunction ? _fragmentFunction->name() : std::string();
+ 	std::vector<VkPipelineShaderStageCreateInfo> stages;
+ 
+ 	VkPipelineShaderStageCreateInfo shaderStage {};
+@@ -69,12 +69,16 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 	shaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+ 	shaderStage.module = _vertexFunction->library()->shaderModule();
+ 	shaderStage.pName = vertexFunctionName.c_str();
++	shaderStage.pSpecializationInfo = std::dynamic_pointer_cast<PrivateFunction>(_vertexFunction)->specializationInfo();
+ 	stages.push_back(shaderStage);
+ 
+-	shaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+-	shaderStage.module = _fragmentFunction->library()->shaderModule();
+-	shaderStage.pName = fragmentFunctionName.c_str();
+-	stages.push_back(shaderStage);
++	if (_fragmentFunction) { // scion: depth-only pipelines have no fragment function
++		shaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
++		shaderStage.module = _fragmentFunction->library()->shaderModule();
++		shaderStage.pName = fragmentFunctionName.c_str();
++		shaderStage.pSpecializationInfo = std::dynamic_pointer_cast<PrivateFunction>(_fragmentFunction)->specializationInfo();
++		stages.push_back(shaderStage);
++	}
+ 
+ 	VkPipelineVertexInputStateCreateInfo vertexInputState {};
+ 	vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+@@ -201,15 +205,19 @@ void Indium::PrivateRenderPipelineState::recreatePipeline(VkRenderPass compatibl
+ 	};
+ 	VkPipelineDynamicStateCreateInfo dynamicState {};
+ 	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
++	if (_privateDevice->dynamicPolygonMode) dynamicStates.push_back(VK_DYNAMIC_STATE_POLYGON_MODE_EXT); // scion
++	if (_privateDevice->dynamicDepthClamp) dynamicStates.push_back(VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT);
+ 	dynamicState.dynamicStateCount = dynamicStates.size();
+ 	dynamicState.pDynamicStates = dynamicStates.data();
+ 
+-	std::vector<VkPushConstantRange> pushConstantRanges;
++	std::vector<VkPushConstantRange> pushConstantRanges { { VK_SHADER_STAGE_ALL, 0, 8 } }; // scion: sRGB write masks (vertex, fragment)
+ 
+ 	VkPipelineLayoutCreateInfo layoutCreateInfo {};
+ 	layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+-	layoutCreateInfo.setLayoutCount = _descriptorSetLayouts.layouts.size();
+-	layoutCreateInfo.pSetLayouts = _descriptorSetLayouts.layouts.data();
++	std::vector<VkDescriptorSetLayout> setLayouts(_descriptorSetLayouts.layouts.begin(), _descriptorSetLayouts.layouts.end());
++	if (_privateDevice->bindlessSet) setLayouts.push_back(_privateDevice->bindlessLayout); // scion: set 2, bindless resources
++	layoutCreateInfo.setLayoutCount = setLayouts.size();
++	layoutCreateInfo.pSetLayouts = setLayouts.data();
+ 	layoutCreateInfo.pushConstantRangeCount = pushConstantRanges.size();
+ 	layoutCreateInfo.pPushConstantRanges = pushConstantRanges.data();
+ 
+@@ -265,5 +273,6 @@ const Indium::FunctionInfo& Indium::PrivateRenderPipelineState::vertexFunctionIn
+ };
+ 
+ const Indium::FunctionInfo& Indium::PrivateRenderPipelineState::fragmentFunctionInfo() {
+-	return _fragmentFunction->functionInfo();
++	static const FunctionInfo none {};
++	return _fragmentFunction ? _fragmentFunction->functionInfo() : none;
+ };
+diff --git a/src/indium/sampler.cpp b/src/indium/sampler.cpp
+index 71392df..bdb0f78 100644
+--- a/src/indium/sampler.cpp
++++ b/src/indium/sampler.cpp
+@@ -19,7 +19,8 @@ Indium::PrivateSamplerState::PrivateSamplerState(std::shared_ptr<PrivateDevice>
+ 	info.mipLodBias = 0; // not sure where to get this from
+ 	info.anisotropyEnable = (descriptor.maxAnisotropy > 1) ? VK_TRUE : VK_FALSE;
+ 	info.maxAnisotropy = descriptor.maxAnisotropy;
+-	info.compareEnable = descriptor.normalizedCoordinates ? VK_TRUE : VK_FALSE; // FIXME: this assumes that the implementation defers to whatever the shader state specifies
++	// scion: Metal's default compare function (never) means "no comparison"; enabling it makes ordinary sampling undefined
++	info.compareEnable = (descriptor.normalizedCoordinates && descriptor.compareFunction != CompareFunction::Never) ? VK_TRUE : VK_FALSE;
+ 	info.compareOp = compareFunctionToVkCompareOp(descriptor.compareFunction);
+ 	info.minLod = descriptor.normalizedCoordinates ? descriptor.lodMinClamp : 0;
+ 	info.maxLod = descriptor.normalizedCoordinates ? descriptor.lodMaxClamp : 0;
+@@ -33,9 +34,18 @@ Indium::PrivateSamplerState::PrivateSamplerState(std::shared_ptr<PrivateDevice>
+ };
+ 
+ Indium::PrivateSamplerState::~PrivateSamplerState() {
++	if (_bindless) _privateDevice->bindlessRelease(1, _bindless); // scion
+ 	DynamicVK::vkDestroySampler(_privateDevice->device(), _sampler, nullptr);
+ };
+ 
++uint32_t Indium::PrivateSamplerState::bindlessIndex() {
++	std::call_once(_bindlessOnce, [this]() {
++		_bindless = _privateDevice->bindlessAlloc(1);
++		if (_bindless) _privateDevice->bindlessWrite(_bindless, VK_NULL_HANDLE, VK_NULL_HANDLE, _sampler);
++	});
++	return _bindless;
++};
++
+ std::shared_ptr<Indium::Device> Indium::PrivateSamplerState::device() {
+ 	return _privateDevice;
+ };
+diff --git a/src/indium/texture.cpp b/src/indium/texture.cpp
+index 1e3e971..5ecbcf4 100644
+--- a/src/indium/texture.cpp
++++ b/src/indium/texture.cpp
+@@ -5,9 +5,33 @@
+ #include <indium/dynamic-vk.hpp>
+ 
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
+ 
+ Indium::Texture::~Texture() {};
+-Indium::PrivateTexture::~PrivateTexture() {};
++Indium::PrivateTexture::~PrivateTexture() {
++	if (_bindless) _device->bindlessRelease(0, _bindless); // scion
++};
++
++uint32_t Indium::PrivateTexture::bindlessIndex() {
++	std::call_once(_bindlessOnce, [this]() {
++		_bindless = _device->bindlessAlloc(0);
++		if (!_bindless) return;
++		auto root = this->root();
++		VkFormatProperties viewProps {}, rootProps {};
++		DynamicVK::vkGetPhysicalDeviceFormatProperties(_device->physicalDevice(), pixelFormatToVkFormat(pixelFormat()), &viewProps);
++		DynamicVK::vkGetPhysicalDeviceFormatProperties(_device->physicalDevice(), pixelFormatToVkFormat(root->pixelFormat()), &rootProps);
++		auto aspects = pixelFormatToVkImageAspectFlags(pixelFormat());
++		bool combined = (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) && (aspects & VK_IMAGE_ASPECT_STENCIL_BIT); // ponytail: not sampled
++		auto both = [&](VkFormatFeatureFlags f) { return (viewProps.optimalTilingFeatures & f) && (rootProps.optimalTilingFeatures & f); };
++		auto sw = swizzle();
++		bool identity = sw.red == TextureSwizzle::Red && sw.green == TextureSwizzle::Green && sw.blue == TextureSwizzle::Blue && sw.alpha == TextureSwizzle::Alpha;
++		bool sampled = !combined && both(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
++		bool storage = identity && sampleCount() <= 1 && (both(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || srgbStorage());
++		_device->bindlessWrite(_bindless, sampled ? imageView() : VK_NULL_HANDLE, storage ? storageView() : VK_NULL_HANDLE, VK_NULL_HANDLE);
++	});
++	return _bindless;
++};
+ 
+ std::shared_ptr<Indium::Texture> Indium::Texture::parentTexture() const {
+ 	return nullptr;
+@@ -207,12 +231,14 @@ std::shared_ptr<Indium::BinarySemaphore> Indium::TextureView::synchronizePresent
+ 	return _original->synchronizePresentation();
+ };
+ 
++// scion: a view writes through to its texture (same texel size: views keep the size class)
+ void Indium::TextureView::replaceRegion(Indium::Region region, size_t mipmapLevel, const void* bytes, size_t bytesPerRow) {
+-	throw std::runtime_error("TODO: support replaceRegion on texture views");
++	replaceRegion(region, mipmapLevel, 0, bytes, bytesPerRow, 0);
+ };
+ 
+ void Indium::TextureView::replaceRegion(Indium::Region region, size_t mipmapLevel, size_t slice, const void* bytes, size_t bytesPerRow, size_t bytesPerImage) {
+-	throw std::runtime_error("TODO: support replaceRegion on texture views");
++	bool cube = _textureType == TextureType::eCube || _textureType == TextureType::eCubeArray;
++	_original->replaceRegion(region, _levels.start + mipmapLevel, cube ? _layers.start * 6 + slice : _layers.start + slice, bytes, bytesPerRow, bytesPerImage);
+ };
+ 
+ void Indium::TextureView::precommit(std::shared_ptr<Indium::PrivateCommandBuffer> cmdbuf) {
+@@ -307,6 +333,8 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 	if (_descriptor.textureType == TextureType::eCube || _descriptor.textureType == TextureType::eCubeArray) {
+ 		info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+ 	}
++	// scion: a depth plane of a 3D texture is a render target through a 2D view
++	if (info.imageType == VK_IMAGE_TYPE_3D) info.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+ 
+ 	auto imageAspect = pixelFormatToVkImageAspectFlags(_descriptor.pixelFormat);
+ 	bool isColor = (imageAspect & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
+@@ -326,62 +354,55 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 
+ 	info.tiling = (descriptor.allowGPUOptimizedContents || !canBeLinear) ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR;
+ 
+-	// we don't know ahead of time how the image is going to be used, so specify everything we support
+-	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+-	if (isColor) {
+-		info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+-	} else if (isDepthStencil) {
+-		info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
++	// scion: sRGB formats have no storage images: a texture shaders write is a UNORM image (MUTABLE_FORMAT), sampled and
++	// rendered through an sRGB view, written through a UNORM view (the shader encodes, see air2spv srgbEncode)
++	{
++		VkFormat srgbUnorm = info.format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : info.format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM :
++			info.format == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? VK_FORMAT_A8B8G8R8_UNORM_PACK32 : VK_FORMAT_UNDEFINED;
++		if (srgbUnorm != VK_FORMAT_UNDEFINED && (descriptor.usage & TextureUsage::ShaderWrite) != TextureUsage::Unknown) {
++			VkFormatProperties srgbProps {}, unormProps {};
++			DynamicVK::vkGetPhysicalDeviceFormatProperties(_device->physicalDevice(), info.format, &srgbProps);
++			DynamicVK::vkGetPhysicalDeviceFormatProperties(_device->physicalDevice(), srgbUnorm, &unormProps);
++			if (!(srgbProps.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && (unormProps.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
++				info.format = srgbUnorm;
++				info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
++				info.tiling = VK_IMAGE_TILING_OPTIMAL;
++				_srgbUnorm = srgbUnorm;
++			}
++		}
++	}
++
++	// we don't know ahead of time how the image is going to be used, so specify everything the format supports on this GPU
++	// (scion: asking for an unsupported usage, e.g. STORAGE on BGRA8 on many desktop GPUs, makes vkCreateImage fail)
++	VkFormatProperties formatProps {};
++	DynamicVK::vkGetPhysicalDeviceFormatProperties(_device->physicalDevice(), info.format, &formatProps);
++	auto features = (info.tiling == VK_IMAGE_TILING_OPTIMAL) ? formatProps.optimalTilingFeatures : formatProps.linearTilingFeatures;
++	if (isColor && !(features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) && (formatProps.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
++		info.tiling = VK_IMAGE_TILING_OPTIMAL;
++		features = formatProps.optimalTilingFeatures;
+ 	}
++	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++	if (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
++	if (features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
++	if (features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++	if (features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+ 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // TODO: check if this should be "concurrent" instead. i think we're good, though.
+ 	info.queueFamilyIndexCount = 0;
+ 	info.pQueueFamilyIndices = nullptr;
+ 	info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+ 
+-	if (DynamicVK::vkCreateImage(_device->device(), &info, nullptr, &_image) != VK_SUCCESS) {
+-		// TODO
+-		abort();
++	if (auto res = DynamicVK::vkCreateImage(_device->device(), &info, nullptr, &_image); res != VK_SUCCESS) {
++		throw std::runtime_error("vkCreateImage failed: VkResult " + std::to_string(res) + ", format " + std::to_string(info.format));
+ 	}
+ 
+ 	VkMemoryRequirements reqs;
+ 
+ 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
+ 
+-	size_t targetIndex = SIZE_MAX;
+-
+-	for (size_t i = 0; i < _device->memoryProperties().memoryTypeCount; ++i) {
+-		const auto& type = _device->memoryProperties().memoryTypes[i];
+-
+-		if ((reqs.memoryTypeBits & (1 << i)) == 0) {
+-			continue;
+-		}
+-
+-		if ((_storageMode == StorageMode::Managed || _storageMode == StorageMode::Shared) && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+-			continue;
+-		}
+-
+-		if (_storageMode == StorageMode::Shared && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+-			continue;
+-		}
+-
+-		// okay, this is good enough
+-		targetIndex = i;
+-		break;
+-	}
+-
+-	if (targetIndex == SIZE_MAX) {
+-		throw std::runtime_error("No suitable memory region found for image with requested storage mode");
+-	}
+-
+-	VkMemoryAllocateInfo allocateInfo {};
+-	allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+-	allocateInfo.allocationSize = reqs.size;
+-	allocateInfo.memoryTypeIndex = targetIndex;
+-
+-	if (DynamicVK::vkAllocateMemory(_device->device(), &allocateInfo, nullptr, &_memory) != VK_SUCCESS) {
+-		// TODO
+-		abort();
+-	}
++	// scion: optimal-tiled images often can't live in host-visible memory on discrete GPUs; CPU access to textures
++	// goes through staging copies anyway (replaceRegion / getBytes), so device-local memory is fine
++	try { _memory = _device->allocate(reqs, _storageMode, nullptr, "image"); }
++	catch (...) { DynamicVK::vkDestroyImage(_device->device(), _image, nullptr); throw; }
+ 
+ 	DynamicVK::vkBindImageMemory(_device->device(), _image, _memory, 0);
+ 
+@@ -393,6 +414,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 	cmdBufAllocInfo.commandBufferCount = 1;
+ 
+ 	VkCommandBuffer cmdBuf;
++	std::unique_lock qlock(_device->queueMutex);
+ 	if (DynamicVK::vkAllocateCommandBuffers(_device->device(), &cmdBufAllocInfo, &cmdBuf) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+@@ -447,6 +469,7 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 	DynamicVK::vkDestroyFence(_device->device(), theFence, nullptr);
+ 
+ 	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
++	qlock.unlock();
+ 
+ 	VkImageViewCreateInfo info2 {};
+ 	info2.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+@@ -463,9 +486,15 @@ Indium::ConcreteTexture::ConcreteTexture(std::shared_ptr<PrivateDevice> device,
+ 		// TODO
+ 		abort();
+ 	}
++	if (_srgbUnorm != VK_FORMAT_UNDEFINED) { // scion: the storage view of an sRGB texture
++		info2.format = _srgbUnorm;
++		info2.components = {};
++		if (DynamicVK::vkCreateImageView(_device->device(), &info2, nullptr, &_storageView) != VK_SUCCESS) _storageView = VK_NULL_HANDLE;
++	}
+ };
+ 
+ Indium::ConcreteTexture::~ConcreteTexture() {
++	if (_storageView) DynamicVK::vkDestroyImageView(_device->device(), _storageView, nullptr);
+ 	DynamicVK::vkDestroyImageView(_device->device(), _imageView, nullptr);
+ 	DynamicVK::vkDestroyImage(_device->device(), _image, nullptr);
+ 	DynamicVK::vkFreeMemory(_device->device(), _memory, nullptr);
+@@ -572,6 +601,7 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+ 	cmdBufAllocInfo.commandBufferCount = 1;
+ 
+ 	VkCommandBuffer cmdBuf;
++	std::unique_lock qlock(_device->queueMutex);
+ 	if (DynamicVK::vkAllocateCommandBuffers(_device->device(), &cmdBufAllocInfo, &cmdBuf) != VK_SUCCESS) {
+ 		// TODO
+ 		abort();
+@@ -586,7 +616,7 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+ 	// first, transition the image to the optimal layout for transfer destinations
+ 	VkImageMemoryBarrier barrier {};
+ 	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+-	barrier.srcAccessMask = VK_ACCESS_NONE;
++	barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; // scion: after earlier GPU work on this image
+ 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+ 	barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+ 	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+@@ -599,7 +629,7 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+ 	barrier.subresourceRange.baseArrayLayer = slice;
+ 	barrier.subresourceRange.layerCount = 1;
+ 
+-	DynamicVK::vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_NONE, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
++	DynamicVK::vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+ 
+ 	// now encode the copy
+ 	VkBufferImageCopy copyInfo {};
+@@ -651,4 +681,5 @@ void Indium::ConcreteTexture::replaceRegion(Indium::Region region, size_t mipmap
+ 	DynamicVK::vkDestroyFence(_device->device(), theFence, nullptr);
+ 
+ 	DynamicVK::vkFreeCommandBuffers(_device->device(), _device->oneshotCommandPool(), 1, &cmdBuf);
++	qlock.unlock();
+ };
+diff --git a/src/iridium/air.cpp b/src/iridium/air.cpp
+index 21c501f..e0661bc 100644
+--- a/src/iridium/air.cpp
++++ b/src/iridium/air.cpp
+@@ -146,6 +146,23 @@ static Iridium::SPIRV::ResultID llvmTypeToSPIRVType(Iridium::SPIRV::Builder& bui
+ 	}
+ };
+ 
++// Vulkan only accepts 16-bit fragment/vertex outputs with the storageInputOutput16 feature, which many drivers lack:
++// declare half-typed outputs as 32-bit floats and convert on store (Metal's half4 returns are very common).
++static Iridium::SPIRV::ResultID widenedOutputType(Iridium::SPIRV::Builder& builder, LLVMTypeRef llvmType) {
++	using namespace Iridium::SPIRV;
++	auto kind = DynamicLLVM::LLVMGetTypeKind(llvmType);
++	if (kind == LLVMHalfTypeKind) {
++		return builder.declareType(Type(Type::FloatTag {}, 32));
++	}
++	if (kind == LLVMVectorTypeKind && DynamicLLVM::LLVMGetTypeKind(DynamicLLVM::LLVMGetElementType(llvmType)) == LLVMHalfTypeKind) {
++		auto f32 = Type(Type::FloatTag {}, 32);
++		auto f32ID = builder.declareType(f32);
++		auto n = DynamicLLVM::LLVMGetVectorSize(llvmType);
++		return builder.declareType(Type(Type::VectorTag {}, n, f32ID, f32.size * n, ((n == 3 || n == 4) ? 4 : 2) * f32.alignment));
++	}
++	return ResultIDInvalid;
++};
++
+ static std::string_view llvmMDStringToStringView(LLVMValueRef llvmMDString) {
+ 	unsigned int length = 0;
+ 	auto rawStr = DynamicLLVM::LLVMGetMDString(llvmMDString, &length);
+@@ -457,7 +474,11 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 			}
+ 
+ 			if (!isSpecial) {
+-				auto type = llvmTypeToSPIRVType(builder, DynamicLLVM::LLVMStructGetTypeAtIndex(funcRetType, i));
++				auto memberLLType = DynamicLLVM::LLVMStructGetTypeAtIndex(funcRetType, i);
++				auto widened = widenedOutputType(builder, memberLLType);
++				auto type = widened != SPIRV::ResultIDInvalid ? widened : llvmTypeToSPIRVType(builder, memberLLType);
++				_outputTypes.resize(i + 1, SPIRV::ResultIDInvalid);
++				_outputTypes[i] = widened;
+ 				auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
+ 				auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
+ 				builder.addDecoration(var, SPIRV::Decoration { SPIRV::DecorationType::Location, { location } });
+@@ -469,7 +490,9 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 	} else if (DynamicLLVM::LLVMGetTypeKind(funcRetType) != LLVMVoidTypeKind) {
+ 		// TODO: handle case of returning a special variable (like air.position) with a single return value
+ 
+-		auto type = llvmTypeToSPIRVType(builder, funcRetType);
++		auto widened = widenedOutputType(builder, funcRetType);
++		auto type = widened != SPIRV::ResultIDInvalid ? widened : llvmTypeToSPIRVType(builder, funcRetType);
++		_outputTypes.assign(1, widened);
+ 		auto ptrType = builder.declareType(SPIRV::Type(SPIRV::Type::PointerTag {}, SPIRV::StorageClass::Output, type, 8));
+ 		auto var = builder.addGlobalVariable(ptrType, SPIRV::StorageClass::Output);
+ 		builder.addDecoration(var, SPIRV::Decoration { SPIRV::DecorationType::Location, { 0 } });
+@@ -1350,10 +1373,16 @@ void Iridium::AIR::Function::analyze(SPIRV::Builder& builder, OutputInfo& output
+ 									auto ptr = builder.encodeAccessChain(ptrType, perVertexVar, { builder.declareConstantScalar<int32_t>(0) });
+ 									builder.encodeStore(ptr, elm);
+ 								} else {
++									if (i < _outputTypes.size() && _outputTypes[i] != SPIRV::ResultIDInvalid) {
++										elm = builder.encodeFConvert(_outputTypes[i], elm);
++									}
+ 									builder.encodeStore(_outputValueIDs[i], elm);
+ 								}
+ 							}
+ 						} else {
++							if (!_outputTypes.empty() && _outputTypes[0] != SPIRV::ResultIDInvalid) {
++								val = builder.encodeFConvert(_outputTypes[0], val);
++							}
+ 							builder.encodeStore(_outputValueIDs[0], val);
+ 						}
+ 					}
