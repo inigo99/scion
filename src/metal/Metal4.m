@@ -238,12 +238,12 @@ static void mw4_bind(MW4Bound *b, _MW4ArgumentTable *t, id enc, int render, int 
     for (NSUInteger i = 0; i < t->_ntex; i++) {
         if (!t->_tex[i] || t->_tex[i] == b->tex[i]) continue;
         id<MTLTexture> x = mw_resource_for_id(t->_tex[i], NO); b->tex[i] = t->_tex[i];
-        if (!render) [enc setTexture:x atIndex:i]; else if (stage) [enc setFragmentTexture:x atIndex:i]; else [enc setVertexTexture:x atIndex:i];
+        if (!render) [(id<MTLComputeCommandEncoder>)enc setTexture:x atIndex:i]; else if (stage) [enc setFragmentTexture:x atIndex:i]; else [enc setVertexTexture:x atIndex:i];
     }
     for (NSUInteger i = 0; i < t->_nsamp; i++) {
         if (!t->_samp[i] || t->_samp[i] == b->samp[i]) continue;
         id<MTLSamplerState> x = mw_resource_for_id(t->_samp[i], YES); b->samp[i] = t->_samp[i];
-        if (!render) [enc setSamplerState:x atIndex:i]; else if (stage) [enc setFragmentSamplerState:x atIndex:i]; else [enc setVertexSamplerState:x atIndex:i];
+        if (!render) [(id<MTLComputeCommandEncoder>)enc setSamplerState:x atIndex:i]; else if (stage) [enc setFragmentSamplerState:x atIndex:i]; else [enc setVertexSamplerState:x atIndex:i];
     }
 }
 

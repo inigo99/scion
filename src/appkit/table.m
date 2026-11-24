@@ -313,8 +313,8 @@
 }
 - (NSRect)rectOfColumn:(NSInteger)c {
     CGFloat x = 0;
-    for (NSInteger i = 0; i < c && i < (NSInteger)[_cols count]; i++) if (![_cols[(NSUInteger)i] isHidden]) x += [_cols[(NSUInteger)i] width] + _intercellSpacing.width;
-    CGFloat w = c < (NSInteger)[_cols count] && ![_cols[(NSUInteger)c] isHidden] ? [_cols[(NSUInteger)c] width] + _intercellSpacing.width : 0;
+    for (NSInteger i = 0; i < c && i < (NSInteger)[_cols count]; i++) if (![_cols[(NSUInteger)i] isHidden]) x += [(NSTableColumn *)_cols[(NSUInteger)i] width] + _intercellSpacing.width;
+    CGFloat w = c < (NSInteger)[_cols count] && ![_cols[(NSUInteger)c] isHidden] ? [(NSTableColumn *)_cols[(NSUInteger)c] width] + _intercellSpacing.width : 0;
     return NSMakeRect(x, 0, w, self.bounds.size.height);
 }
 - (NSRect)frameOfCellAtColumn:(NSInteger)c row:(NSInteger)r {

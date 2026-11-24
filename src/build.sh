@@ -11,6 +11,11 @@ OUT=${OUT:-../bin}; mkdir -p $OUT/lib
 T=$(mktemp -d)
 sh build_rt.sh >/dev/null
 RT=../out/rt
+# Warnings that are noise for these libraries, which override methods in categories, call delegate methods on id
+# and pass nil to their own nonnull parameters by design.
+QUIET="-Wno-objc-protocol-method-implementation -Wno-nonnull -Wno-missing-noescape -Wno-unused-property-ivar \
+  -Wno-objc-missing-super-calls -Wno-objc-designated-initializers -Wno-incomplete-implementation -Wno-objc-method-access \
+  -Wno-atomic-property-with-user-defined-accessor -Wno-gnu-folding-constant -Wno-mismatched-parameter-types"
 for a in x86_64 arm64; do
   for f in libsystem dispatch libc; do
     clang -target $a-apple-macos11 -O2 -ffreestanding -fno-stack-protector -std=c11 -Wall -Wno-unused-parameter \
@@ -42,8 +47,8 @@ done
 llvm-lipo-18 -create $T/objc_x86_64.dylib $T/objc_arm64.dylib -output $OUT/lib/libobjc.A.dylib
 # Foundation.dylib (CoreFoundation/CoreServices alias onto it): NSString, collections, system classes, CF basics
 for a in x86_64 arm64; do
-  for f in NSString collections system regex json runloop extra swift plist coder cf more kvo eventkit xpc constlit; do
-    clang -target $a-apple-macos11 -O2 -ffreestanding -fno-stack-protector -Wall -Wno-unused-parameter -isystem ../sdk/include \
+  for f in NSString collections system regex json runloop extra swift calendar url plist coder cf more kvo eventkit xpc constlit; do
+    clang -target $a-apple-macos11 -O2 -ffreestanding -fno-stack-protector -Wall -Wno-unused-parameter $QUIET -isystem ../sdk/include \
       -fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fexceptions -fconstant-cfstrings -c foundation/$f.m -o $T/f_${f}_$a.o
   done
   ld64.lld-18 -dylib -arch $a -platform_version macos 11.0 11.0 \
@@ -53,10 +58,10 @@ done
 llvm-lipo-18 -create $T/fnd_x86_64.dylib $T/fnd_arm64.dylib -output $OUT/lib/Foundation.dylib
 # Metal.dylib (guest Objective-C half of Metal + QuartzCore + MetalFX; the host half is scion-metal.dll, see build_metal.sh)
 for a in x86_64 arm64; do
-  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter \
+  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter $QUIET \
     -Wno-objc-property-no-attribute -Wno-objc-protocol-property-synthesis -Wno-protocol -fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fconstant-cfstrings \
     -c metal/Metal.m -o $T/metal_$a.o &&
-  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter \
+  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter $QUIET \
     -Wno-objc-property-no-attribute -Wno-objc-protocol-property-synthesis -Wno-protocol -fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fconstant-cfstrings \
     -c metal/MetalFX.m -o $T/metalfx_$a.o
   ld64.lld-18 -dylib -arch $a -platform_version macos 11.0 11.0 -install_name /System/Library/Frameworks/Metal.framework/Versions/A/Metal \
@@ -66,7 +71,7 @@ llvm-lipo-18 -create $T/mtl_x86_64.dylib $T/mtl_arm64.dylib -output $OUT/lib/Met
 # AppKit.dylib (Cocoa, CoreGraphics, CoreVideo and MetalKit alias onto it; the host half is ui.cpp in scion.exe)
 for a in x86_64 arm64; do
   for f in app window menu widgets cg cgdraw draw layout nib document table misc statusbar lzfse assets; do
-    clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter \
+    clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter $QUIET \
       -Wno-objc-property-no-attribute -Wno-objc-protocol-property-synthesis -Wno-protocol -Wno-atomic-property-with-user-defined-accessor \
       -Wno-objc-missing-super-calls -Wno-deprecated-declarations \
       -fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fconstant-cfstrings -c appkit/$f.m -o $T/ak_${f}_$a.o
@@ -77,7 +82,7 @@ done
 llvm-lipo-18 -create $T/ak_x86_64.dylib $T/ak_arm64.dylib -output $OUT/lib/AppKit.dylib
 # GameController.dylib (CoreHaptics aliases onto it): controllers from UI_PAD, haptics -> UI_RUMBLE
 for a in x86_64 arm64; do
-  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter \
+  clang -target $a-apple-macos11 -isysroot ../sdk/darwin -isystem ../sdk/include -O2 -fno-stack-protector -Wall -Wno-unused-parameter $QUIET \
     -Wno-objc-property-no-attribute -Wno-objc-protocol-property-synthesis -Wno-protocol -Wno-atomic-property-with-user-defined-accessor \
     -fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fconstant-cfstrings -c gamecontroller/gc.m -o $T/gc_$a.o
   ld64.lld-18 -dylib -arch $a -platform_version macos 11.0 11.0 -install_name /System/Library/Frameworks/GameController.framework/Versions/A/GameController \
