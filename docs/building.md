@@ -31,6 +31,7 @@ sudo apt install wine64 xvfb mesa-vulkan-drivers golang
 ```sh
 scripts/fetch-deps.sh          # dynarmic, LLVM's libc++/libc++abi/libunwind, Indium -> deps/
 scripts/build-dynarmic.sh      # dynarmic for Windows x64 -> deps/dynarmic/build-win
+scripts/build-dynarmic.sh --linux   # and for the native Linux host (bin/scion) -> deps/dynarmic/build-linux
 ```
 
 Every dependency is cloned from its upstream repository at a pinned revision, and Scion's patches (`patches/`) are

@@ -68,8 +68,8 @@ Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad
 
 **Anfitrión nativo (vista previa).** Al compilar desde el código fuente también se genera `bin/scion`, un programa de
 Linux que ejecuta programas de macOS sin Wine: `bin/scion ruta/a/herramienta`. Hoy ejecuta programas de línea de
-comandos x86_64 (pasan esbuild, Biome, SwiftFormat y las pruebas del runtime); las ventanas, la entrada, el audio, Metal
-y los programas arm64 todavía necesitan Wine. Se agradece ayuda ([issue](../../issues/10)).
+comandos, de Intel y de Apple Silicon (pasan esbuild, Biome, SwiftFormat, class-dump y las pruebas del runtime); las
+ventanas, la entrada, el audio y Metal todavía necesitan Wine. Se agradece ayuda ([issue](../../issues/10)).
 
 ## Cómo funciona
 

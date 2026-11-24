@@ -100,6 +100,17 @@ std::wstring darwin_to_win(const char *p, int dirfd) {
 
 /* Anonymous memory goes below 2^39, from 4 GB up, as on macOS arm64 (Wine hands out 47-bit addresses): guest code
  * (Switch emulators, JS engines) checks that its pointers fit in 39 bits. First free gap at or above a moving cursor. */
+bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot) {
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT) return false;
+    *lo = (uint64_t)mi.BaseAddress; *hi = *lo + mi.RegionSize;
+    DWORD p = mi.Protect;
+    *prot = (p & (PAGE_NOACCESS | PAGE_GUARD)) ? 0
+          : (p & (PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ? 7 : (p & (PAGE_EXECUTE_READ | PAGE_EXECUTE)) ? 5
+          : (p & (PAGE_READWRITE | PAGE_WRITECOPY)) ? 3 : (p & PAGE_READONLY) ? 1 : 0;
+    return true;
+}
+int host_pid() { return (int)GetCurrentProcessId(); }
 void *image_alloc(uint64_t at, uint64_t len) {
     void *p = VirtualAlloc((void *)at, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     return p ? p : low_alloc(len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);

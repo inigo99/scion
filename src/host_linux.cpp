@@ -1,7 +1,7 @@
 /* host_linux.cpp — scion host for Linux x86_64, without Wine (#10). The Windows host is host.cpp; both implement the
  * host-call table of hostcalls.h, and dyld.cpp (Mach-O loading) is shared.
- * Work in progress: x86_64 guests and command-line programs. Not yet: arm64 guests (dynarmic), windows, input and
- * audio (ui), Metal, `scion install`.
+ * Work in progress: x86_64 and arm64 (dynarmic, arm64.cpp) command-line programs. Not yet: windows, input and audio
+ * (ui), Metal, `scion install`.
  * Linux is closer to Darwin than Windows is: paths are the same, guest file descriptors are host file descriptors,
  * file mappings are real, and x86_64 guests keep %gs for their thread-specific data as on macOS (the gs base is the
  * thread's struct gthread, whose first member is the TSD array). */
@@ -35,6 +35,9 @@ bool g_guest_arm = false;
 DWORD g_tls_self;
 void die(const char *m) { fprintf(stderr, "scion: %s\n", m); fflush(stderr); _exit(70); }
 #define HC static HCABI A
+/* a guest pointer as host code must use it: inside a vm_remap alias (arm64 guests) it becomes the source page */
+static inline A G(A x) { return g_guest_arm ? (A)arm64_translate((uint64_t)x) : x; }
+int host_pid() { return getpid(); }
 
 /* ======================================================================= Linux -> Darwin values */
 static A derr(int e = errno) {
@@ -70,9 +73,9 @@ static A guest_open_flags(A fl) {
     if (fl & D_O_CLOEXEC) f |= O_CLOEXEC;
     return f;
 }
-HC hc_write(A fd, A buf, A n, A, A, A) { return chk(write((int)fd, (const void *)buf, (size_t)n)); }
-HC hc_read(A fd, A buf, A n, A, A, A) { return chk(read((int)fd, (void *)buf, (size_t)n)); }
-HC hc_pread(A fd, A buf, A n, A off, A, A) { return chk(pread((int)fd, (void *)buf, (size_t)n, off)); }
+HC hc_write(A fd, A buf, A n, A, A, A) { return chk(write((int)fd, (const void *)G(buf), (size_t)n)); }
+HC hc_read(A fd, A buf, A n, A, A, A) { return chk(read((int)fd, (void *)G(buf), (size_t)n)); }
+HC hc_pread(A fd, A buf, A n, A off, A, A) { return chk(pread((int)fd, (void *)G(buf), (size_t)n, off)); }
 HC hc_open(A dirfd, A path, A flags, A mode, A, A) {
     TRACE("open %s\n", (const char *)path);
     return chk(openat(dfd(dirfd), (const char *)path, (int)guest_open_flags(flags), (mode_t)mode));
@@ -192,33 +195,90 @@ void *image_alloc(uint64_t at, uint64_t len) {
     return p != MAP_FAILED ? p : low_map(len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 void *low_alloc(size_t n, DWORD, DWORD) { return low_map(n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); }
+/* host_mem_query: /proc/self/maps, parsed again when guest memory changes or an address is not in the copy */
+struct MapRegion { uint64_t lo, hi; int prot; };
+static std::mutex g_maps_mu;
+static std::vector<MapRegion> g_maps;
+static std::atomic<uint64_t> g_maps_gen{1}; static uint64_t g_maps_seen;
+static void maps_changed() { g_maps_gen++; if (g_guest_arm) arm64_mem_changed(); }
+static void maps_load() {
+    g_maps.clear();
+    FILE *f = fopen("/proc/self/maps", "r"); if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long lo, hi; char p[5] = "";
+        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, p) != 3) continue;
+        g_maps.push_back({lo, hi, (p[0] == 'r' ? D_PROT_READ : 0) | (p[1] == 'w' ? D_PROT_WRITE : 0) | (p[2] == 'x' ? D_PROT_EXEC : 0)});
+    }
+    fclose(f);
+}
+bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot) {
+    std::lock_guard<std::mutex> l(g_maps_mu);
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass || g_maps_seen != g_maps_gen.load()) { g_maps_seen = g_maps_gen.load(); maps_load(); }
+        auto it = std::upper_bound(g_maps.begin(), g_maps.end(), a, [](uint64_t x, const MapRegion &r) { return x < r.lo; });
+        if (it != g_maps.begin() && a < (--it)->hi) { *lo = it->lo; *hi = it->hi; *prot = it->prot; return true; }
+    }
+    return false;
+}
 HC hc_mmap(A addr, A len, A prot, A flags, A fd, A off) {
     int f = (flags & D_MAP_SHARED ? MAP_SHARED : MAP_PRIVATE) | (flags & D_MAP_ANON ? MAP_ANONYMOUS : 0);
     int pr = (int)(prot & 7), hfd = flags & D_MAP_ANON ? -1 : (int)fd;
     if (!pr) f |= MAP_NORESERVE;
     void *p;
-    if (flags & D_MAP_FIXED) p = mmap((void *)addr, (size_t)len, pr, f | MAP_FIXED, hfd, off);
+    if (flags & D_MAP_FIXED) {
+        if (g_guest_arm) { arm64_alias_set((uint64_t)addr, ((uint64_t)len + 0xFFF) & ~0xFFFull, 0); arm64_invalidate((uint64_t)addr, (uint64_t)len); }
+        p = mmap((void *)addr, (size_t)len, pr, f | MAP_FIXED, hfd, off);
+    }
     else {
         p = addr ? mmap((void *)addr, (size_t)len, pr, f | MAP_FIXED_NOREPLACE, hfd, off) : MAP_FAILED;
         if (p == MAP_FAILED) p = low_map((size_t)len, pr, f, hfd, off);
         if (!p) p = MAP_FAILED;
     }
-    return p == MAP_FAILED ? derr() : (A)p;
+    if (p == MAP_FAILED) return derr();
+    maps_changed();
+    return (A)p;
 }
-HC hc_munmap(A addr, A len, A, A, A, A) { return chk(munmap((void *)addr, (size_t)len)); }
+HC hc_munmap(A addr, A len, A, A, A, A) {
+    if (g_guest_arm) { arm64_alias_set((uint64_t)addr, ((uint64_t)len + 0xFFF) & ~0xFFFull, 0); arm64_invalidate((uint64_t)addr, (uint64_t)len); }
+    A r = chk(munmap((void *)addr, (size_t)len));
+    maps_changed();
+    return r;
+}
 HC hc_mprotect(A addr, A len, A prot, A, A, A) {
+    /* an alias (vm_remap without copy) is only a translation: protect the pages it shows.
+     * ponytail: so both mappings change, and the range is assumed to lie in one alias */
+    addr = G(addr);
     uint64_t a = addr & ~0xFFFull, n = ((uint64_t)addr + len - a + 0xFFF) & ~0xFFFull;
-    return chk(mprotect((void *)a, n, (int)(prot & 7)));
+    if (g_guest_arm) arm64_invalidate(a, n);   /* executable code may have changed */
+    A r = chk(mprotect((void *)a, n, (int)(prot & 7)));
+    maps_changed();
+    return r;
 }
 /* copy without faulting (mach_vm_read_overwrite / mach_vm_write): the kernel reports a bad address as EFAULT */
 HC hc_safecopy(A dst, A src, A n, A need_w, A, A) {
+    dst = G(dst); src = G(src);
     struct iovec d = {(void *)dst, (size_t)n}, s = {(void *)src, (size_t)n};
     ssize_t r = need_w ? process_vm_writev(getpid(), &s, 1, &d, 1, 0) : process_vm_readv(getpid(), &d, 1, &s, 1, 0);
     return r == (ssize_t)n ? 0 : -D_EFAULT;
 }
 static bool readable(uint64_t a, size_t n) { uint64_t tmp[4]; return n <= sizeof tmp && hc_safecopy((A)tmp, (A)a, (A)n, 0, 0, 0) == 0; }
-HC hc_icache(A, A, A, A, A, A) { return 0; }   /* x86: coherent */
-HC hc_alias(A, A, A, A, A, A) { return -45; }   /* vm_remap without copy: arm64 guests only */
+HC hc_icache(A a, A n, A, A, A, A) { if (g_guest_arm) arm64_invalidate((uint64_t)a, (uint64_t)n); return 0; }   /* x86 is coherent */
+/* vm_remap(copy=FALSE), arm64 guests: dst stays inaccessible and the JIT redirects its accesses to src (arm64.cpp) */
+HC hc_alias(A dst, A len, A src, A fixed, A cur, A) {
+    if (!g_guest_arm) return -45;   /* ENOTSUP: x86_64 guests run natively, there is no software path to redirect them */
+    uint64_t n = ((uint64_t)len + 0xFFF) & ~0xFFFull, s = arm64_translate((uint64_t)src), lo, hi; int prot;
+    if (!n || !host_mem_query(s, &lo, &hi, &prot)) return -D_EINVAL;
+    void *d = fixed ? mmap((void *)dst, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0)
+                    : low_map(n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (!d || d == MAP_FAILED) return -D_ENOMEM;
+    maps_changed();
+    arm64_invalidate((uint64_t)d, n);
+    arm64_alias_set((uint64_t)d, n, s);
+    if (cur) *(int *)cur = prot;
+    TRACE("vm_remap alias %llx -> %llx (%llu bytes)\n", (unsigned long long)d, (unsigned long long)s, (unsigned long long)n);
+    return (A)d;
+}
 
 /* ======================================================================= process, time */
 HC hc_getpid(A, A, A, A, A, A) { return getpid(); }
@@ -240,6 +300,7 @@ HCABI A hc_clock(A kind, A, A, A, A, A) {
     return (A)t.tv_sec * 1000000000 + t.tv_nsec;
 }
 HC hc_random(A buf, A n, A, A, A, A) {
+    buf = G(buf);
     for (A got = 0; got < n;) { ssize_t r = getrandom((char *)buf + got, (size_t)(n - got), 0); if (r > 0) got += r; else if (errno != EINTR) return derr(); }
     return 0;
 }
@@ -285,6 +346,7 @@ static void lock_ex(std::atomic<uint32_t> *w) {
 }
 static void unlock_ex(std::atomic<uint32_t> *w) { if (w->exchange(0) & RW_WAITERS) rw_wake(w); }
 HC hc_lock(A l, A op, A, A, A, A) {
+    l = G(l);
     auto *w = (std::atomic<uint32_t> *)l;
     switch (op) {
     case 0: lock_ex(w); return 0;
@@ -306,6 +368,7 @@ HC hc_lock(A l, A op, A, A, A, A) {
 }
 /* condition variable: a sequence number in the guest's 8-byte word; waits hold the lock exclusively */
 HC hc_cond(A cv, A l, A op, A timeout, A, A) {
+    cv = G(cv); l = G(l);
     auto *seq = (std::atomic<uint32_t> *)cv;
     if (op) { seq->fetch_add(1); futex(seq, FUTEX_WAKE, op == 1 ? 1 : INT_MAX); return 0; }
     uint32_t s = seq->load();
@@ -316,6 +379,7 @@ HC hc_cond(A cv, A l, A op, A timeout, A, A) {
     return r < 0 && e == ETIMEDOUT ? -D_ETIMEDOUT : 0;
 }
 HC hc_futex(A addr, A op, A val, A timeout, A, A) {
+    addr = G(addr);
     if (op) { futex((void *)addr, FUTEX_WAKE, op == 1 ? 1 : INT_MAX); return 0; }
     return futex((void *)addr, FUTEX_WAIT, (uint32_t)val, timeout) < 0 && errno == ETIMEDOUT ? -D_ETIMEDOUT : 0;
 }
@@ -343,17 +407,17 @@ HC hc_kevent(A kq, A chp, A nch, A evp, A nev, A timeout) {
 }
 
 /* ======================================================================= threads */
-/* host-private per-thread state, in gthread.host */
+/* host-private per-thread state, in gthread.handle (gthread.host is the arm64 JIT's) */
 struct HostThread { pthread_t pt; std::atomic<uint64_t> pending{0}; std::atomic<int> suspend{0}; ucontext_t *uc = nullptr; std::atomic<int> parked{0}; };
 static thread_local struct gthread *tl_self;
 struct gthread *cur_gthread() { return tl_self; }
-static HostThread *ht(struct gthread *t) { return (HostThread *)t->host; }
+static HostThread *ht(struct gthread *t) { return (HostThread *)t->handle; }
 static std::mutex g_thrmu;
 static std::vector<struct gthread *> g_threads;   /* mach thread port = 0x1000 + index */
 static struct gthread *alloc_gthread() {
     struct gthread *t = (struct gthread *)mmap(nullptr, sizeof(struct gthread), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     t->tsd[0] = (uint64_t)t;   /* Darwin: slot 0 = pthread self */
-    t->host = (uint64_t)new HostThread;
+    t->handle = (uint64_t)new HostThread;
     std::lock_guard<std::mutex> l(g_thrmu);
     t->port = 0x1000 + (uint32_t)g_threads.size();
     g_threads.push_back(t);
@@ -367,7 +431,7 @@ static struct gthread *thread_by_port(A port) {
 static struct gthread *enter_gthread(struct gthread *t) {
     tl_self = t;
     t->tid = (uint64_t)syscall(SYS_gettid);
-    ht(t)->pt = pthread_self(); t->handle = (uint64_t)ht(t);
+    ht(t)->pt = pthread_self();
     pthread_attr_t a; void *lo; size_t sz;
     if (!pthread_getattr_np(pthread_self(), &a)) { pthread_attr_getstack(&a, &lo, &sz); pthread_attr_destroy(&a); t->stack_top = (uint64_t)lo + sz; t->stack_size = sz; }
     if (syscall(SYS_arch_prctl, ARCH_SET_GS, (unsigned long)t)) die("arch_prctl(ARCH_SET_GS) failed");
@@ -376,22 +440,31 @@ static struct gthread *enter_gthread(struct gthread *t) {
     return t;
 }
 HC hc_self(A, A, A, A, A, A) { return (A)tl_self; }
-struct ThreadStart { A start, arg; struct gthread *t; };
+struct ThreadStart { A start, arg, stacksize; struct gthread *t; };
 static void *thread_entry(void *p) {
     ThreadStart ts = *(ThreadStart *)p; delete (ThreadStart *)p;
-    enter_gthread(ts.t);
-    ((SYSV void *(*)(void *))ts.start)((void *)ts.arg);
+    struct gthread *t = enter_gthread(ts.t);
+    if (!g_guest_arm) { ((SYSV void *(*)(void *))ts.start)((void *)ts.arg); return nullptr; }
+    /* arm64 guests run on a stack of their own; the host thread's small stack is the JIT's */
+    uint8_t *stk = (uint8_t *)low_alloc((size_t)ts.stacksize, 0, 0);
+    t->stack_top = (uint64_t)(stk + ts.stacksize); t->stack_size = (uint64_t)ts.stacksize;
+    uint64_t a[1] = {(uint64_t)ts.arg};
+    run_arm64((uint64_t)ts.start, a, 1, t->stack_top, t);
+    arm64_thread_end();
+    munmap(stk, (size_t)ts.stacksize);   /* games and servers start and end threads all the time */
+    maps_changed();
+    t->stack_top = 0;
     return nullptr;
 }
 HC hc_thread(A start, A arg, A stacksize, A, A, A) {
     if (stacksize < 256 * 1024) stacksize = 256 * 1024;
     struct gthread *t = alloc_gthread();
-    pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, (size_t)stacksize);
+    pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, g_guest_arm ? 1 << 20 : (size_t)stacksize);
     pthread_t pt;
-    int r = pthread_create(&pt, &a, thread_entry, new ThreadStart{start, arg, t});
+    int r = pthread_create(&pt, &a, thread_entry, new ThreadStart{start, arg, stacksize, t});
     pthread_attr_destroy(&a);
     if (r) return -D_EAGAIN;
-    ht(t)->pt = pt; t->handle = (uint64_t)ht(t);
+    ht(t)->pt = pt;
     return (A)t;
 }
 HC hc_join(A t, A, A, A, A, A) { pthread_join(ht((struct gthread *)t)->pt, nullptr); return 0; }
@@ -551,6 +624,7 @@ static void *signal_pump(void *) {
 HC hc_tkill(A tp, A sig, A, A, A, A) {
     struct gthread *t = (struct gthread *)tp;
     if (!t || !t->handle || sig <= 0 || sig >= 64) return -3;   /* ESRCH */
+    if (g_guest_arm) { arm64_signal(t, (int)sig); return 0; }
     ht(t)->pending.fetch_or(1ull << sig);
     if (!g_pump_on.exchange(true)) { pthread_t p; pthread_create(&p, nullptr, signal_pump, nullptr); pthread_detach(p); }
     pthread_kill(ht(t)->pt, SIG_GUEST);
@@ -567,6 +641,7 @@ static void on_suspend(int, siginfo_t *, void *ucv) {
 HC hc_thread_ctl(A port, A op, A flavor, A state, A, A) {
     struct gthread *t = thread_by_port(port);
     if (!t || !t->handle || t == tl_self) return -1;
+    if (g_guest_arm) return arm64_thread_ctl(t, (int)op, (int)flavor, (void *)state);
     HostThread *h = ht(t);
     switch (op) {
     case D_THREAD_SUSPEND:
@@ -665,6 +740,7 @@ hostfn g_hc[HC_COUNT] = {
 
 /* ======================================================================= startup */
 uint64_t call_guest(uint64_t fn, const uint64_t *a, int n) {
+    if (g_guest_arm) { struct gthread *t = tl_self; return run_arm64(fn, a, n, t->stack_top - 64 * 1024, t); }
     uint64_t r[6] = {0};
     for (int i = 0; i < n && i < 6; i++) r[i] = a[i];
     return ((SYSV uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))fn)(r[0], r[1], r[2], r[3], r[4], r[5]);
@@ -675,7 +751,7 @@ asm(".globl jump_unixthread\njump_unixthread:\n mov %rdi, %rsp\n xor %eax, %eax\
 struct Startup { Image *main; std::vector<std::string> argv, envp, apple; };
 static void *guest_main(void *p) {
     Startup &s = *(Startup *)p;
-    enter_gthread(alloc_gthread());
+    struct gthread *t = enter_gthread(alloc_gthread());
     /* kernel layout, contiguous: argc, argv..., 0, envp..., 0, apple..., 0 (Go walks argv past argc to find envp) */
     std::vector<uint64_t> frame{(uint64_t)s.argv.size()};
     for (auto *v : {&s.argv, &s.envp, &s.apple}) { for (auto &str : *v) frame.push_back((uint64_t)&str[0]); frame.push_back(0); }
@@ -686,6 +762,13 @@ static void *guest_main(void *p) {
     strncpy((char *)g_libsys->syms["_scion_exe_path"], s.argv[0].c_str(), 1023);
     Image &im = *s.main;
     uint64_t args4[4] = {(uint64_t)s.argv.size(), (uint64_t)argv, (uint64_t)envp, (uint64_t)apple};
+    if (im.arm) {
+        uint8_t *stk = (uint8_t *)low_alloc(8 << 20, 0, 0);
+        t->stack_top = (uint64_t)(stk + (8 << 20)); t->stack_size = 8 << 20;
+        if (im.unixthread) die("LC_UNIXTHREAD is not supported for arm64 yet");
+        init_all(&im, args4);
+        hc_exit((A)run_arm64(im.entry, args4, 4, t->stack_top, t), 0, 0, 0, 0, 0);
+    }
     init_all(&im, args4);
     if (im.unixthread) {
         uint64_t *sp = (uint64_t *)alloca(frame.size() * 8 + 64);
@@ -726,7 +809,8 @@ std::string mw_bundle_executable(const std::string &app) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: scion <macOS program | App.app> [args...]\n"
-                        "   SCION_TRACE=1 traces the program. Linux host (#10): x86_64 command-line programs for now.\n");
+                        "   SCION_TRACE=1 traces the program; SCION_ARCH=arm64 runs the arm64 slice of a universal binary.\n"
+                        "   Linux host (#10): command-line programs for now.\n");
         return 2;
     }
     g_trace = getenv("SCION_TRACE") != nullptr;
@@ -743,11 +827,17 @@ int main(int argc, char **argv) {
     g_lib_dir = exe_dir() + "/lib";
     Image *main = load_all(mainpath);
     if (!main) die("not a valid 64-bit Mach-O executable");
-    if (main->arm) die("arm64 programs are not supported by the Linux host yet (#10); use the x86_64 slice or Wine");
+    g_guest_arm = main->arm;
     uint64_t *table = (uint64_t *)g_libsys->syms["_scion_hc"];
     if (!table) die("libSystem lacks _scion_hc");
-    for (int i = 0; i < HC_COUNT; i++) table[i] = (uint64_t)g_hc[i];
-    g_missing_stub = g_libsys->syms["_dyld_stub_binder"];
+    if (main->arm) {   /* host calls arrive as SVC #n through these thunks (arm64.cpp) */
+        arm64_init();
+        for (int i = 0; i < HC_COUNT; i++) table[i] = (uint64_t)(g_arm_thunks + 2 * i);
+        g_missing_stub = (uint64_t)(g_arm_thunks + 2 * HC_exit);   /* exit(x0) */
+    } else {
+        for (int i = 0; i < HC_COUNT; i++) table[i] = (uint64_t)g_hc[i];
+        g_missing_stub = g_libsys->syms["_dyld_stub_binder"];
+    }
     *(uint64_t *)g_libsys->syms["_scion_tsd_off"] = 0;   /* %gs:0 = TSD slot 0 = the struct gthread itself */
     for (size_t k = 0; k < g_images.size(); k++) prepare_image(g_images[k]);
     if (!g_missing.empty()) for (auto &m : g_missing) TRACE("unimplemented import: %s\n", m.c_str());

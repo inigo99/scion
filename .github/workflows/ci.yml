@@ -30,6 +30,7 @@ jobs:
         run: |
           scripts/fetch-deps.sh
           [ -f deps/dynarmic/build-win/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh
+          [ -f deps/dynarmic/build-linux/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh --linux
 
       - name: Build Scion (core)
         run: src/build.sh
@@ -56,11 +57,11 @@ jobs:
           wineboot -i >/dev/null 2>&1 || true
           tests/run.sh
 
-      # Everything that needs windows, input, audio, Metal or arm64 guests is still missing on the native host
+      # Everything that needs windows, input, audio or Metal is still missing on the native host
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: arm64|Metal|MSL|AppKit|dialogs|2D drawing|VFL|NSStatusItem|GameController|GCKeyboard|AudioToolbox|install|Itsycal|Reminders|Hex Fiend
+          SCION_SKIP: Metal|MSL|AppKit|dialogs|2D drawing|VFL|NSStatusItem|GameController|GCKeyboard|AudioToolbox|install|Itsycal|Reminders|Hex Fiend
         run: tests/run.sh
 
       - name: Upload the build
