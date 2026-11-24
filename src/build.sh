@@ -106,7 +106,7 @@ L=$D/build-linux
 if [ -f $L/src/dynarmic/libdynarmic.a ] && pkg-config --exists sdl2 freetype2 fontconfig libpng; then
   g++ -std=c++20 -O2 -Wall -Wno-unused-parameter host_linux.cpp ui_linux.cpp dyld.cpp arm64.cpp -o $OUT/scion \
     -I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include $(pkg-config --cflags sdl2 freetype2 fontconfig libpng) \
-    $L/src/dynarmic/libdynarmic.a $(find $L/externals -name '*.a') $(pkg-config --libs sdl2 freetype2 fontconfig libpng) -ljpeg -lpthread -lrt
+    $L/src/dynarmic/libdynarmic.a $(find $L/externals -name '*.a') $(pkg-config --libs sdl2 freetype2 fontconfig libpng) -ljpeg -lX11 -lpthread -lrt
 else echo "note: dynarmic for Linux (scripts/build-dynarmic.sh --linux) or SDL2/FreeType/fontconfig/libpng are missing: skipping bin/scion"; fi
 # scionw.exe: scion.exe without a console window (Start menu shortcuts of installed apps)
 x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -municode -mwindows launcher.cpp -o $OUT/scionw.exe -lshell32 -lole32 -luuid -static

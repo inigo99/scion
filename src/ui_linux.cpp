@@ -280,7 +280,9 @@ static void ui_start() {
         std::thread([&] {
             SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");          /* signals belong to the guest */
             SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");               /* Metal layers draw into X11 windows (XWayland on Wayland) */
-            SDL_SetHint("SDL_VIDEO_X11_XINITTHREADS", "1");          /* Vulkan presents from other threads */
+            XInitThreads();                                          /* Vulkan presents from other threads */
+            /* window surfaces on X11 itself: a GL-backed one would re-create the X window, under a Metal layer's swapchain */
+            SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
             SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
             SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
             if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS)) fprintf(stderr, "scion: SDL: %s\n", SDL_GetError());
@@ -369,6 +371,10 @@ static A ui_thread_op(Req *q) {
         Win *w = new Win; w->sw = sw; w->style = d->style;
         { std::lock_guard<std::mutex> l(g_wmu); g_wins.push_back(w); w->id = (uint32_t)g_wins.size(); }
         if (d->visible) SDL_ShowWindow(sw);
+        /* the window must exist on the X server before another connection (Vulkan's) names it */
+        SDL_SysWMinfo i; SDL_VERSION(&i.version);
+        if (SDL_GetWindowWMInfo(sw, &i) && i.subsystem == SDL_SYSWM_X11) { XSync(i.info.x11.display, False);
+        }
         return w->id;
     }
     case UI_WINDOW_SET: {
@@ -702,18 +708,27 @@ static A image_encode(const MwImage *img, A type, float quality, uint64_t *size)
 }
 
 /* ======================================================================= Metal layers: the X11 window behind an SDL window */
-static void nw_size(void *ctx, uint32_t *w, uint32_t *h) { int a = 0, b = 0; SDL_GetWindowSizeInPixels((SDL_Window *)ctx, &a, &b); *w = (uint32_t)a; *h = (uint32_t)b; }
+static void nw_size(void *ctx, uint32_t *w, uint32_t *h) { int a = 0, b = 0; if (((Win *)ctx)->sw) SDL_GetWindowSizeInPixels(((Win *)ctx)->sw, &a, &b); *w = (uint32_t)a; *h = (uint32_t)b; }
+static void nw_set_size(void *ctx, uint32_t w, uint32_t h) {
+    Win *win = (Win *)ctx; int x = 0, y = 0;
+    if (win->sw) SDL_GetWindowPosition(win->sw, &x, &y);
+    on_ui(UI_WINDOW_SET, win->id, UI_W_FRAME, x, y, (A)w | (A)h << 32);
+}
 bool ui_native_window(uint64_t sdl_window, uint32_t w, uint32_t h, const char *title, MwNativeWindow *out) {
-    SDL_Window *s = (SDL_Window *)sdl_window;
-    if (!s) {   /* a CAMetalLayer without an AppKit window: one of its own */
+    Win *win = nullptr;
+    bool own = !sdl_window;
+    if (own) {   /* a CAMetalLayer without an AppKit window: one of its own */
         MwWindowDesc d{-32001, -32001, (int32_t)(w ? w : 640), (int32_t)(h ? h : 480), UI_STYLE_TITLED | UI_STYLE_CLOSABLE | UI_STYLE_RESIZABLE | UI_STYLE_NOMENU, 1, title};
-        Win *win = win_by_id((uint32_t)on_ui(UI_WINDOW_CREATE, (A)&d));
-        s = win ? win->sw : nullptr;
-    }
+        win = win_by_id((uint32_t)on_ui(UI_WINDOW_CREATE, (A)&d));
+    } else { std::lock_guard<std::mutex> l(g_wmu); for (Win *x : g_wins) if (x->sw == (SDL_Window *)sdl_window) win = x; }
+    SDL_Window *s = win ? win->sw : nullptr;
     if (!s) return false;
     SDL_SysWMinfo i; SDL_VERSION(&i.version);
     if (!SDL_GetWindowWMInfo(s, &i) || i.subsystem != SDL_SYSWM_X11) { fprintf(stderr, "scion: Metal needs an X11 window\n"); return false; }
-    *out = MwNativeWindow{i.info.x11.display, (uint64_t)i.info.x11.window, nw_size, nullptr, s};
+    /* Vulkan gets a connection of its own: SDL's belongs to the UI thread */
+    static Display *dpy = XOpenDisplay(nullptr);
+    if (!dpy) return false;
+    *out = MwNativeWindow{dpy, (uint64_t)i.info.x11.window, nw_size, nullptr, own ? nw_set_size : nullptr, win};
     return true;
 }
 

@@ -121,7 +121,8 @@ static std::shared_ptr<Window> new_window(int w, int h, const char *, uint64_t p
     XlibSurfaceInfo si{(VkStructureType)1000004000 /* XLIB_SURFACE_CREATE_INFO_KHR */, nullptr, 0, host->display, (unsigned long)host->window};
     auto create = (PFN_xlib_create)DynamicVK::vkGetInstanceProcAddr(Indium::globalInstance, "vkCreateXlibSurfaceKHR");
     VkSurfaceKHR surface;
-    if (!create || create(Indium::globalInstance, &si, nullptr, &surface) != VK_SUCCESS) throw std::runtime_error("vkCreateXlibSurfaceKHR");
+    VkResult r = create ? create(Indium::globalInstance, &si, nullptr, &surface) : VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (r != VK_SUCCESS) throw std::runtime_error("vkCreateXlibSurfaceKHR: " + std::to_string((int)r));
     win->layer = IndiumKit::Layer::make(surface, device(), win->cw, win->ch);
     if (pixelFormat) win->layer->setPixelFormat((PixelFormat)pixelFormat);
     if (getenv("SCION_METAL_INFO")) fprintf(stderr, "scion-metal: layer in X11 window %#llx (%ux%u)\n", (unsigned long long)host->window, win->cw.load(), win->ch.load());
@@ -505,6 +506,8 @@ static int64_t dispatch(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, 
         auto win = get<Window>(a);
 #ifdef _WIN32
         if (!win->external && b && c && (b != win->cw || c != win->ch)) PostMessageW(win->hwnd, WM_APP, (WPARAM)b, (LPARAM)c);
+#else
+        if (win->nw.set_size && b && c && (b != win->cw || c != win->ch)) win->nw.set_size(win->nw.ctx, (uint32_t)b, (uint32_t)c);
 #endif
         return 0;
     }

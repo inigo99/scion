@@ -12,6 +12,7 @@ typedef struct {
     uint64_t window;                                      /* X11 Window */
     void (*size)(void *ctx, uint32_t *w, uint32_t *h);   /* its current client size, pixels */
     int (*closed)(void *ctx);                             /* 1 once the user closed it (a window of the layer's own) */
+    void (*set_size)(void *ctx, uint32_t w, uint32_t h);  /* drawableSize: resize a window of the layer's own (0: an AppKit window's) */
     void *ctx;
 } MwNativeWindow;
 
