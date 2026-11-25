@@ -1,12 +1,15 @@
-scion: a cache of translated code shared by the JITs of a process (backend/x64/a64_code_cache.cpp): a block one JIT
-(guest thread) has compiled is copied into another's code and relocated instead of being compiled again, as long as
-the guest instructions there are the same. Needs patches/xbyak-reloc-hook.patch.
+scion: a cache of translated code (backend/x64/a64_code_cache.cpp), shared by the JITs of a process and kept on disk
+for the next process: a block that has been compiled is copied into a JIT's code and relocated instead of being
+compiled again, as long as the guest instructions there are the same. Needs patches/xbyak-reloc-hook.patch.
 - after a block is emitted, the fields that refer outside it are recorded symbolically: rel32 and rip-relative
   references to prelude code, constants, fastmem fallbacks and the host executable, and mov immediates that are the
   JIT's own pointers (configuration, callbacks, tpidr registers, exclusive monitor slots); block links are emitted
   again by the JIT that installs the copy, fastmem fault information is relocated with it
 - UserConfig::code_cache (MakeCodeCache), with code_cache_verify (also decode each block with Zydis and compare, and
   compile cached blocks again and compare) and code_cache_selftest (run every block from a relocated copy) for testing
+- LoadCodeCache / SaveCodeCache: a file of checksummed records, tied to a key (the build of the host) and to the
+  JITs' configuration, read lazily (a record is parsed when its location is first looked for); a few new blocks are
+  appended, more rewrite the file, dropping the records no process has looked for in 8 rewrites
 
 diff --git a/src/dynarmic/CMakeLists.txt b/src/dynarmic/CMakeLists.txt
 index b234cd26..baab7137 100644
@@ -23,10 +26,10 @@ index b234cd26..baab7137 100644
              backend/x64/a64_emit_x64_memory.cpp
 diff --git a/src/dynarmic/backend/x64/a64_code_cache.cpp b/src/dynarmic/backend/x64/a64_code_cache.cpp
 new file mode 100644
-index 00000000..a2667a34
+index 00000000..024455c0
 --- /dev/null
 +++ b/src/dynarmic/backend/x64/a64_code_cache.cpp
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,1040 @@
 +/* This file is part of the dynarmic project.
 + * SPDX-License-Identifier: 0BSD
 + */
@@ -47,7 +50,9 @@ index 00000000..a2667a34
 +#include "dynarmic/backend/x64/a64_code_cache.h"
 +
 +#include <algorithm>
++#include <cstdio>
 +#include <cstring>
++#include <filesystem>
 +
 +#include <Zydis/Zydis.h>
 +#include <fmt/format.h>
@@ -81,37 +86,63 @@ index 00000000..a2667a34
 +
 +std::string CodeCacheStats(const CodeCache& c) {
 +    std::lock_guard lock{c.mutex};
-+    return fmt::format("{} blocks ({} KB): {} compiled, {} copied, {} stale, {} not cacheable, {} verified, {} differ",
-+                       c.blocks.size(), c.bytes / 1024, c.compiled.load(), c.copied.load(), c.stale.load(),
++    const auto local = std::count_if(c.entries.begin(), c.entries.end(), [](const auto& e) { return e.second.block && e.second.block->process_local; });
++    return fmt::format("{} blocks ({} KB, {} not for the file): {} compiled, {} copied, {} stale, {} not cacheable, {} verified, {} differ",
++                       c.blocks, c.bytes / 1024, local, c.compiled.load(), c.copied.load(), c.stale.load(),
 +                       c.uncacheable.load(), c.verified.load(), c.mismatches.load());
 +}
 +
-+std::shared_ptr<const Backend::X64::CachedBlock> CodeCache::Find(u64 location) const {
++std::shared_ptr<const Backend::X64::CachedBlock> CodeCache::Find(u64 location) {
 +    std::lock_guard lock{mutex};
-+    const auto it = blocks.find(location);
-+    return it == blocks.end() ? nullptr : it->second;
++    auto it = entries.find(location);
++    if (it == entries.end() || it->second.block || it->second.file != Entry::Saved) {
++        return it == entries.end() ? nullptr : it->second.block;
++    }
++    auto& e = it.value();
++    e.file = Entry::Used;
++    auto b = Backend::X64::ParseRecord(file, e.record);
++    if (!b || b->location != location) {
++        entries.erase(it);  // damaged: not saved again
++        return nullptr;
++    }
++    if (bytes + b->Bytes() <= max_bytes) {
++        bytes += b->Bytes();
++        blocks++;
++        e.block = b;
++    }
++    return b;
 +}
 +
 +void CodeCache::Insert(std::shared_ptr<const Backend::X64::CachedBlock> block) {
 +    std::lock_guard lock{mutex};
-+    auto& slot = blocks[block->location];
-+    if (slot) {
-+        if (slot->guest == block->guest) {
++    auto& e = entries[block->location];
++    if (e.block) {
++        if (e.block->guest == block->guest) {
 +            return;  // another JIT got there first
 +        }
-+        bytes -= slot->Bytes();  // the guest code there has changed
++        bytes -= e.block->Bytes();  // the guest code there has changed
++        blocks--;
 +    } else if (bytes + block->Bytes() > max_bytes) {
-+        blocks.erase(block->location);
++        if (e.file == Entry::None) {
++            entries.erase(block->location);
++        }
 +        return;
 +    }
 +    bytes += block->Bytes();
-+    slot = std::move(block);
++    blocks++;
++    e.file = Entry::None;  // (its record, if it had one, is replaced)
++    e.block = std::move(block);
++    dirty = true;
 +}
 +
 +bool CodeCache::Attach(u64 cfg) {
 +    std::lock_guard lock{mutex};
 +    if (!config) {
 +        config = cfg;
++        if (file_config != cfg) {  // saved by JITs configured differently
++            entries.clear();
++            file.clear();
++        }
 +    }
 +    return *config == cfg;
 +}
@@ -142,6 +173,12 @@ index 00000000..a2667a34
 +        return 10;
 +    }
 +    return 0;
++}
++
++static bool ValidFallbackKey(u64 key) {
++    const u64 bitsize = (key >> 16) & 0xffff;
++    return (key & 0xff) <= 2 && ((key >> 8) & 0xff) <= 1 && (bitsize == 8 || bitsize == 16 || bitsize == 32 || bitsize == 64 || bitsize == 128)
++        && ((key >> 32) & 0xff) < 16 && ((key >> 40) & 0xff) < 16 && (key >> 48) == 0;
 +}
 +
 +// The code also depends on the instructions an Interpret terminal hands to the interpreter (A64MergeInterpretBlocksPass
@@ -256,18 +293,26 @@ index 00000000..a2667a34
 +}
 +
 +void (*A64EmitX64::FallbackFromKey(u64 key))() {
++    if (const auto it = key_fallbacks.find(key); it != key_fallbacks.end()) {
++        return it->second;
++    }
 +    const bool ordered = (key >> 8) & 1;
 +    const size_t bitsize = (key >> 16) & 0xffff;
 +    const int vaddr_idx = (key >> 32) & 0xff, value_idx = (key >> 40) & 0xff;
++    void (*fn)() = nullptr;
 +    switch (key & 0xff) {
 +    case 0:
-+        return ReadFallback(ordered, bitsize, vaddr_idx, value_idx);
++        fn = ReadFallback(ordered, bitsize, vaddr_idx, value_idx);
++        break;
 +    case 1:
-+        return WriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++        fn = WriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++        break;
 +    case 2:
-+        return ExclusiveWriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++        fn = ExclusiveWriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++        break;
 +    }
-+    return nullptr;
++    key_fallbacks.emplace(key, fn);
++    return fn;
 +}
 +
 +bool A64EmitX64::CanCache(IR::LocationDescriptor location) const {
@@ -731,12 +776,306 @@ index 00000000..a2667a34
 +}
 +
 +}  // namespace Dynarmic::Backend::X64
++
++/* Saved blocks. The file: a header (magic, key, configuration), then one record per block:
++ *   u32 size, u32 checksum (of what follows the age byte), u8 age (rewrites of the file since a process last looked
++ *   for the block; at 8 it is dropped), u64 location, pc, processor_id, u32 counts (guest instructions, code bytes, relocations, patch
++ *   locations, fastmem locations), then those arrays.
++ * Records are parsed only when a JIT looks for their location, and checked like the rest of the file: a damaged or
++ * implausible record is ignored. */
++
++namespace Dynarmic::Backend::X64 {
++
++static constexpr char file_magic[8] = {'D', 'Y', 'N', 'C', 'C', 0, 0, 1};
++static constexpr size_t header_size = 24, record_header = 9, max_file_size = A64::CodeCache::max_bytes;
++
++static u32 Checksum(const u8* p, size_t n) {
++    u64 h = 0x9E3779B97F4A7C15 ^ n;
++    size_t i = 0;
++    for (; i + 8 <= n; i += 8) {
++        u64 w;
++        std::memcpy(&w, p + i, 8);
++        h = (h ^ w) * 0xff51afd7ed558ccd;
++        h ^= h >> 32;
++    }
++    for (; i < n; i++) {
++        h = (h ^ p[i]) * 0x100000001b3;
++    }
++    return u32(h ^ (h >> 32));
++}
++
++template<typename T>
++static void Put(std::vector<u8>& out, T v) {
++    const size_t at = out.size();
++    out.resize(at + sizeof(T));
++    std::memcpy(out.data() + at, &v, sizeof(T));
++}
++
++static void Serialize(const CachedBlock& b, u8 age, std::vector<u8>& out) {
++    const size_t start = out.size();
++    const size_t size = record_header + 3 * 8 + 5 * 4 + b.guest.size() * 4 + b.code.size() + b.relocs.size() * 22
++                      + b.patches.size() * 13 + b.fastmem.size() * 22;
++    out.resize(start + size);
++    u8* w = out.data() + start;
++    const auto put = [&w](auto v) {
++        std::memcpy(w, &v, sizeof(v));
++        w += sizeof(v);
++    };
++    put(u32(size));
++    put(u32(0));  // checksum
++    put(age);
++    put(b.location);
++    put(b.pc);
++    put(b.processor_id);
++    for (const size_t n : {b.guest.size(), b.code.size(), b.relocs.size(), b.patches.size(), b.fastmem.size()}) {
++        put(u32(n));
++    }
++    std::memcpy(w, b.guest.data(), b.guest.size() * 4);
++    w += b.guest.size() * 4;
++    std::memcpy(w, b.code.data(), b.code.size());
++    w += b.code.size();
++    for (const auto& r : b.relocs) {
++        put(r.at);
++        put(u8(r.kind));
++        put(r.tail);
++        put(r.a);
++        put(r.b);
++    }
++    for (const auto& p : b.patches) {
++        put(p.at);
++        put(u8(p.kind));
++        put(p.target);
++    }
++    for (const auto& f : b.fastmem) {
++        put(f.at);
++        put(f.resume);
++        put(u8(f.callback_kind));
++        put(f.callback);
++        put(f.inst);
++        put(u8(f.recompile));
++    }
++    const u32 sum = Checksum(out.data() + start + record_header, size - record_header);
++    std::memcpy(out.data() + start + 4, &sum, 4);
++}
++
++std::shared_ptr<CachedBlock> ParseRecord(const std::vector<u8>& file, size_t offset) {
++    u32 size;
++    std::memcpy(&size, file.data() + offset, 4);  // (bounds checked by LoadCodeCache)
++    const u8* p = file.data() + offset + record_header;
++    const u8* const end = file.data() + offset + size;
++    u32 sum;
++    std::memcpy(&sum, file.data() + offset + 4, 4);
++    if (sum != Checksum(p, end - p)) {
++        return nullptr;
++    }
++    bool ok = true;
++    const auto get = [&]<typename T>(T& v) {
++        if (end - p < ptrdiff_t(sizeof(T))) {
++            ok = false;
++            v = T{};
++            return;
++        }
++        std::memcpy(&v, p, sizeof(T));
++        p += sizeof(T);
++    };
++    auto b = std::make_shared<CachedBlock>();
++    u32 n[5];
++    get(b->location);
++    get(b->pc);
++    get(b->processor_id);
++    for (u32& x : n) {
++        get(x);
++    }
++    if (!ok || n[0] == 0 || n[0] > 0x4000 || n[1] == 0 || n[1] > 0x100000 || n[2] > n[1] || n[3] > 64 || n[4] > n[1]) {
++        return nullptr;
++    }
++    b->guest.resize(n[0]);
++    for (u32& inst : b->guest) {
++        get(inst);
++    }
++    if (end - p < ptrdiff_t(n[1])) {
++        return nullptr;
++    }
++    b->code.assign(p, p + n[1]);
++    p += n[1];
++    const u32 code_size = n[1];
++    for (u32 i = 0; i < n[2] && ok; i++) {
++        CachedBlock::Reloc r;
++        u8 kind;
++        get(r.at);
++        get(kind);
++        get(r.tail);
++        get(r.a);
++        get(r.b);
++        r.kind = Kind(kind);
++        if (kind > u8(Kind::ImmImage) || r.kind == Kind::RelAbs || r.at + (CachedBlock::IsRel(r.kind) ? 4 + r.tail : 8) > code_size
++            || (r.kind == Kind::RelFallback && !ValidFallbackKey(r.a))) {
++            return nullptr;
++        }
++        b->relocs.push_back(r);
++    }
++    for (u32 i = 0; i < n[3] && ok; i++) {
++        CachedBlock::Patch q;
++        u8 kind;
++        get(q.at);
++        get(kind);
++        get(q.target);
++        q.kind = PatchKind(kind);
++        if (kind > u8(PatchKind::MovRcx) || q.at + PatchSize(q.kind) > code_size) {
++            return nullptr;
++        }
++        b->patches.push_back(q);
++    }
++    for (u32 i = 0; i < n[4] && ok; i++) {
++        CachedBlock::Fastmem f;
++        u8 kind, recompile;
++        get(f.at);
++        get(f.resume);
++        get(kind);
++        get(f.callback);
++        get(f.inst);
++        get(recompile);
++        f.callback_kind = Kind(kind);
++        f.recompile = recompile;
++        if (f.at >= code_size || f.resume >= code_size
++            || (f.callback_kind != Kind::RelPrelude && (f.callback_kind != Kind::RelFallback || !ValidFallbackKey(f.callback)))) {
++            return nullptr;
++        }
++        b->fastmem.push_back(f);
++    }
++    if (!ok || p != end) {
++        return nullptr;
++    }
++    return b;
++}
++
++}  // namespace Dynarmic::Backend::X64
++
++namespace Dynarmic::A64 {
++
++void LoadCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key) {
++    std::vector<u8> file;
++    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
++        std::fseek(f, 0, SEEK_END);
++        const long size = std::ftell(f);
++        std::fseek(f, 0, SEEK_SET);
++        if (size > 0 && size_t(size) <= Backend::X64::max_file_size) {
++            file.resize(size_t(size));
++            if (std::fread(file.data(), 1, file.size(), f) != file.size()) {
++                file.clear();
++            }
++        }
++        std::fclose(f);
++    }
++    using Backend::X64::header_size, Backend::X64::record_header;
++    u64 saved_key, config;
++    if (file.size() < header_size || std::memcmp(file.data(), Backend::X64::file_magic, 8) != 0) {
++        return;
++    }
++    std::memcpy(&saved_key, file.data() + 8, 8);
++    std::memcpy(&config, file.data() + 16, 8);
++    if (saved_key != key) {
++        return;  // saved by another build
++    }
++    std::vector<std::pair<u64, u32>> records;
++    for (size_t at = header_size; at < file.size();) {
++        u32 size;
++        u64 location;
++        if (file.size() - at < record_header + 8) {
++            break;
++        }
++        std::memcpy(&size, file.data() + at, 4);
++        if (size < record_header + 8 || size > file.size() - at) {
++            break;
++        }
++        std::memcpy(&location, file.data() + at + record_header, 8);
++        records.emplace_back(location, u32(at));
++        at += size;
++    }
++    std::lock_guard lock{cache.mutex};
++    if (cache.config || !cache.entries.empty()) {
++        return;  // (to be read before the cache is used)
++    }
++    cache.entries.reserve(records.size());
++    for (const auto& [location, at] : records) {
++        cache.entries[location] = {nullptr, at, CodeCache::Entry::Saved};
++    }
++    cache.file = std::move(file);
++    cache.file_config = config;
++}
++
++bool SaveCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key) {
++    using Backend::X64::Put, Backend::X64::max_file_size;
++    std::vector<u8> added, out;
++    {
++        std::lock_guard lock{cache.mutex};
++        if (!cache.dirty || !cache.config) {
++            return false;
++        }
++        cache.dirty = false;
++        added.reserve(std::min(cache.bytes, max_file_size));
++        for (const auto& [location, e] : cache.entries) {
++            if (e.block && e.file == CodeCache::Entry::None && !e.block->process_local && added.size() < max_file_size) {
++                Backend::X64::Serialize(*e.block, 0, added);
++            }
++        }
++        if (!cache.file.empty() && cache.file_config == *cache.config && added.size() < cache.file.size() / 4
++            && cache.file.size() + added.size() <= max_file_size) {
++            // a few new blocks: appended (the file is rewritten, and its unused records aged, once more are added)
++            std::FILE* f = std::fopen(path.c_str(), "ab");
++            if (!f) {
++                return false;
++            }
++            const bool written = std::fwrite(added.data(), 1, added.size(), f) == added.size();
++            return std::fclose(f) == 0 && written;
++        }
++        out.insert(out.end(), Backend::X64::file_magic, Backend::X64::file_magic + 8);
++        Put<u64>(out, key);
++        Put<u64>(out, *cache.config);
++        // the file's records: as they are if a process looked for them, a save older if not (dropped at 8)
++        for (const auto& [location, e] : cache.entries) {
++            if (e.file == CodeCache::Entry::None) {
++                continue;
++            }
++            u32 size;
++            std::memcpy(&size, cache.file.data() + e.record, 4);
++            const u8 age = e.file == CodeCache::Entry::Used ? 0 : cache.file[e.record + 8] + 1;
++            if (age < 8 && out.size() + size <= max_file_size) {
++                out.insert(out.end(), cache.file.begin() + e.record, cache.file.begin() + e.record + size);
++                out[out.size() - size + 8] = age;
++            }
++        }
++    }
++    if (out.size() + added.size() > max_file_size) {
++        added.clear();
++    }
++    const std::string tmp = fmt::format("{}.{:x}.tmp", path, reinterpret_cast<uintptr_t>(&out));
++    std::FILE* f = std::fopen(tmp.c_str(), "wb");
++    if (!f) {
++        return false;
++    }
++    const bool written = std::fwrite(out.data(), 1, out.size(), f) == out.size()
++                      && std::fwrite(added.data(), 1, added.size(), f) == added.size();
++    if (std::fclose(f) != 0 || !written) {
++        std::remove(tmp.c_str());
++        return false;
++    }
++    std::error_code ec;
++    std::filesystem::rename(tmp, path, ec);  // replaces the old file in one step
++    if (ec) {
++        std::remove(tmp.c_str());
++        return false;
++    }
++    return true;
++}
++
++}  // namespace Dynarmic::A64
 diff --git a/src/dynarmic/backend/x64/a64_code_cache.h b/src/dynarmic/backend/x64/a64_code_cache.h
 new file mode 100644
-index 00000000..d50e9e93
+index 00000000..b10c5488
 --- /dev/null
 +++ b/src/dynarmic/backend/x64/a64_code_cache.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,114 @@
 +/* This file is part of the dynarmic project.
 + * SPDX-License-Identifier: 0BSD
 + */
@@ -747,10 +1086,10 @@ index 00000000..d50e9e93
 +#include <memory>
 +#include <mutex>
 +#include <optional>
-+#include <unordered_map>
 +#include <vector>
 +
 +#include <mcl/stdint.hpp>
++#include <tsl/robin_map.h>
 +
 +#include "dynarmic/backend/x64/emit_x64.h"
 +
@@ -809,7 +1148,7 @@ index 00000000..d50e9e93
 +    };
 +    std::vector<Fastmem> fastmem;
 +
-+    bool process_local = false;  // refers to absolute addresses outside the host executable
++    bool process_local = false;  // refers to absolute addresses outside the host executable: not saved
 +
 +    size_t Bytes() const {
 +        return sizeof(*this) + guest.size() * 4 + code.size() + relocs.size() * sizeof(Reloc)
@@ -817,13 +1156,16 @@ index 00000000..d50e9e93
 +    }
 +};
 +
++/// A block saved by SaveCodeCache, read back (null if it is damaged)
++std::shared_ptr<CachedBlock> ParseRecord(const std::vector<u8>& file, size_t offset);
++
 +}  // namespace Dynarmic::Backend::X64
 +
 +namespace Dynarmic::A64 {
 +
 +class CodeCache {
 +public:
-+    std::shared_ptr<const Backend::X64::CachedBlock> Find(u64 location) const;
++    std::shared_ptr<const Backend::X64::CachedBlock> Find(u64 location);
 +    void Insert(std::shared_ptr<const Backend::X64::CachedBlock> block);
 +    /// False if `config` (A64EmitX64::CacheConfig) differs from that of the JITs already using the cache
 +    bool Attach(u64 config);
@@ -832,9 +1174,19 @@ index 00000000..d50e9e93
 +    static constexpr size_t max_bytes = 64 * 1024 * 1024;
 +
 +    mutable std::mutex mutex;
-+    std::unordered_map<u64, std::shared_ptr<const Backend::X64::CachedBlock>> blocks;
-+    size_t bytes = 0;
++    struct Entry {
++        std::shared_ptr<const Backend::X64::CachedBlock> block;
++        u32 record = 0;  // in `file`
++        enum : u8 { None, Saved, Used } file = None;  // its record: none (or replaced), not looked for yet, looked for
++    };
++    tsl::robin_map<u64, Entry> entries;  // by location
++    size_t blocks = 0, bytes = 0;
 +    std::optional<u64> config;
++    bool dirty = false;  // blocks were added since the file was read
++
++    // blocks saved by an earlier process (LoadCodeCache), each parsed when a JIT first looks for it
++    std::vector<u8> file;
++    u64 file_config = 0;
 +};
 +
 +}  // namespace Dynarmic::A64
@@ -909,7 +1261,7 @@ index cec78138..71f444d4 100644
          EmitPatchJmp(terminal.next, next_bb->entrypoint);
      } else {
 diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
-index d4904b9f..1568dec0 100644
+index d4904b9f..d1c6e5aa 100644
 --- a/src/dynarmic/backend/x64/a64_emit_x64.h
 +++ b/src/dynarmic/backend/x64/a64_emit_x64.h
 @@ -7,8 +7,10 @@
@@ -952,12 +1304,13 @@ index d4904b9f..1568dec0 100644
      void ClearCache() override;
  
      void InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges);
-@@ -79,12 +96,32 @@ protected:
+@@ -79,12 +96,33 @@ protected:
      void GenFastmemFallbacks();   // reserves the area; each fallback is generated on first use
      u8* fallback_cur = nullptr;
      u8* fallback_end = nullptr;
-+    // fallback -> FallbackKey, for the code cache
++    // fallback <-> FallbackKey, for the code cache
 +    std::unordered_map<const void*, u64> fallback_keys;
++    std::unordered_map<u64, void (*)()> key_fallbacks;
 +    static u64 FallbackKey(int kind, bool ordered, size_t bitsize, int vaddr_idx, int value_idx) {
 +        return u64(kind) | u64(ordered) << 8 | u64(bitsize) << 16 | u64(vaddr_idx) << 32 | u64(value_idx) << 40;
 +    }
@@ -1188,7 +1541,7 @@ index 44074e94..81fbc4a9 100644
                  mcl::bit_cast<u64>(location),
                  FastmemPatchInfo{
 diff --git a/src/dynarmic/interface/A64/config.h b/src/dynarmic/interface/A64/config.h
-index c8ed623e..4cb6829d 100644
+index c8ed623e..34845645 100644
 --- a/src/dynarmic/interface/A64/config.h
 +++ b/src/dynarmic/interface/A64/config.h
 @@ -10,6 +10,7 @@
@@ -1199,7 +1552,7 @@ index c8ed623e..4cb6829d 100644
  
  #include "dynarmic/interface/optimization_flags.h"
  
-@@ -135,6 +136,14 @@ struct UserCallbacks {
+@@ -135,6 +136,21 @@ struct UserCallbacks {
      virtual std::uint64_t GetCNTPCT() = 0;
  };
  
@@ -1210,11 +1563,18 @@ index c8ed623e..4cb6829d 100644
 +std::shared_ptr<CodeCache> MakeCodeCache();
 +/// Counters, for diagnostics
 +std::string CodeCacheStats(const CodeCache& cache);
++/// Reads the blocks a process saved to `path` (SaveCodeCache): they are used, after the same checks as the others, if
++/// `key` and the configuration of the JITs are the ones they were saved with
++void LoadCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key);
++/// Saves the blocks added since `path` was read, if any: appended to it if they are few, otherwise in a new file that
++/// replaces it in one step, with the file's records (those no process has looked for in 8 such rewrites are dropped).
++/// Blocks that refer to addresses outside the host executable are not saved. False if nothing was written.
++bool SaveCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key);
 +
  struct UserConfig {
      UserCallbacks* callbacks;
  
-@@ -291,6 +300,13 @@ struct UserConfig {
+@@ -291,6 +307,13 @@ struct UserConfig {
  
      /// Internal use only
      bool very_verbose_debugging_output = false;

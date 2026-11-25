@@ -80,7 +80,8 @@ table; everything past it is native. Some details that matter for real programs:
 - the threads' JITs share a cache of translated code (`patches/dynarmic-code-cache.patch`): a block one thread has
   compiled is copied into another's code and relocated (its references to host functions, constants, per-thread
   pointers and other blocks are recorded when it is emitted) instead of being compiled again, if the guest
-  instructions there are still the same.
+  instructions there are still the same. The cache is kept on disk for the next run of the same program
+  (`%LOCALAPPDATA%\scion\jit`, `~/.cache/scion/jit`), tied to the build of Scion that wrote it.
 
 ## The guest libraries
 

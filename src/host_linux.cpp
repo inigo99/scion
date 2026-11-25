@@ -867,7 +867,7 @@ int main(int argc, char **argv) {
     uint64_t *table = (uint64_t *)g_libsys->syms["_scion_hc"];
     if (!table) die("libSystem lacks _scion_hc");
     if (main->arm) {   /* host calls arrive as SVC #n through these thunks (arm64.cpp) */
-        arm64_init();
+        arm64_init(mainpath);
         for (int i = 0; i < HC_COUNT; i++) table[i] = (uint64_t)(g_arm_thunks + 2 * i);
         g_missing_stub = (uint64_t)(g_arm_thunks + 2 * HC_exit);   /* exit(x0) */
     } else {

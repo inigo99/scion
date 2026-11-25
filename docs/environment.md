@@ -11,7 +11,7 @@ own (`HOME` points to your user profile).
 | `SCION_ARCH=arm64` | Run the arm64 (Apple Silicon) slice of a universal binary instead of x86_64. `x86_64` forces the other one. |
 | `SCION_AUDIO_NULL=1` | No sound device: audio output goes to a silent sink paced like a real one. |
 | `SCION_JIT_MB=<n>` | Size of each arm64 thread's translated-code cache in MB (dynarmic's default is 128; when it fills, code is translated again). |
-| `SCION_JIT_CACHE=0` | arm64 threads compile all their code themselves instead of copying what another thread has already compiled. `stats`: print the cache's counters at exit. `verify`: compile anyway and report on stderr any difference from the copy (testing). `selftest`: run every block from a relocated copy (testing). |
+| `SCION_JIT_CACHE=0` | arm64 threads compile all their code themselves instead of copying what another thread, or an earlier run of the same program, has already compiled. `nodisk`: share between threads but keep nothing on disk (`%LOCALAPPDATA%\scion\jit`, `~/.cache/scion/jit`; deleting it is always safe). `stats`: print the cache's counters at exit. `verify`: compile anyway and report on stderr any difference from the copy (testing). `selftest`: run every block from a relocated copy (testing). |
 
 ## Diagnosing apps
 
