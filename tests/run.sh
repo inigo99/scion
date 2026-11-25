@@ -20,7 +20,7 @@ fi
 # order. Each writes its result to $RES/<index>; they are reported in the order of cases.txt.
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 RES=$(mktemp -d); trap 'rm -rf "$RES"; [ -n "$RUN" ] || rm -rf "$XDG_DATA_HOME"' EXIT
-mkfifo "$RES/slots"; exec 3<>"$RES/slots"; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done   # one token per free slot
+mkfifo "$RES/slots"; exec 3<>"$RES/slots"; rm "$RES/slots"; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done   # one token per free slot
 run_case() {  # INDEX NAME EXPECTED ENV ARGS -> $RES/INDEX: OK, FAIL (with the end of the output) or SKIP
   c_out=$RES/$1 c_name=$2 c_want=$3 c_env=$4
   [ -n "$SCION_SKIP" ] && echo "$c_name" | grep -qE "$SCION_SKIP" && { echo SKIP > "$c_out"; return; }   # e.g. SCION_SKIP='Metal|MSL'

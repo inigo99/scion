@@ -15,7 +15,7 @@ FW="$L/AppKit.dylib $L/Metal.dylib $L/GameController.dylib $L/AudioToolbox.dylib
 
 # background jobs, JOBS (default: the number of CPUs) at a time; `finish` waits for them and fails if any did
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}; rm -f $W/FAILED $W/slots
-mkfifo $W/slots; exec 3<>$W/slots; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done   # one token per free slot
+mkfifo $W/slots; exec 3<>$W/slots; rm $W/slots; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done   # one token per free slot
 job() { read -r _ <&3; ("$@" 3>&- || { echo "failed: $*" >&2; touch $W/FAILED; }; echo >&3) & }
 finish() { wait; [ ! -f $W/FAILED ] || exit 1; }
 # prog NAME SOURCE "COMPILE FLAGS" "LINK INPUTS" -> $O/NAME_{x86_64,arm64}, built in the background

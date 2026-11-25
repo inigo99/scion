@@ -17,7 +17,7 @@ JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 
 # compile jobs run in the background, JOBS at a time (a FIFO holds one token per free slot); `finish` waits for them
 # and fails if any did
-mkfifo $T/slots; exec 3<>$T/slots; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done
+mkfifo $T/slots; exec 3<>$T/slots; rm $T/slots; i=0; while [ $i -lt $JOBS ]; do echo >&3; i=$((i+1)); done
 job() {  # command...
   read -r _ <&3
   ("$@" 3>&- || { echo "failed: $*" >&2; touch $T/FAILED; }; echo >&3) &

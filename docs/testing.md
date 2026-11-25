@@ -69,7 +69,7 @@ that reads files an app brings with it, and runs each for the given time (60 s b
 | `fuzz_lzfse.cpp` | the LZFSE decoder of compiled asset catalogs (`src/appkit/lzfse.m`) |
 
 Findings stay in `out/fuzz/<target>/` (`crash-*`, `timeout-*`, `oom-*`); `out/fuzz/<target>/fuzz FILE` replays one. CI
-fuzzes for 2 minutes per target. The Foundation readers (property lists, JSON, keyed archives) run inside the guest and
+fuzzes for 1 minute per target. The Foundation readers (property lists, JSON, keyed archives) run inside the guest and
 are not fuzzed this way.
 
 ## Writing a test
