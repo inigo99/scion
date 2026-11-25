@@ -10,7 +10,11 @@ tests/run.sh          # run them under Wine          (Linux)
 tests/run.ps1         # run them natively            (Windows: powershell -ExecutionPolicy Bypass -File tests\run.ps1)
 tests/run.sh Metal    # only the tests whose name contains "Metal"
 SCION=$PWD/bin/scion tests/run.sh   # the native Linux host, no Wine (#10; see the skip list in .github/workflows/ci.yml)
+tests/fuzz/run.sh 60  # fuzz the readers of files that come with an app, 60 s each (see below)
 ```
+
+`tests/build.sh` and `tests/run.sh` work in parallel, `JOBS` at a time (the number of CPUs by default); `run.sh` reports
+in the order of the list, and runs `scion install` / `scion uninstall` last, one after the other.
 
 Both runners read the same list, [`tests/cases.txt`](../tests/cases.txt): one test per line with its name, the output it
 must contain, optional environment variables, and the program with its arguments. `{arch}` runs a line for x86_64 and
@@ -26,7 +30,7 @@ for arm64. A test whose program is missing is reported as skipped, so the option
 | Metal | `metal/compute.m`, `triangle.m`, `cube.m`, `texture.m` (Apple-compiled sample shaders from Indium's test folder), `ng.m` (modern AIR made by `metal/air/mkmetallib.py`), `msl.m` (MSL compiled at run time), `window.m` (`CAMetalLayer`), `metalfx.m` |
 | AppKit and input | `appkit/appkit.m`, `dialogs.m`, `drawing.m`, `autolayout.m`, `objc/autolayout.m`, `objc/table_views.m`, `objc/status_item.m`, `gamepad/gamepad.m`, `gamepad/keyboard.m`, `audio/audio.c` |
 | Swift | `swift/*.swift`: the language, Concurrency, Combine, SwiftUI, the Darwin/Dispatch/Foundation overlays, property lists and bundles (`Sample.app`) |
-| Windows integration | `scion install` / `scion uninstall` of a small app bundle |
+| Desktop integration | `scion install` / `scion uninstall` of a small app bundle (Start menu on Windows, freedesktop.org on Linux) |
 | Real programs | class-dump (built from source), and the third-party apps below |
 
 Windows have no user to click them: tests inject input through host hooks (`UI_INJECT`, `UI_PAD_INJECT`,
@@ -52,6 +56,21 @@ icons after a few seconds and quit. That is how the third-party apps are checked
 - Mesa's **lavapipe** (`mesa-vulkan-drivers`) provides Vulkan on the CPU, so the Metal tests run without a GPU, slowly.
 - The runner restarts `wineserver` first: one started without a display hides the GPU from Vulkan.
 - If Wine aborts with `free(): invalid pointer` in a container, create its runtime directory (`mkdir -p /run/user/$(id -u)`).
+
+## Fuzzing
+
+`tests/fuzz/run.sh [SECONDS]` builds libFuzzer targets (clang 18 with `libclang-rt-18-dev`; ASan and UBSan) for the code
+that reads files an app brings with it, and runs each for the given time (60 s by default), seeded from `out/tests`:
+
+| Target | Reads |
+|---|---|
+| `fuzz_macho.cpp` | the Mach-O loader (`src/dyld.cpp`): universal files, load commands, segments and sections, the export trie, rebase and bind opcodes, chained fixups |
+| `fuzz_bundle.cpp` | `Info.plist` (XML and binary) and `.icns`, read by `scion install` (`src/bundle.h`) |
+| `fuzz_lzfse.cpp` | the LZFSE decoder of compiled asset catalogs (`src/appkit/lzfse.m`) |
+
+Findings stay in `out/fuzz/<target>/` (`crash-*`, `timeout-*`, `oom-*`); `out/fuzz/<target>/fuzz FILE` replays one. CI
+fuzzes for 1 minute per target. The Foundation readers (property lists, JSON, keyed archives) run inside the guest and
+are not fuzzed this way.
 
 ## Writing a test
 

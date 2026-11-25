@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Faster and lighter:
+  - Mach-O images are mapped from their files instead of read and copied (native Linux host): large programs start
+    several times faster (Biome: 120 → 15 ms) with half the memory.
+  - arm64 guests no longer copy their registers on every host call (many threads: up to 2.5× faster), and the native
+    Linux host re-reads its memory map only for the regions that changed.
+  - Idle apps stay idle: `CFRunLoopRun` with nothing to run sleeps instead of spinning (Hex Fiend kept a core busy), a
+    modal session no longer spins on a due timer of another mode, and `dispatch_main()`, the main run loop without
+    AppKit and the Linux signal pump wait instead of polling every millisecond.
+- Hardened readers: the loader checks every offset and size of a Mach-O file and names what it refuses; binary property
+  lists can no longer expand exponentially or read past their end (Foundation and `scion install`). New libFuzzer
+  targets in `tests/fuzz`, run by CI.
+- Smaller releases: stripped host binaries, `scion-msl.so` without Clang's exported symbols, and the Linux archive as
+  `.tar.xz` (35 → 19 MB).
+- Build and CI: `src/build.sh`, `tests/build.sh` and `tests/run.sh` work in parallel (`JOBS`; the local suite takes
+  6 → 3.5 minutes on two cores), and the input tests wait for their events instead of fixed delays. CI builds once,
+  then runs the Wine, native, Windows and fuzzing jobs side by side.
+
 ## 0.2.0 (2026-11-25)
 
 - **Native Linux host (preview)**, no Wine: `scion` for Linux runs command-line programs, AppKit and SwiftUI apps and

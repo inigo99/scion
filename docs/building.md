@@ -42,7 +42,8 @@ applied. Set `DEPS` to keep them somewhere else (all scripts honor it).
 ## 3. Core
 
 ```sh
-src/build.sh                   # -> bin/scion.exe, bin/scionw.exe, bin/lib/*.dylib, bin/scion (native Linux host)
+src/build.sh                   # -> bin/scion.exe, bin/scionw.exe, bin/lib/*.dylib, bin/scion (native Linux host);
+                               #    JOBS=n compilers at a time (default: the number of CPUs)
 ```
 
 This compiles the host with MinGW-w64 (static, no runtime DLLs to ship) and each guest library twice, for
@@ -109,5 +110,5 @@ lib/       AppKit.dylib  Foundation.dylib  libSystem.B.dylib  ...  libswiftCore.
 
 plus `README.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md` and `licenses/`. `scion.exe` finds `lib/` next to
 itself. `scripts/package.sh 0.1.0` builds `out/scion-0.1.0-windows-x64.zip` from `bin/`, and
-`scripts/package.sh 0.1.0 --linux` builds `out/scion-0.1.0-linux-x86_64.tar.gz` (`scion`, `scion-metal.so`,
+`scripts/package.sh 0.1.0 --linux` builds `out/scion-0.1.0-linux-x86_64.tar.xz` (`scion`, `scion-metal.so`,
 `scion-msl.so` and the same `lib/`).

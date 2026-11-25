@@ -38,6 +38,7 @@ static CHHapticPattern *pattern(NSString *type, float intensity, float sharp, NS
 static void next(void) {
     NSError *err = nil;
     if (step == 0 && !ctl && ++waited < 30) return; /* the controller shows up within ~0.25 s (empty slots are polled slowly) */
+    if (step == 8 && (!disconnects || stopReason == -100) && ++waited < 60) return;   /* so is its disconnection */
     switch (step++) {
     case 0:
         CHECK(connects == 1 && ctl, "GCControllerDidConnectNotification");

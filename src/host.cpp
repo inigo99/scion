@@ -115,6 +115,19 @@ void *image_alloc(uint64_t at, uint64_t len) {
     void *p = VirtualAlloc((void *)at, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     return p ? p : low_alloc(len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 }
+/* read into memory rather than mapped: a mapped file cannot be replaced while the app runs (self-updaters) */
+const uint8_t *host_map_file(const std::string &path, size_t *size) {
+    HANDLE f = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return nullptr;
+    LARGE_INTEGER n{}; uint8_t *p = nullptr; DWORD got = 0;
+    if (GetFileSizeEx(f, &n) && n.QuadPart > 0 && n.QuadPart < (1ll << 32) && (p = (uint8_t *)malloc((size_t)n.QuadPart))
+        && !(ReadFile(f, p, (DWORD)n.QuadPart, &got, nullptr) && got == (DWORD)n.QuadPart)) { free(p); p = nullptr; }
+    CloseHandle(f);
+    if (p) *size = (size_t)n.QuadPart;
+    return p;
+}
+/* ponytail: Windows maps views only at 64 KB-aligned free addresses, not over the image's allocation: copied */
+bool host_map_segment(void *, uint64_t, const std::string &, uint64_t) { return false; }
 void *low_alloc(size_t n, DWORD type, DWORD prot) {
     static std::atomic<uint64_t> cursor{1ull << 32};
     /* the reservation is whole 64 KB units, but only the pages asked for are committed: munmap decommits exactly

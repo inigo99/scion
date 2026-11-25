@@ -77,6 +77,10 @@ extern void (*_scion_main_wake)(void);
 int (*_scion_ui_pump)(void);
 static unsigned long rl_key;
 static NSRunLoop *main_rl;
+@interface NSRunLoop (MWWake) - (void)_signal; @end
+/* dispatch_async to the main queue: wakes a main run loop that waits without AppKit */
+extern void (*_scion_main_rl_wake)(void);
+static void main_rl_wake(void) { [main_rl _signal]; }
 /* CFRunLoopObserver: called with kCFRunLoopBeforeWaiting after a pass that handled something (ponytail: the other
  * activities are not reported) */
 @interface _MWRunLoopObserver : NSObject { @public unsigned long _act; BOOL _repeats, _valid; void (^_block)(id, unsigned long); }
@@ -84,8 +88,11 @@ static NSRunLoop *main_rl;
 @implementation _MWRunLoopObserver
 - (void)dealloc { [_block release]; [super dealloc]; }
 @end
-@implementation NSRunLoop { NSMutableArray *_timers, *_blocks, *_observers; pthread_mutex_t _m; pthread_cond_t _cv; BOOL _isMain, _stop; NSString *_mode; }
-+ (void)_mwSetup { pthread_key_create(&rl_key, 0); main_rl = [[NSRunLoop alloc] _initMain:YES]; pthread_setspecific(rl_key, main_rl); }
+@implementation NSRunLoop { NSMutableArray *_timers, *_blocks, *_observers; pthread_mutex_t _m; pthread_cond_t _cv; BOOL _isMain, _stop, _woken; NSString *_mode; }
++ (void)_mwSetup {
+    pthread_key_create(&rl_key, 0); main_rl = [[NSRunLoop alloc] _initMain:YES]; pthread_setspecific(rl_key, main_rl);
+    _scion_main_rl_wake = main_rl_wake;
+}
 - (instancetype)_initMain:(BOOL)m { _timers = [[NSMutableArray alloc] init]; _blocks = [[NSMutableArray alloc] init]; _isMain = m; return self; }
 + (NSRunLoop *)currentRunLoop {
     NSRunLoop *r = pthread_getspecific(rl_key);
@@ -106,15 +113,16 @@ static BOOL mode_matches(NSSet *modes, NSString *m) {
     NSSet *old = objc_getAssociatedObject(t, "mw_modes");
     objc_setAssociatedObject(t, "mw_modes", old ? [old setByAddingObject:mode ?: NSDefaultRunLoopMode] : [NSSet setWithObject:mode ?: NSDefaultRunLoopMode], OBJC_ASSOCIATION_RETAIN);
     if ([_timers indexOfObjectIdenticalTo:t] == NSNotFound) [_timers addObject:t];
-    pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m);
+    _woken = YES; pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m);
 }
 - (void)performBlock:(void (^)(void))b {
-    pthread_mutex_lock(&_m); id c = [b copy]; [_blocks addObject:c]; [c release]; pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m);
+    pthread_mutex_lock(&_m); id c = [b copy]; [_blocks addObject:c]; [c release]; _woken = YES; pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m);
 }
 - (void)_addObserver:(id)o { if (!_observers) _observers = [[NSMutableArray alloc] init]; if ([_observers indexOfObjectIdenticalTo:o] == NSNotFound) [_observers addObject:o]; }
 - (void)_removeObserver:(id)o { [_observers removeObjectIdenticalTo:o]; }
 - (void)performInModes:(NSArray *)modes block:(void (^)(void))b { [self performBlock:b]; }
-- (void)_wake { pthread_mutex_lock(&_m); pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m); if (_isMain && _scion_main_wake) _scion_main_wake(); }
+- (void)_signal { pthread_mutex_lock(&_m); _woken = YES; pthread_cond_signal(&_cv); pthread_mutex_unlock(&_m); }
+- (void)_wake { [self _signal]; if (_isMain && _scion_main_wake) _scion_main_wake(); }
 /* one pass: perform blocks, fire due timers, drain the main queue. Returns the number of things handled. */
 - (int)_pass {
     int n = 0;
@@ -138,13 +146,17 @@ static BOOL mode_matches(NSSet *modes, NSString *m) {
     return n;
 }
 - (int)_passInMode:(NSString *)m { NSString *old = _mode; _mode = m; int n = [self _pass]; _mode = old; return n; }
-- (NSTimeInterval)_nextTimer {
+/* the next fire time of a timer that can fire in mode m (nil: any mode). A due timer of another mode must not count,
+ * or a modal loop would spin until the modal session ends. */
+- (NSTimeInterval)_nextTimerInMode:(NSString *)m {
     NSTimeInterval next = 1e300;
     pthread_mutex_lock(&_m);
-    for (NSTimer *x in _timers) if ([x isValid] && [x _fireTime] < next) next = [x _fireTime];
+    for (NSTimer *x in _timers)
+        if ([x isValid] && [x _fireTime] < next && (!m || mode_matches(objc_getAssociatedObject(x, "mw_modes"), m))) next = [x _fireTime];
     pthread_mutex_unlock(&_m);
     return next;
 }
+- (NSTimeInterval)_nextTimer { return [self _nextTimerInMode:nil]; }
 - (BOOL)runMode:(NSString *)mode beforeDate:(NSDate *)limit {
     NSTimeInterval deadline = limit ? [limit timeIntervalSinceReferenceDate] : 0;
     NSString *old = _mode; _mode = mode;
@@ -154,20 +166,22 @@ static BOOL mode_matches(NSSet *modes, NSString *m) {
         int n = [self _pass];
         objc_autoreleasePoolPop(pool);
         if (n) { handled = YES; break; }
-        NSTimeInterval t = now(), next = [self _nextTimer];
+        NSTimeInterval t = now(), next = [self _nextTimerInMode:mode];
         if (!_isMain && next > 1e299 && ![_blocks count]) break;           /* no sources: return immediately (NO) */
         if (t >= deadline || _stop) break;
         NSTimeInterval wait = (next < deadline ? next : deadline) - t;
-        if (_isMain && wait > 0.001) wait = 0.001;                          /* poll the main dispatch queue */
+        if (_isMain && _scion_ui_pump && wait > 0.001) wait = 0.001;        /* AppKit: poll window events */
+        if (wait > 3600) wait = 3600;
         if (wait > 0) {
             struct timespec ts = {(int64_t)wait, (int64_t)((wait - (int64_t)wait) * 1e9)};
             pthread_mutex_lock(&_m);
-            if (![_blocks count]) pthread_cond_timedwait_relative_np(&_cv, &_m, &ts);
+            if (![_blocks count] && !_woken) pthread_cond_timedwait_relative_np(&_cv, &_m, &ts);
+            _woken = NO;
             pthread_mutex_unlock(&_m);
         }
     }
     _mode = old;
-    return handled || _isMain || [self _nextTimer] < 1e299;
+    return handled || _isMain || [self _nextTimerInMode:mode] < 1e299;
 }
 - (void)runUntilDate:(NSDate *)d {
     _stop = NO;
@@ -177,7 +191,18 @@ static BOOL mode_matches(NSSet *modes, NSString *m) {
 - (void)run { _stop = NO; while (!_stop && [self runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]) {} _stop = NO; }
 - (void)acceptInputForMode:(NSString *)m beforeDate:(NSDate *)d { [self runMode:m beforeDate:d]; }
 - (void)_stop { _stop = YES; [self _wake]; }
-- (void)_runUntilStopped { _stop = NO; while (!_stop) [self runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]; _stop = NO; }
+/* CFRunLoopRun. With nothing to run (a thread that waits for a source scion does not implement, such as a
+ * DiskArbitration session), it sleeps until something is added or it is stopped instead of spinning. */
+- (void)_runUntilStopped {
+    _stop = NO;
+    while (!_stop) if (![self runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]) {
+        pthread_mutex_lock(&_m);
+        while (!_stop && !_woken && ![_blocks count]) pthread_cond_wait(&_cv, &_m);   /* woken: a block, a timer, a stop */
+        _woken = NO;
+        pthread_mutex_unlock(&_m);
+    }
+    _stop = NO;
+}
 @end
 
 /* CoreFoundation run loop entry points (a CFRunLoopRef is the NSRunLoop) */

@@ -163,7 +163,9 @@ static BOOL xml_write(NSMutableString *out, id o, int indent) {
 }
 
 /* ======================================================================= binary (bplist00) */
-typedef struct { const uint8_t *b; NSUInteger n; uint64_t *offs; uint64_t count; unsigned refsz; BOOL leaves; uint8_t *busy; } bin;
+/* Objects may be shared, so a small file can describe an exponentially large tree: like CF, immutable reads decode each
+ * object once (cache), and every read has a budget of objects. */
+typedef struct { const uint8_t *b; NSUInteger n; uint64_t *offs; uint64_t count; unsigned refsz; BOOL leaves; uint8_t *busy; id *cache; uint64_t budget; } bin;
 static uint64_t be(const uint8_t *p, unsigned n) { uint64_t v = 0; for (unsigned i = 0; i < n; i++) v = v << 8 | p[i]; return v; }
 static id bin_obj(bin *r, uint64_t idx, int depth);
 /* the count after a marker: low nibble, or an int object when it is 0xF */
@@ -174,8 +176,16 @@ static BOOL bin_count(bin *r, NSUInteger *pos, unsigned nib, uint64_t *out) {
     unsigned sz = 1u << (m & 0xf); if (sz > 8 || *pos + 1 + sz > r->n) return NO;
     *out = be(r->b + *pos + 1, sz); *pos += 1 + sz; return YES;
 }
+static id bin_decode(bin *r, uint64_t idx, int depth);
 static id bin_obj(bin *r, uint64_t idx, int depth) {
-    if (idx >= r->count || depth > 512 || r->busy[idx]) return nil; /* cycles are corrupt */
+    if (idx >= r->count || depth > 512 || r->busy[idx] || !r->budget) return nil; /* cycles are corrupt */
+    r->budget--;
+    if (r->cache && r->cache[idx]) return r->cache[idx];
+    id o = bin_decode(r, idx, depth);
+    if (r->cache && o) r->cache[idx] = [o retain];
+    return o;
+}
+static id bin_decode(bin *r, uint64_t idx, int depth) {
     NSUInteger pos = (NSUInteger)r->offs[idx];
     if (pos >= r->n) return nil;
     uint8_t m = r->b[pos++]; unsigned hi = m >> 4, lo = m & 0xf; uint64_t cnt;
@@ -239,18 +249,19 @@ static id bin_obj(bin *r, uint64_t idx, int depth) {
     }
     return nil;
 }
-static id bin_read(NSData *data, BOOL leaves) {
+static id bin_read(NSData *data, BOOL leaves, BOOL share) {   /* share: immutable read, shared objects decoded once */
     const uint8_t *b = [data bytes]; NSUInteger n = [data length];
     if (n < 8 + 32 || memcmp(b, "bplist0", 7)) return nil;
     const uint8_t *t = b + n - 32;
     unsigned offsz = t[6], refsz = t[7]; uint64_t count = be(t + 8, 8), top = be(t + 16, 8), table = be(t + 24, 8);
-    if (offsz < 1 || offsz > 8 || refsz < 1 || refsz > 8 || count == 0 || count > n || top >= count || table < 8 || table + count * offsz > n - 32) return nil;
+    if (offsz < 1 || offsz > 8 || refsz < 1 || refsz > 8 || count == 0 || count > n || top >= count || table < 8 || table > n - 32 || count * offsz > n - 32 - table) return nil;
     uint64_t *offs = malloc((size_t)count * sizeof *offs);
     for (uint64_t i = 0; i < count; i++) { offs[i] = be(b + table + i * offsz, offsz); if (offs[i] < 8 || offs[i] >= table) { free(offs); return nil; } }
-    bin r = {b, n, offs, count, refsz, leaves, calloc((size_t)count, 1)};
-    id v = bin_obj(&r, top, 0);
+    bin r = {b, n, offs, count, refsz, leaves, calloc((size_t)count, 1), share ? calloc((size_t)count, sizeof(id)) : NULL, 1u << 22};
+    id v = [bin_obj(&r, top, 0) retain];
+    if (r.cache) { for (uint64_t i = 0; i < count; i++) [r.cache[i] release]; free(r.cache); }
     free(offs); free(r.busy);
-    return v;
+    return [v autorelease];
 }
 /* writer: objects flattened depth-first (no sharing); kids[i] lists the object indices a container refers to */
 static NSUInteger bin_flatten(id o, NSMutableArray *objs, NSMutableArray *kids) {
@@ -456,7 +467,7 @@ static void os_write(NSMutableString *out, id o) {
 }
 + (id)propertyListWithData:(NSData *)d options:(NSPropertyListReadOptions)o format:(NSPropertyListFormat *)f error:(NSError **)e {
     BOOL leaves = o == NSPropertyListMutableContainersAndLeaves; id v = nil; NSPropertyListFormat fmt = 0;
-    if ([d length] >= 6 && !memcmp([d bytes], "bplist", 6)) { v = bin_read(d, leaves); fmt = NSPropertyListBinaryFormat_v1_0; }
+    if ([d length] >= 6 && !memcmp([d bytes], "bplist", 6)) { v = bin_read(d, leaves, o == NSPropertyListImmutable); fmt = NSPropertyListBinaryFormat_v1_0; }
     else {
         /* UTF-16 text (Xcode writes .strings that way): parse its UTF-8 form */
         const unsigned char *u = [d bytes];
