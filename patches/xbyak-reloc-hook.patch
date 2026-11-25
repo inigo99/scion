@@ -1,0 +1,51 @@
+scion: Xbyak reports the fields it emits that hold an absolute address as a relative one (jumps and calls to an
+address, [rip + address]) and the immediates of mov reg, imm, through CodeGenerator::relocHook_: dynarmic's code cache
+(patches/dynarmic-code-cache.patch) relocates blocks with them.
+
+diff --git a/xbyak/xbyak.h b/xbyak/xbyak.h
+index 387a3f1..d1d40f2 100644
+--- a/xbyak/xbyak.h
++++ b/xbyak/xbyak.h
+@@ -2237,7 +2237,12 @@ private:
+ 			dd(0);
+ 			save(size_ - 4, size_t(addr) - size_, 4, inner::Labs);
+ 		} else {
++			const size_t start = size_;
+ 			makeJmp(inner::VerifyInInt32(reinterpret_cast<const uint8_t*>(addr) - getCurr()), type, shortCode, longCode, longPref);
++			if (relocHook_) {
++				const int n = size_ - start == 2 ? 1 : 4;
++				relocHook_(relocHookCtx_, size_ - n, n, size_t(addr), 0, 0);
++			}
+ 		}
+ 
+ 	}
+@@ -2266,6 +2271,7 @@ private:
+ 				size_t disp = addr.getDisp();
+ 				if (addr.getMode() == inner::M_ripAddr) {
+ 					if (isAutoGrow()) XBYAK_THROW(ERR_INVALID_RIP_IN_AUTO_GROW)
++					if (relocHook_) relocHook_(relocHookCtx_, size_, 4, disp, 0, addr.immSize);
+ 					disp -= (size_t)getCurr() + 4 + addr.immSize;
+ 				}
+ 				dd(inner::VerifyInInt32(disp));
+@@ -3011,6 +3017,13 @@ public:
+ 
+ 	// set default type of `jmp` of undefined label to T_NEAR
+ 	void setDefaultJmpNEAR(bool isNear) { isDefaultJmpNEAR_ = isNear; }
++	/*
++		Scion: when set, called for every field of the code that holds an absolute address as a relative one (the rel8
++		or rel32 of a jump or call to an address, the disp32 of [rip + address]: kind 0; tail: bytes of the instruction
++		after the field) and for every immediate of mov reg, imm (kind 1). dynarmic's code cache relocates blocks with it.
++	*/
++	void (*relocHook_)(void *ctx, size_t offset, int size, uint64_t value, int kind, int tail) = 0;
++	void *relocHookCtx_ = 0;
+ 	void jmp(const Operand& op, LabelType type = T_AUTO) { opJmpOp(op, type, 4); }
+ 	void jmp(std::string label, LabelType type = T_AUTO) { opJmp(label, type, 0xEB, 0xE9, 0); }
+ 	void jmp(const char *label, LabelType type = T_AUTO) { jmp(std::string(label), type); }
+@@ -3124,6 +3137,7 @@ public:
+ 	{
+ 		if (op.isREG()) {
+ 			const int size = mov_imm(op.getReg(), imm);
++			if (relocHook_ && size >= 4) relocHook_(relocHookCtx_, size_, size, imm, 1, 0);
+ 			db(imm, size);
+ 		} else if (op.isMEM()) {
+ 			verifyMemHasSize(op);

@@ -76,7 +76,11 @@ table; everything past it is native. Some details that matter for real programs:
   `mprotect`, `munmap` and `sys_icache_invalidate` invalidate translated blocks in every thread;
 - instructions dynarmic lacks are handled by Scion: LSE atomics, LRCPC2, half-precision compares, and the pointer
   authentication instructions (no-ops, since Scion's pointers are never signed);
-- x86's memory model is stronger than ARM's, so translated code needs no extra barriers.
+- x86's memory model is stronger than ARM's, so translated code needs no extra barriers;
+- the threads' JITs share a cache of translated code (`patches/dynarmic-code-cache.patch`): a block one thread has
+  compiled is copied into another's code and relocated (its references to host functions, constants, per-thread
+  pointers and other blocks are recorded when it is emitted) instead of being compiled again, if the guest
+  instructions there are still the same.
 
 ## The guest libraries
 

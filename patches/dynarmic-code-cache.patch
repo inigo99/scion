@@ -1,0 +1,1230 @@
+scion: a cache of translated code shared by the JITs of a process (backend/x64/a64_code_cache.cpp): a block one JIT
+(guest thread) has compiled is copied into another's code and relocated instead of being compiled again, as long as
+the guest instructions there are the same. Needs patches/xbyak-reloc-hook.patch.
+- after a block is emitted, the fields that refer outside it are recorded symbolically: rel32 and rip-relative
+  references to prelude code, constants, fastmem fallbacks and the host executable, and mov immediates that are the
+  JIT's own pointers (configuration, callbacks, tpidr registers, exclusive monitor slots); block links are emitted
+  again by the JIT that installs the copy, fastmem fault information is relocated with it
+- UserConfig::code_cache (MakeCodeCache), with code_cache_verify (also decode each block with Zydis and compare, and
+  compile cached blocks again and compare) and code_cache_selftest (run every block from a relocated copy) for testing
+
+diff --git a/src/dynarmic/CMakeLists.txt b/src/dynarmic/CMakeLists.txt
+index b234cd26..baab7137 100644
+--- a/src/dynarmic/CMakeLists.txt
++++ b/src/dynarmic/CMakeLists.txt
+@@ -330,6 +330,8 @@ if ("x86_64" IN_LIST ARCHITECTURE)
+ 
+     if ("A64" IN_LIST DYNARMIC_FRONTENDS)
+         target_architecture_specific_sources(dynarmic "x86_64"
++            backend/x64/a64_code_cache.cpp
++            backend/x64/a64_code_cache.h
+             backend/x64/a64_emit_x64.cpp
+             backend/x64/a64_emit_x64.h
+             backend/x64/a64_emit_x64_memory.cpp
+diff --git a/src/dynarmic/backend/x64/a64_code_cache.cpp b/src/dynarmic/backend/x64/a64_code_cache.cpp
+new file mode 100644
+index 00000000..a2667a34
+--- /dev/null
++++ b/src/dynarmic/backend/x64/a64_code_cache.cpp
+@@ -0,0 +1,704 @@
++/* This file is part of the dynarmic project.
++ * SPDX-License-Identifier: 0BSD
++ */
++
++/* Code cache: a block one JIT has compiled is copied into the code of other JITs (other guest threads) instead of being
++ * compiled again. Each JIT keeps its own code buffer, so nothing changes for code that runs, links or is invalidated
++ * concurrently: only the cache's map is shared.
++ *
++ * After a block is emitted it is captured: every field of it that refers to something outside the block is recorded in
++ * a form another JIT can resolve. Xbyak reports those fields as it emits them (relocHook_): rel32 operands and
++ * rip-relative addresses, which point to prelude code, constants, fastmem fallbacks or the host executable, and the
++ * immediates of mov reg, imm, some of which are this JIT's pointers (its configuration, callbacks, tpidr registers,
++ * exclusive monitor slots). Block links (patch locations) are emitted again by the JIT that installs the copy. A block
++ * that refers to anything else (another block, an unknown address in the code buffer) is not cached.
++ * code_cache_verify checks the fields Xbyak reported against the ones found by decoding the block (Zydis), and each
++ * copy against the block compiled again. */
++
++#include "dynarmic/backend/x64/a64_code_cache.h"
++
++#include <algorithm>
++#include <cstring>
++
++#include <Zydis/Zydis.h>
++#include <fmt/format.h>
++#include <mcl/scope_exit.hpp>
++
++#include "dynarmic/backend/x64/a64_emit_x64.h"
++#include "dynarmic/backend/x64/block_of_code.h"
++#include "dynarmic/backend/x64/exclusive_monitor_friend.h"
++#include "dynarmic/common/variant_util.h"
++#include "dynarmic/frontend/A64/a64_location_descriptor.h"
++#include "dynarmic/interface/exclusive_monitor.h"
++#include "dynarmic/ir/basic_block.h"
++
++#ifdef _WIN32
++#    ifndef NOMINMAX
++#        define NOMINMAX
++#    endif
++#    define WIN32_LEAN_AND_MEAN
++#    include <windows.h>
++extern "C" IMAGE_DOS_HEADER __ImageBase;
++#else
++extern "C" char __executable_start;
++extern "C" char _end;
++#endif
++
++namespace Dynarmic::A64 {
++
++std::shared_ptr<CodeCache> MakeCodeCache() {
++    return std::make_shared<CodeCache>();
++}
++
++std::string CodeCacheStats(const CodeCache& c) {
++    std::lock_guard lock{c.mutex};
++    return fmt::format("{} blocks ({} KB): {} compiled, {} copied, {} stale, {} not cacheable, {} verified, {} differ",
++                       c.blocks.size(), c.bytes / 1024, c.compiled.load(), c.copied.load(), c.stale.load(),
++                       c.uncacheable.load(), c.verified.load(), c.mismatches.load());
++}
++
++std::shared_ptr<const Backend::X64::CachedBlock> CodeCache::Find(u64 location) const {
++    std::lock_guard lock{mutex};
++    const auto it = blocks.find(location);
++    return it == blocks.end() ? nullptr : it->second;
++}
++
++void CodeCache::Insert(std::shared_ptr<const Backend::X64::CachedBlock> block) {
++    std::lock_guard lock{mutex};
++    auto& slot = blocks[block->location];
++    if (slot) {
++        if (slot->guest == block->guest) {
++            return;  // another JIT got there first
++        }
++        bytes -= slot->Bytes();  // the guest code there has changed
++    } else if (bytes + block->Bytes() > max_bytes) {
++        blocks.erase(block->location);
++        return;
++    }
++    bytes += block->Bytes();
++    slot = std::move(block);
++}
++
++bool CodeCache::Attach(u64 cfg) {
++    std::lock_guard lock{mutex};
++    if (!config) {
++        config = cfg;
++    }
++    return *config == cfg;
++}
++
++}  // namespace Dynarmic::A64
++
++namespace Dynarmic::Backend::X64 {
++
++using Kind = CachedBlock::Kind;
++
++struct A64EmitX64::CacheSymbols {
++    std::vector<const void*> prelude;  // id -> address
++    std::unordered_map<const void*, u64> prelude_ids;
++    u64 buf_lo, buf_hi;
++    u64 image_lo, image_hi;
++    u64 conf, callbacks, tpidr, tpidrro;
++    u64 mon_lock = 0, mon_addr = 0, mon_value = 0, mon_addr_stride = 0, mon_value_stride = 0, mon_count = 0;
++};
++
++static size_t PatchSize(PatchKind kind) {
++    switch (kind) {
++    case PatchKind::Jg:
++    case PatchKind::Jz:
++        return 23;
++    case PatchKind::Jmp:
++        return 22;
++    case PatchKind::MovRcx:
++        return 10;
++    }
++    return 0;
++}
++
++// The code also depends on the instructions an Interpret terminal hands to the interpreter (A64MergeInterpretBlocksPass
++// counts how many there are in a row): the end of the guest code the block depends on
++static u64 GuestEnd(const IR::Terminal& t, u64 end) {
++    return Common::VisitVariant<u64>(t, [end](const auto& x) -> u64 {
++        using T = std::decay_t<decltype(x)>;
++        if constexpr (std::is_same_v<T, IR::Term::Interpret>) {
++            const u64 next = A64::LocationDescriptor{x.next}.PC();
++            return next + 4 == end ? next + 4 * x.num_instructions : 0;  // 0: elsewhere, not cached
++        } else if constexpr (std::is_same_v<T, IR::Term::If> || std::is_same_v<T, IR::Term::CheckBit>) {
++            const u64 a = GuestEnd(x.then_, end), b = GuestEnd(x.else_, end);
++            return a && b ? std::max(a, b) : 0;
++        } else if constexpr (std::is_same_v<T, IR::Term::CheckHalt>) {
++            return GuestEnd(x.else_, end);
++        } else {
++            return end;
++        }
++    });
++}
++
++// Exclusive monitor slots are relative to the processor of the JIT that compiled the block: code that skips its own
++// slot (EmitExclusiveTestAndClear) must skip the installing JIT's slot instead, so the two are swapped.
++static u64 SwapSlot(u64 slot, u64 from, u64 to) {
++    return slot == from ? to : slot == to ? from : slot;
++}
++
++u64 A64EmitX64::CacheConfig() const {
++    u64 h = 0xcbf29ce484222325;  // FNV-1a
++    const auto mix = [&h](u64 v) {
++        for (int i = 0; i < 8; i++) {
++            h = (h ^ ((v >> (i * 8)) & 0xff)) * 0x100000001b3;
++        }
++    };
++    mix(1);  // format
++    mix(static_cast<u64>(code.HostFeatures()));
++    mix(static_cast<u64>(conf.optimizations));
++    mix(conf.unsafe_optimizations);
++    mix(conf.hook_data_cache_operations);
++    mix(conf.hook_isb);
++    mix(conf.hook_hint_instructions);
++    mix(conf.cntfrq_el0);
++    mix(conf.ctr_el0);
++    mix(conf.dczid_el0);
++    mix(conf.tpidrro_el0 != nullptr);
++    mix(conf.tpidr_el0 != nullptr);
++    mix(conf.page_table != nullptr);
++    mix(conf.page_table_address_space_bits);
++    mix(static_cast<u64>(conf.page_table_pointer_mask_bits));
++    mix(conf.silently_mirror_page_table);
++    mix(conf.absolute_offset_page_table);
++    mix(conf.detect_misaligned_access_via_page_table);
++    mix(conf.only_detect_misalignment_via_page_table_on_page_boundary);
++    mix(conf.fastmem_pointer.has_value());
++    mix(conf.fastmem_pointer.value_or(0));
++    mix(conf.recompile_on_fastmem_failure);
++    mix(conf.fastmem_address_space_bits);
++    mix(conf.silently_mirror_fastmem);
++    mix(conf.fastmem_exclusive_access);
++    mix(conf.recompile_on_exclusive_fastmem_failure);
++    mix(conf.define_unpredictable_behaviour);
++    mix(conf.wall_clock_cntpct);
++    mix(conf.check_halt_on_memory_access);
++    mix(conf.enable_cycle_counting);
++    mix(conf.very_verbose_debugging_output);
++    mix(conf.global_monitor ? GetExclusiveMonitorProcessorCount(conf.global_monitor) : 0);
++    return h;
++}
++
++const A64EmitX64::CacheSymbols& A64EmitX64::Symbols() {
++    if (cache_symbols) {
++        return *cache_symbols;
++    }
++    auto s = std::make_shared<CacheSymbols>();
++    for (const void* p : code.GetReturnFromRunCodeAddresses()) {
++        s->prelude.push_back(p);
++    }
++    for (const void* p : {terminal_handler_pop_rsb_hint, terminal_handler_fast_dispatch_hint,
++                          reinterpret_cast<const void*>(memory_read_128), reinterpret_cast<const void*>(memory_write_128),
++                          reinterpret_cast<const void*>(memory_exclusive_write_128)}) {
++        s->prelude.push_back(p);
++    }
++    for (size_t i = 0; i < s->prelude.size(); i++) {
++        if (s->prelude[i]) {
++            s->prelude_ids.emplace(s->prelude[i], i);
++        }
++    }
++    s->buf_lo = reinterpret_cast<u64>(code.getCode());
++    s->buf_hi = s->buf_lo + code.GetTotalCodeSize();
++#ifdef _WIN32
++    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const u8*>(&__ImageBase) + __ImageBase.e_lfanew);
++    s->image_lo = reinterpret_cast<u64>(&__ImageBase);
++    s->image_hi = s->image_lo + nt->OptionalHeader.SizeOfImage;
++#else
++    s->image_lo = reinterpret_cast<u64>(&__executable_start);
++    s->image_hi = reinterpret_cast<u64>(&_end);
++#endif
++    s->conf = reinterpret_cast<u64>(&conf);
++    s->callbacks = reinterpret_cast<u64>(conf.callbacks);
++    s->tpidr = reinterpret_cast<u64>(conf.tpidr_el0);
++    s->tpidrro = reinterpret_cast<u64>(conf.tpidrro_el0);
++    if (auto* m = conf.global_monitor) {
++        s->mon_lock = reinterpret_cast<u64>(GetExclusiveMonitorLockPointer(m));
++        s->mon_count = GetExclusiveMonitorProcessorCount(m);
++        s->mon_addr = reinterpret_cast<u64>(GetExclusiveMonitorAddressPointer(m, 0));
++        s->mon_value = reinterpret_cast<u64>(GetExclusiveMonitorValuePointer(m, 0));
++        s->mon_addr_stride = sizeof(*GetExclusiveMonitorAddressPointer(m, 0));
++        s->mon_value_stride = sizeof(*GetExclusiveMonitorValuePointer(m, 0));
++    }
++    cache_symbols = s;
++    return *s;
++}
++
++void (*A64EmitX64::FallbackFromKey(u64 key))() {
++    const bool ordered = (key >> 8) & 1;
++    const size_t bitsize = (key >> 16) & 0xffff;
++    const int vaddr_idx = (key >> 32) & 0xff, value_idx = (key >> 40) & 0xff;
++    switch (key & 0xff) {
++    case 0:
++        return ReadFallback(ordered, bitsize, vaddr_idx, value_idx);
++    case 1:
++        return WriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++    case 2:
++        return ExclusiveWriteFallback(ordered, bitsize, vaddr_idx, value_idx);
++    }
++    return nullptr;
++}
++
++bool A64EmitX64::CanCache(IR::LocationDescriptor location) const {
++    // a block that has hit a fastmem fault is compiled without fastmem there: that version stays in this JIT
++    const auto it = do_not_fastmem.lower_bound(DoNotFastmemMarker{location, 0});
++    return it == do_not_fastmem.end() || std::get<0>(*it) != location;
++}
++
++// The fields of a block that hold addresses (rel32, rip-relative) and immediates, found by decoding it: code_cache_verify
++// checks the ones Xbyak reports (relocHook_) against these
++static bool Disassemble(const u8* entry, size_t size, const std::vector<CachedBlock::Patch>& patches, std::vector<CodeField>& fields) {
++    ZydisDecoder decoder;
++    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
++    ZydisDecoderEnableMode(&decoder, ZYDIS_DECODER_MODE_MINIMAL, ZYAN_TRUE);  // lengths and raw fields are enough
++    size_t off = 0, next_site = 0;
++    while (off < size) {
++        if (next_site < patches.size() && patches[next_site].at == off) {
++            off += PatchSize(patches[next_site++].kind);
++            continue;
++        }
++        ZydisDecoderContext ctx;
++        ZydisDecodedInstruction ins;
++        if (ZYAN_FAILED(ZydisDecoderDecodeInstruction(&decoder, &ctx, entry + off, size - off, &ins))
++            || (next_site < patches.size() && off + ins.length > patches[next_site].at)) {
++            return false;
++        }
++        const u64 next = reinterpret_cast<u64>(entry) + off + ins.length;
++        if (ins.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {  // a relative branch, or a rip-relative memory operand
++            u8 field, bits;
++            u64 raw;
++            if (ins.raw.imm[0].is_relative) {
++                field = ins.raw.imm[0].offset;
++                bits = ins.raw.imm[0].size;
++                raw = ins.raw.imm[0].value.u;
++            } else if (ins.raw.disp.size && ins.raw.modrm.mod == 0 && ins.raw.modrm.rm == 5) {
++                field = ins.raw.disp.offset;
++                bits = ins.raw.disp.size;
++                raw = u64(ins.raw.disp.value);
++            } else {
++                return false;
++            }
++            const u64 target = next + u64(s64(raw << (64 - bits)) >> (64 - bits));
++            fields.push_back({u32(off + field), u8(bits / 8), CodeField::Rel, u8(ins.length - field - bits / 8), target});
++        }
++        for (const auto& imm : ins.raw.imm) {
++            if (imm.size >= 32 && !imm.is_relative) {
++                fields.push_back({u32(off + imm.offset), u8(imm.size / 8), CodeField::Imm, 0, imm.value.u});
++            }
++        }
++        off += ins.length;
++    }
++    return next_site == patches.size();
++}
++
++std::shared_ptr<CachedBlock> A64EmitX64::Capture(const IR::Block& block, BlockDescriptor desc, bool disassemble) {
++    const auto& s = Symbols();
++    const u64 pc = A64::LocationDescriptor{block.Location()}.PC();
++    const u64 end = GuestEnd(block.GetTerminal(), A64::LocationDescriptor{block.EndLocation()}.PC());
++    if (end <= pc || end - pc > 0x10000 || (end - pc) % 4) {
++        return nullptr;
++    }
++
++    auto b = std::make_shared<CachedBlock>();
++    b->location = block.Location().Value();
++    b->pc = pc;
++    b->processor_id = conf.processor_id;
++    for (u64 va = pc; va < end; va += 4) {
++        const auto inst = conf.callbacks->MemoryReadCode(va);
++        if (!inst) {
++            return nullptr;
++        }
++        b->guest.push_back(*inst);
++    }
++    const u8* const entry = static_cast<const u8*>(desc.entrypoint);
++    const size_t size = desc.size;
++    const u64 lo = reinterpret_cast<u64>(entry), hi = lo + size;
++    b->code.assign(entry, entry + size);
++
++    auto sites = patch_sites;
++    std::sort(sites.begin(), sites.end(), [](const auto& x, const auto& y) { return x.at < y.at; });
++    for (const auto& p : sites) {
++        const u64 at = reinterpret_cast<u64>(p.at);
++        if (at < lo || at + PatchSize(p.kind) > hi) {
++            return nullptr;
++        }
++        b->patches.push_back({u32(at - lo), p.kind, p.target});
++    }
++
++    // a pointer into this JIT's code, outside the block
++    const auto code_symbol = [&](u64 p, Kind& kind, u64& x, u64& y) {
++        const void* ptr = reinterpret_cast<const void*>(p);
++        if (const auto it = s.prelude_ids.find(ptr); it != s.prelude_ids.end()) {
++            kind = Kind::RelPrelude;
++            x = it->second;
++            return true;
++        }
++        if (code.FindConst(ptr, x, y)) {
++            kind = Kind::RelConst;
++            return true;
++        }
++        if (const auto it = fallback_keys.find(ptr); it != fallback_keys.end()) {
++            kind = Kind::RelFallback;
++            x = it->second;
++            return true;
++        }
++        return false;
++    };
++    // a 64-bit value that is one of this JIT's pointers or in the host executable
++    const auto pointer_symbol = [&](u64 v, Kind& kind, u64& x) {
++        if (v == 0) {
++            return false;
++        }
++        x = 0;
++        if (v == s.conf) {
++            kind = Kind::ImmConf;
++        } else if (v == s.callbacks) {
++            kind = Kind::ImmCallbacks;
++        } else if (v == s.tpidr) {
++            kind = Kind::ImmTpidr;
++        } else if (v == s.tpidrro) {
++            kind = Kind::ImmTpidrro;
++        } else if (v == s.mon_lock) {
++            kind = Kind::ImmMonitorLock;
++        } else if (s.mon_count && v >= s.mon_addr && v < s.mon_addr + s.mon_count * s.mon_addr_stride) {
++            kind = Kind::ImmMonitorAddress;
++            x = (v - s.mon_addr) / s.mon_addr_stride;
++        } else if (s.mon_count && v >= s.mon_value && v < s.mon_value + s.mon_count * s.mon_value_stride) {
++            kind = Kind::ImmMonitorValue;
++            x = (v - s.mon_value) / s.mon_value_stride;
++        } else if (v >= s.image_lo && v < s.image_hi) {
++            kind = Kind::ImmImage;
++            x = v - s.image_lo;
++        } else {
++            return false;
++        }
++        return true;
++    };
++    const auto in_buffer = [&](u64 v) { return v >= s.buf_lo && v < s.buf_hi; };
++
++    for (const u64 at : fastmem_sites) {
++        const auto& info = fastmem_patch_info.at(at);
++        CachedBlock::Fastmem f{u32(at - lo), 0, {}, 0, u32(std::get<1>(info.marker)), info.recompile};
++        u64 unused;
++        if (at < lo || at >= hi || info.resume_rip < lo || info.resume_rip >= hi || std::get<0>(info.marker) != block.Location()
++            || !code_symbol(info.callback, f.callback_kind, f.callback, unused)) {
++            return nullptr;
++        }
++        f.resume = u32(info.resume_rip - lo);
++        b->fastmem.push_back(f);
++    }
++
++    // the fields that hold an address or an immediate: as Xbyak emitted them, or (to check those) by decoding the code
++    std::vector<CodeField> fields;
++    if (!disassemble) {
++        const u64 base = reinterpret_cast<u64>(code.getCode());
++        for (const auto& f : code_fields) {
++            const u64 at = base + f.at;
++            if (at >= lo && at < hi) {
++                fields.push_back({u32(at - lo), f.size, f.kind, f.tail, f.value});
++            }
++        }
++    } else if (!Disassemble(entry, size, b->patches, fields)) {
++        return nullptr;
++    }
++
++    for (const auto& f : fields) {
++        if (std::any_of(b->patches.begin(), b->patches.end(), [&](const auto& p) { return f.at >= p.at && f.at < p.at + PatchSize(p.kind); })) {
++            continue;  // emitted again by the JIT that installs the block
++        }
++        if (f.kind == CodeField::Rel) {
++            if (f.value >= lo && f.value < hi) {
++                continue;  // moves with the block
++            }
++            if (f.size != 4) {
++                return nullptr;
++            }
++            CachedBlock::Reloc r{f.at, Kind::RelAbs, f.tail};
++            if (in_buffer(f.value)) {
++                if (!code_symbol(f.value, r.kind, r.a, r.b)) {
++                    return nullptr;  // another block, or something this cache does not know
++                }
++            } else if (f.value >= s.image_lo && f.value < s.image_hi) {
++                r.kind = Kind::RelImage;
++                r.a = f.value - s.image_lo;
++            } else {
++                r.a = f.value;
++                b->process_local = true;
++            }
++            b->relocs.push_back(r);
++            continue;
++        }
++        Kind kind;
++        u64 x;
++        if (f.size == 8) {
++            if (in_buffer(f.value)) {
++                return nullptr;
++            }
++            if (pointer_symbol(f.value, kind, x)) {
++                b->relocs.push_back({f.at, kind, 0, x});
++            }
++            continue;
++        }
++        // a pointer in a 32-bit immediate cannot be relocated to an arbitrary one
++        const u64 zext = f.value & 0xFFFF'FFFF, sext = u64(s64(s32(u32(zext))));
++        for (const u64 v : {zext, sext}) {
++            if (in_buffer(v) || pointer_symbol(v, kind, x)) {
++                return nullptr;
++            }
++        }
++    }
++    std::sort(b->relocs.begin(), b->relocs.end(), [](const auto& x, const auto& y) { return x.at < y.at; });
++    return b;
++}
++
++std::optional<EmitX64::BlockDescriptor> A64EmitX64::Install(const CachedBlock& b, IR::LocationDescriptor location) {
++    for (size_t i = 0; i < b.guest.size(); i++) {
++        const auto inst = conf.callbacks->MemoryReadCode(b.pc + 4 * i);
++        if (!inst || *inst != b.guest[i]) {
++            return std::nullopt;
++        }
++    }
++    const auto& s = Symbols();
++    code.EnableWriting();
++    SCOPE_EXIT {
++        code.DisableWriting();
++    };
++
++    const auto resolve = [&](Kind kind, u64 x, u64 y) -> u64 {
++        switch (kind) {
++        case Kind::RelPrelude:
++            return x < s.prelude.size() ? reinterpret_cast<u64>(s.prelude[x]) : 0;
++        case Kind::RelConst:
++            return reinterpret_cast<u64>(code.ConstPtr(x, y));
++        case Kind::RelFallback:
++            return reinterpret_cast<u64>(FallbackFromKey(x));
++        case Kind::RelImage:
++        case Kind::ImmImage:
++            return s.image_lo + x;
++        case Kind::RelAbs:
++            return x;
++        case Kind::ImmConf:
++            return s.conf;
++        case Kind::ImmCallbacks:
++            return s.callbacks;
++        case Kind::ImmTpidr:
++            return s.tpidr;
++        case Kind::ImmTpidrro:
++            return s.tpidrro;
++        case Kind::ImmMonitorLock:
++            return s.mon_lock;
++        case Kind::ImmMonitorAddress:
++        case Kind::ImmMonitorValue: {
++            const u64 slot = SwapSlot(x, b.processor_id, conf.processor_id);
++            if (slot >= s.mon_count) {
++                return 0;
++            }
++            return kind == Kind::ImmMonitorAddress ? s.mon_addr + slot * s.mon_addr_stride : s.mon_value + slot * s.mon_value_stride;
++        }
++        }
++        return 0;
++    };
++    std::vector<u64> values;
++    values.reserve(b.relocs.size());
++    for (const auto& r : b.relocs) {
++        values.push_back(resolve(r.kind, r.a, r.b));
++        if (!values.back()) {
++            return std::nullopt;
++        }
++    }
++    std::vector<u64> callbacks;
++    for (const auto& f : b.fastmem) {
++        callbacks.push_back(resolve(f.callback_kind, f.callback, 0));
++        if (!callbacks.back()) {
++            return std::nullopt;
++        }
++    }
++
++    const size_t size = b.code.size();
++    code.EnsureMemoryCommitted(size + 64);
++    code.align();
++    u8* const entry = code.getCurr<u8*>();
++    if (code.SpaceRemaining() < size + 64) {
++        return std::nullopt;
++    }
++    std::memcpy(entry, b.code.data(), size);
++    for (size_t i = 0; i < b.relocs.size(); i++) {
++        const auto& r = b.relocs[i];
++        u8* const field = entry + r.at;
++        if (CachedBlock::IsRel(r.kind)) {
++            const s64 disp = s64(values[i] - reinterpret_cast<u64>(field + 4 + r.tail));
++            if (disp != s64(s32(disp))) {
++                return std::nullopt;  // out of rel32 range from here
++            }
++            const s32 d = s32(disp);
++            std::memcpy(field, &d, 4);
++        } else {
++            std::memcpy(field, &values[i], 8);
++        }
++    }
++
++    for (const auto& p : b.patches) {
++        u8* const at = entry + p.at;
++        const IR::LocationDescriptor target{p.target};
++        const auto next = GetBasicBlock(target);
++        const CodePtr target_code = next ? next->entrypoint : nullptr;
++        auto& info = patch_information[target];
++        code.SetCodePtr(at);
++        switch (p.kind) {
++        case PatchKind::Jg:
++            info.jg.push_back(at);
++            EmitPatchJg(target, target_code);
++            break;
++        case PatchKind::Jz:
++            info.jz.push_back(at);
++            EmitPatchJz(target, target_code);
++            break;
++        case PatchKind::Jmp:
++            info.jmp.push_back(at);
++            EmitPatchJmp(target, target_code);
++            break;
++        case PatchKind::MovRcx:
++            info.mov_rcx.push_back(at);
++            EmitPatchMovRcx(target_code);
++            break;
++        }
++    }
++    code.SetCodePtr(entry + size);
++
++    for (size_t i = 0; i < b.fastmem.size(); i++) {
++        const auto& f = b.fastmem[i];
++        fastmem_patch_info.emplace(reinterpret_cast<u64>(entry + f.at),
++                                   FastmemPatchInfo{reinterpret_cast<u64>(entry + f.resume), callbacks[i],
++                                                    DoNotFastmemMarker{location, f.inst}, f.recompile});
++    }
++    block_ranges.AddRange(boost::icl::discrete_interval<u64>::closed(b.pc, b.pc + 4 * b.guest.size() - 1), location);
++    return RegisterBlock(location, entry, size);
++}
++
++// How a freshly compiled block differs from the cached copy of it (empty: it does not)
++static std::string Diff(const CachedBlock& c, const CachedBlock& f, u64 processor_id) {
++    if (c.guest != f.guest) {
++        return "guest instructions";
++    }
++    if (c.code.size() != f.code.size()) {
++        return fmt::format("size {} vs {}", c.code.size(), f.code.size());
++    }
++    if (c.relocs.size() != f.relocs.size()) {
++        return fmt::format("{} vs {} relocations", c.relocs.size(), f.relocs.size());
++    }
++    std::vector<bool> masked(c.code.size());
++    const auto mask = [&](size_t at, size_t n) {
++        for (size_t i = at; i < at + n && i < masked.size(); i++) {
++            masked[i] = true;
++        }
++    };
++    for (size_t i = 0; i < c.relocs.size(); i++) {
++        auto rc = c.relocs[i];
++        const auto& rf = f.relocs[i];
++        if (rc.kind == Kind::ImmMonitorAddress || rc.kind == Kind::ImmMonitorValue) {
++            rc.a = SwapSlot(rc.a, c.processor_id, processor_id);
++        }
++        if (rc.at != rf.at || rc.kind != rf.kind || rc.tail != rf.tail || rc.a != rf.a || rc.b != rf.b) {
++            return fmt::format("relocation at +{:x}: kind {} a {:x} vs kind {} a {:x} at +{:x}", rc.at, int(rc.kind), rc.a,
++                               int(rf.kind), rf.a, rf.at);
++        }
++        mask(rc.at, CachedBlock::IsRel(rc.kind) ? 4 : 8);
++    }
++    if (c.patches.size() != f.patches.size()) {
++        return "patch locations";
++    }
++    for (size_t i = 0; i < c.patches.size(); i++) {
++        if (c.patches[i].at != f.patches[i].at || c.patches[i].kind != f.patches[i].kind || c.patches[i].target != f.patches[i].target) {
++            return fmt::format("patch location at +{:x}", c.patches[i].at);
++        }
++        mask(c.patches[i].at, PatchSize(c.patches[i].kind));
++    }
++    if (c.fastmem.size() != f.fastmem.size()) {
++        return "fastmem locations";
++    }
++    for (size_t i = 0; i < c.fastmem.size(); i++) {
++        const auto &x = c.fastmem[i], &y = f.fastmem[i];
++        if (x.at != y.at || x.resume != y.resume || x.callback_kind != y.callback_kind || x.callback != y.callback || x.inst != y.inst
++            || x.recompile != y.recompile) {
++            return fmt::format("fastmem location at +{:x}", x.at);
++        }
++    }
++    for (size_t i = 0; i < c.code.size(); i++) {
++        if (!masked[i] && c.code[i] != f.code[i]) {
++            return fmt::format("byte at +{:x}: {:02x} vs {:02x}", i, c.code[i], f.code[i]);
++        }
++    }
++    return {};
++}
++
++std::optional<EmitX64::BlockDescriptor> A64EmitX64::EmitFromCache(IR::LocationDescriptor location) {
++    if (!code_cache || conf.code_cache_selftest || !CanCache(location)) {
++        return std::nullopt;
++    }
++    const auto b = code_cache->Find(location.Value());
++    if (!b) {
++        return std::nullopt;
++    }
++    if (conf.code_cache_verify) {
++        verify_against = b;  // compared with the block CacheBlock captures next
++        return std::nullopt;
++    }
++    const auto desc = Install(*b, location);
++    ++(desc ? code_cache->copied : code_cache->stale);
++    return desc;
++}
++
++EmitX64::BlockDescriptor A64EmitX64::CacheBlock(const IR::Block& block, BlockDescriptor desc) {
++    const auto location = block.Location();
++    const auto cached = std::move(verify_against);
++    verify_against = nullptr;
++    if (!CanCache(location)) {
++        return desc;
++    }
++    const auto b = Capture(block, desc);
++    if (conf.code_cache_verify) {
++        const auto decoded = Capture(block, desc, true);
++        const auto same = [](const auto& x, const auto& y) {
++            return x.at == y.at && x.kind == y.kind && x.tail == y.tail && x.a == y.a && x.b == y.b;
++        };
++        if (bool(b) != bool(decoded)
++            || (b && !std::equal(b->relocs.begin(), b->relocs.end(), decoded->relocs.begin(), decoded->relocs.end(), same))) {
++            ++code_cache->mismatches;
++            fmt::print(stderr, "dynarmic code cache: the relocations Xbyak reported for the block at {:x} differ from the decoded ones\n",
++                       A64::LocationDescriptor{location}.PC());
++        }
++    }
++    if (cached && cached->location == location.Value()) {
++        const std::string diff = !b                      ? "it cannot be cached"
++                               : cached->guest != b->guest ? std::string{}  // the guest code has changed: a stale copy
++                                                           : Diff(*cached, *b, conf.processor_id);
++        ++code_cache->verified;
++        if (!diff.empty()) {
++            ++code_cache->mismatches;
++            fmt::print(stderr, "dynarmic code cache: block at {:x} differs from its cached copy: {}\n", b ? b->pc : 0, diff);
++        }
++        if (!b || cached->guest == b->guest) {
++            return desc;
++        }
++    }
++    if (!b) {
++        ++code_cache->uncacheable;
++        return desc;
++    }
++    ++code_cache->compiled;
++    code_cache->Insert(b);
++    if (conf.code_cache_selftest) {
++        // run the relocated copy instead
++        InvalidateBasicBlocks(tsl::robin_set<IR::LocationDescriptor>{location});
++        if (const auto copy = Install(*b, location)) {
++            return *copy;
++        }
++        fmt::print(stderr, "dynarmic code cache: could not relocate the block at {:x}\n", b->pc);
++        return RegisterBlock(location, desc.entrypoint, desc.size);
++    }
++    return desc;
++}
++
++}  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/a64_code_cache.h b/src/dynarmic/backend/x64/a64_code_cache.h
+new file mode 100644
+index 00000000..d50e9e93
+--- /dev/null
++++ b/src/dynarmic/backend/x64/a64_code_cache.h
+@@ -0,0 +1,101 @@
++/* This file is part of the dynarmic project.
++ * SPDX-License-Identifier: 0BSD
++ */
++
++#pragma once
++
++#include <atomic>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <unordered_map>
++#include <vector>
++
++#include <mcl/stdint.hpp>
++
++#include "dynarmic/backend/x64/emit_x64.h"
++
++namespace Dynarmic::Backend::X64 {
++
++/// A translated block in a form any JIT with the same configuration can relocate into its own code: the host code, and
++/// what in it refers to things outside the block (code in the prelude, constants, fastmem fallbacks, the host
++/// executable, per-JIT pointers), patch locations (block links) and fastmem fault information.
++struct CachedBlock {
++    u64 location;            // IR::LocationDescriptor
++    u64 pc;
++    std::vector<u32> guest;  // the guest instructions it was translated from
++    u64 processor_id;        // of the JIT that compiled it (exclusive monitor slots are relative to it)
++    std::vector<u8> code;
++
++    enum class Kind : u8 {
++        // rel32 fields
++        RelPrelude,   // prelude symbol a (A64EmitX64::CacheSymbols::prelude)
++        RelConst,     // the constant (a, b)
++        RelFallback,  // the fastmem fallback with FallbackKey a
++        RelImage,     // the host executable + a
++        RelAbs,       // the absolute address a (valid in this process only)
++        // imm64 fields
++        ImmConf,
++        ImmCallbacks,
++        ImmTpidr,
++        ImmTpidrro,
++        ImmMonitorLock,
++        ImmMonitorAddress,  // exclusive monitor slot a
++        ImmMonitorValue,
++        ImmImage,
++    };
++    static bool IsRel(Kind k) { return k <= Kind::RelAbs; }
++
++    struct Reloc {
++        u32 at;
++        Kind kind;
++        u8 tail;  // rel32: bytes from the end of the field to the end of the instruction
++        u64 a = 0, b = 0;
++    };
++    std::vector<Reloc> relocs;
++
++    struct Patch {
++        u32 at;
++        PatchKind kind;
++        u64 target;
++    };
++    std::vector<Patch> patches;
++
++    struct Fastmem {
++        u32 at, resume;
++        Kind callback_kind;  // RelPrelude or RelFallback
++        u64 callback;
++        u32 inst;
++        bool recompile;
++    };
++    std::vector<Fastmem> fastmem;
++
++    bool process_local = false;  // refers to absolute addresses outside the host executable
++
++    size_t Bytes() const {
++        return sizeof(*this) + guest.size() * 4 + code.size() + relocs.size() * sizeof(Reloc)
++             + patches.size() * sizeof(Patch) + fastmem.size() * sizeof(Fastmem);
++    }
++};
++
++}  // namespace Dynarmic::Backend::X64
++
++namespace Dynarmic::A64 {
++
++class CodeCache {
++public:
++    std::shared_ptr<const Backend::X64::CachedBlock> Find(u64 location) const;
++    void Insert(std::shared_ptr<const Backend::X64::CachedBlock> block);
++    /// False if `config` (A64EmitX64::CacheConfig) differs from that of the JITs already using the cache
++    bool Attach(u64 config);
++
++    std::atomic<u64> copied{0}, compiled{0}, stale{0}, uncacheable{0}, verified{0}, mismatches{0};
++    static constexpr size_t max_bytes = 64 * 1024 * 1024;
++
++    mutable std::mutex mutex;
++    std::unordered_map<u64, std::shared_ptr<const Backend::X64::CachedBlock>> blocks;
++    size_t bytes = 0;
++    std::optional<u64> config;
++};
++
++}  // namespace Dynarmic::A64
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.cpp b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+index cec78138..71f444d4 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.cpp
++++ b/src/dynarmic/backend/x64/a64_emit_x64.cpp
+@@ -12,6 +12,7 @@
+ #include <mcl/stdint.hpp>
+ #include <mcl/type_traits/integer_of_size.hpp>
+ 
++#include "dynarmic/backend/x64/a64_code_cache.h"
+ #include "dynarmic/backend/x64/a64_jitstate.h"
+ #include "dynarmic/backend/x64/abi.h"
+ #include "dynarmic/backend/x64/block_of_code.h"
+@@ -60,6 +61,13 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
+     exception_handler.SetFastmemCallback([this](u64 rip_) {
+         return FastmemCallback(rip_);
+     });
++    if (this->conf.code_cache && this->conf.code_cache->Attach(CacheConfig())) {
++        code_cache = this->conf.code_cache.get();
++        code.relocHookCtx_ = this;
++        code.relocHook_ = [](void* ctx, size_t at, int size, uint64_t value, int kind, int tail) {
++            static_cast<A64EmitX64*>(ctx)->code_fields.push_back({u32(at), u8(size), kind ? CodeField::Imm : CodeField::Rel, u8(tail), value});
++        };
++    }
+ }
+ 
+ A64EmitX64::~A64EmitX64() = default;
+@@ -87,6 +95,9 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
+ 
+     RegAlloc reg_alloc{code, gpr_order, any_xmm};
+     A64EmitContext ctx{conf, reg_alloc, block};
++    patch_sites.clear();
++    fastmem_sites.clear();
++    code_fields.clear();
+ 
+     // Start emitting.
+     code.align();
+@@ -146,7 +157,8 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
+     const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
+     block_ranges.AddRange(range, descriptor);
+ 
+-    return RegisterBlock(descriptor, entrypoint, size);
++    const BlockDescriptor desc = RegisterBlock(descriptor, entrypoint, size);
++    return code_cache ? CacheBlock(block, desc) : desc;
+ }
+ 
+ void A64EmitX64::ClearCache() {
+@@ -621,6 +633,7 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
+         code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
+ 
+         patch_information[terminal.next].jg.push_back(code.getCurr());
++        patch_sites.push_back({code.getCurr(), PatchKind::Jg, terminal.next.Value()});
+         if (const auto next_bb = GetBasicBlock(terminal.next)) {
+             EmitPatchJg(terminal.next, next_bb->entrypoint);
+         } else {
+@@ -630,6 +643,7 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
+         code.cmp(dword[r15 + offsetof(A64JitState, halt_reason)], 0);
+ 
+         patch_information[terminal.next].jz.push_back(code.getCurr());
++        patch_sites.push_back({code.getCurr(), PatchKind::Jz, terminal.next.Value()});
+         if (const auto next_bb = GetBasicBlock(terminal.next)) {
+             EmitPatchJz(terminal.next, next_bb->entrypoint);
+         } else {
+@@ -651,6 +665,7 @@ void A64EmitX64::EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::Location
+     }
+ 
+     patch_information[terminal.next].jmp.push_back(code.getCurr());
++    patch_sites.push_back({code.getCurr(), PatchKind::Jmp, terminal.next.Value()});
+     if (auto next_bb = GetBasicBlock(terminal.next)) {
+         EmitPatchJmp(terminal.next, next_bb->entrypoint);
+     } else {
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
+index d4904b9f..1568dec0 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.h
++++ b/src/dynarmic/backend/x64/a64_emit_x64.h
+@@ -7,8 +7,10 @@
+ 
+ #include <array>
+ #include <map>
++#include <memory>
+ #include <optional>
+ #include <tuple>
++#include <unordered_map>
+ 
+ #include "dynarmic/backend/block_range_information.h"
+ #include "dynarmic/backend/x64/a64_jitstate.h"
+@@ -21,6 +23,17 @@
+ namespace Dynarmic::Backend::X64 {
+ 
+ class RegAlloc;
++struct CachedBlock;
++
++// A field of emitted code that holds an address (rel8/rel32 of a jump or call to an address, disp32 of [rip + address];
++// value: the address; tail: bytes of the instruction after the field) or an immediate (of mov reg, imm)
++struct CodeField {
++    u32 at;
++    u8 size;
++    enum Kind : u8 { Rel, Imm } kind;
++    u8 tail;
++    u64 value;
++};
+ 
+ struct A64EmitContext final : public EmitContext {
+     A64EmitContext(const A64::UserConfig& conf, RegAlloc& reg_alloc, IR::Block& block);
+@@ -47,6 +60,10 @@ public:
+      */
+     BlockDescriptor Emit(IR::Block& block);
+ 
++    /// The block at `location` from conf.code_cache, relocated into this JIT's code, if the cache has one for the guest
++    /// instructions there now (a64_code_cache.cpp)
++    std::optional<BlockDescriptor> EmitFromCache(IR::LocationDescriptor location);
++
+     void ClearCache() override;
+ 
+     void InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges);
+@@ -79,12 +96,32 @@ protected:
+     void GenFastmemFallbacks();   // reserves the area; each fallback is generated on first use
+     u8* fallback_cur = nullptr;
+     u8* fallback_end = nullptr;
++    // fallback -> FallbackKey, for the code cache
++    std::unordered_map<const void*, u64> fallback_keys;
++    static u64 FallbackKey(int kind, bool ordered, size_t bitsize, int vaddr_idx, int value_idx) {
++        return u64(kind) | u64(ordered) << 8 | u64(bitsize) << 16 | u64(vaddr_idx) << 32 | u64(value_idx) << 40;
++    }
++    void (*FallbackFromKey(u64 key))();
++
+     template<typename Gen>
+     void (*EmitFallback(Gen gen))();
+     void (*ReadFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
+     void (*WriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
+     void (*ExclusiveWriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
+ 
++    // Code cache (a64_code_cache.cpp)
++    struct CacheSymbols;
++    std::shared_ptr<CacheSymbols> cache_symbols;  // built on first use
++    const CacheSymbols& Symbols();
++    BlockDescriptor CacheBlock(const IR::Block& block, BlockDescriptor desc);
++    std::shared_ptr<CachedBlock> Capture(const IR::Block& block, BlockDescriptor desc, bool disassemble = false);
++    std::vector<CodeField> code_fields;  // reported by Xbyak (relocHook_) while a block is emitted
++    std::optional<BlockDescriptor> Install(const CachedBlock& b, IR::LocationDescriptor location);
++    bool CanCache(IR::LocationDescriptor location) const;
++    std::shared_ptr<const CachedBlock> verify_against;  // code_cache_verify
++    A64::CodeCache* code_cache = nullptr;  // conf.code_cache, if this JIT can use it
++    u64 CacheConfig() const;
++
+     const void* terminal_handler_pop_rsb_hint;
+     const void* terminal_handler_fast_dispatch_hint = nullptr;
+     FastDispatchEntry& (*fast_dispatch_table_lookup)(u64) = nullptr;
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp b/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
+index 2d11e757..d90afca8 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
++++ b/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
+@@ -177,6 +177,7 @@ void (*A64EmitX64::ReadFallback(bool ordered, size_t bitsize, int vaddr_idx, int
+         code.ret();
+     });
+     read_fallbacks.emplace(key, fn);
++    fallback_keys.emplace(reinterpret_cast<const void*>(fn), FallbackKey(0, ordered, bitsize, vaddr_idx, value_idx));
+     return fn;
+ }
+ 
+@@ -231,6 +232,7 @@ void (*A64EmitX64::WriteFallback(bool ordered, size_t bitsize, int vaddr_idx, in
+         code.ret();
+     });
+     write_fallbacks.emplace(key, fn);
++    fallback_keys.emplace(reinterpret_cast<const void*>(fn), FallbackKey(1, ordered, bitsize, vaddr_idx, value_idx));
+     return fn;
+ }
+ 
+@@ -273,6 +275,7 @@ void (*A64EmitX64::ExclusiveWriteFallback(bool ordered, size_t bitsize, int vadd
+         code.ret();
+     });
+     exclusive_write_fallbacks.emplace(key, fn);
++    fallback_keys.emplace(reinterpret_cast<const void*>(fn), FallbackKey(2, ordered, bitsize, vaddr_idx, value_idx));
+     return fn;
+ }
+ 
+diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
+index 86572bcd..6a2e773c 100644
+--- a/src/dynarmic/backend/x64/a64_interface.cpp
++++ b/src/dynarmic/backend/x64/a64_interface.cpp
+@@ -268,6 +268,10 @@ private:
+         }
+         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+ 
++        if (const auto block = emitter.EmitFromCache(current_location)) {
++            return block->entrypoint;
++        }
++
+         // JIT Compile
+         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
+         IR::Block ir_block = A64::Translate(A64::LocationDescriptor{current_location}, get_code,
+diff --git a/src/dynarmic/backend/x64/block_of_code.h b/src/dynarmic/backend/x64/block_of_code.h
+index 3f7573af..e15229b2 100644
+--- a/src/dynarmic/backend/x64/block_of_code.h
++++ b/src/dynarmic/backend/x64/block_of_code.h
+@@ -124,6 +124,8 @@ public:
+     }
+ 
+     Xbyak::Address Const(const Xbyak::AddressFrame& frame, u64 lower, u64 upper = 0);
++    const void* ConstPtr(u64 lower, u64 upper) { return constant_pool.GetConstantPtr(lower, upper); }
++    bool FindConst(const void* p, u64& lower, u64& upper) const { return constant_pool.Find(p, lower, upper); }
+ 
+     template<size_t esize>
+     Xbyak::Address BConst(const Xbyak::AddressFrame& frame, u64 value) {
+@@ -138,6 +140,10 @@ public:
+         return return_from_run_code[0];
+     }
+ 
++    const std::array<const void*, 4>& GetReturnFromRunCodeAddresses() const {
++        return return_from_run_code;
++    }
++
+     const void* GetForceReturnFromRunCodeAddress() const {
+         return return_from_run_code[FORCE_RETURN];
+     }
+@@ -174,6 +180,8 @@ public:
+ 
+     JitStateInfo GetJitStateInfo() const { return jsi; }
+ 
++    HostFeature HostFeatures() const { return host_features; }
++
+     bool HasHostFeature(HostFeature feature) const {
+         return (host_features & feature) == feature;
+     }
+diff --git a/src/dynarmic/backend/x64/constant_pool.cpp b/src/dynarmic/backend/x64/constant_pool.cpp
+index ba003262..16075c05 100644
+--- a/src/dynarmic/backend/x64/constant_pool.cpp
++++ b/src/dynarmic/backend/x64/constant_pool.cpp
+@@ -23,6 +23,21 @@ ConstantPool::ConstantPool(BlockOfCode& code, size_t size)
+ }
+ 
+ Xbyak::Address ConstantPool::GetConstant(const Xbyak::AddressFrame& frame, u64 lower, u64 upper) {
++    return frame[code.rip + GetConstantPtr(lower, upper)];
++}
++
++bool ConstantPool::Find(const void* p, u64& lower, u64& upper) const {
++    const auto* c = static_cast<const ConstantT*>(p);
++    if (c < pool.data() || c >= pool.data() + insertion_point
++        || (reinterpret_cast<uintptr_t>(c) - reinterpret_cast<uintptr_t>(pool.data())) % align_size) {
++        return false;
++    }
++    lower = c->first;
++    upper = c->second;
++    return true;
++}
++
++const void* ConstantPool::GetConstantPtr(u64 lower, u64 upper) {
+     const auto constant = ConstantT(lower, upper);
+     auto iter = constant_info.find(constant);
+     if (iter == constant_info.end()) {
+@@ -32,7 +47,7 @@ Xbyak::Address ConstantPool::GetConstant(const Xbyak::AddressFrame& frame, u64 l
+         iter = constant_info.insert({constant, &target_constant}).first;
+         ++insertion_point;
+     }
+-    return frame[code.rip + iter->second];
++    return iter->second;
+ }
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/constant_pool.h b/src/dynarmic/backend/x64/constant_pool.h
+index 2ab64215..23bd30cb 100644
+--- a/src/dynarmic/backend/x64/constant_pool.h
++++ b/src/dynarmic/backend/x64/constant_pool.h
+@@ -27,6 +27,9 @@ public:
+     ConstantPool(BlockOfCode& code, size_t size);
+ 
+     Xbyak::Address GetConstant(const Xbyak::AddressFrame& frame, u64 lower, u64 upper = 0);
++    const void* GetConstantPtr(u64 lower, u64 upper);
++    /// The constant at p, if p is one of this pool's entries
++    bool Find(const void* p, u64& lower, u64& upper) const;
+ 
+ private:
+     static constexpr size_t align_size = 16;  // bytes
+diff --git a/src/dynarmic/backend/x64/emit_x64.cpp b/src/dynarmic/backend/x64/emit_x64.cpp
+index e560a52d..33119585 100644
+--- a/src/dynarmic/backend/x64/emit_x64.cpp
++++ b/src/dynarmic/backend/x64/emit_x64.cpp
+@@ -89,6 +89,7 @@ void EmitX64::PushRSBHelper(Xbyak::Reg64 loc_desc_reg, Xbyak::Reg64 index_reg, I
+     code.mov(loc_desc_reg, target.Value());
+ 
+     patch_information[target].mov_rcx.push_back(code.getCurr());
++    patch_sites.push_back({code.getCurr(), PatchKind::MovRcx, target.Value()});
+     EmitPatchMovRcx(target_code_ptr);
+ 
+     code.mov(qword[r15 + index_reg * 8 + code.GetJitStateInfo().offsetof_rsb_location_descriptors], loc_desc_reg);
+diff --git a/src/dynarmic/backend/x64/emit_x64.h b/src/dynarmic/backend/x64/emit_x64.h
+index 5a46f04e..fefad69e 100644
+--- a/src/dynarmic/backend/x64/emit_x64.h
++++ b/src/dynarmic/backend/x64/emit_x64.h
+@@ -71,6 +71,9 @@ inline SharedLabel GenSharedLabel() {
+     return std::make_shared<Xbyak::Label>();
+ }
+ 
++// The kinds of patch locations (block links), recorded for the code cache (a64_code_cache.cpp)
++enum class PatchKind : u8 { Jg, Jz, Jmp, MovRcx };
++
+ class EmitX64 {
+ public:
+     struct BlockDescriptor {
+@@ -140,6 +143,14 @@ protected:
+     ExceptionHandler exception_handler;
+     tsl::robin_map<IR::LocationDescriptor, BlockDescriptor> block_descriptors;
+     tsl::robin_map<IR::LocationDescriptor, PatchInformation> patch_information;
++    // The patch locations of the block being emitted
++    struct PatchSite {
++        CodePtr at;
++        PatchKind kind;
++        u64 target;
++    };
++    std::vector<PatchSite> patch_sites;
++    std::vector<u64> fastmem_sites;  // and its fastmem patch locations
+ };
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+index 44074e94..81fbc4a9 100644
+--- a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
++++ b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+@@ -104,6 +104,7 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
++            fastmem_sites.push_back(mcl::bit_cast<u64>(location));
+             fastmem_patch_info.emplace(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+@@ -191,6 +192,7 @@ void AxxEmitX64::EmitMemoryWrite(AxxEmitContext& ctx, IR::Inst* inst) {
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
++            fastmem_sites.push_back(mcl::bit_cast<u64>(location));
+             fastmem_patch_info.emplace(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+@@ -371,6 +373,7 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+ 
+         const auto location = EmitReadMemoryMov<bitsize>(code, value_idx, src_ptr, ordered);
+ 
++        fastmem_sites.push_back(mcl::bit_cast<u64>(location));
+         fastmem_patch_info.emplace(
+             mcl::bit_cast<u64>(location),
+             FastmemPatchInfo{
+@@ -509,6 +512,7 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+             code.L(*abort);
+             code.call(wrapped_fn);
+ 
++            fastmem_sites.push_back(mcl::bit_cast<u64>(location));
+             fastmem_patch_info.emplace(
+                 mcl::bit_cast<u64>(location),
+                 FastmemPatchInfo{
+diff --git a/src/dynarmic/interface/A64/config.h b/src/dynarmic/interface/A64/config.h
+index c8ed623e..4cb6829d 100644
+--- a/src/dynarmic/interface/A64/config.h
++++ b/src/dynarmic/interface/A64/config.h
+@@ -10,6 +10,7 @@
+ #include <cstdint>
+ #include <memory>
+ #include <optional>
++#include <string>
+ 
+ #include "dynarmic/interface/optimization_flags.h"
+ 
+@@ -135,6 +136,14 @@ struct UserCallbacks {
+     virtual std::uint64_t GetCNTPCT() = 0;
+ };
+ 
++/// Translated code that JITs share: a block that one JIT has compiled is copied and relocated, instead of compiled again,
++/// by the others with the same cache, as long as the guest instructions there are the same. JITs that share a cache must
++/// have the same configuration apart from callbacks, processor_id and the tpidr pointers (the others do not use it).
++class CodeCache;
++std::shared_ptr<CodeCache> MakeCodeCache();
++/// Counters, for diagnostics
++std::string CodeCacheStats(const CodeCache& cache);
++
+ struct UserConfig {
+     UserCallbacks* callbacks;
+ 
+@@ -291,6 +300,13 @@ struct UserConfig {
+ 
+     /// Internal use only
+     bool very_verbose_debugging_output = false;
++
++    /// See CodeCache (null: none)
++    std::shared_ptr<CodeCache> code_cache;
++    /// Testing: on a cache hit, compile the block anyway and report on stderr how it differs from the cached copy
++    bool code_cache_verify = false;
++    /// Testing: run every block that can be cached from a relocated copy of it
++    bool code_cache_selftest = false;
+ };
+ 
+ }  // namespace A64

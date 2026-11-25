@@ -25,8 +25,9 @@ clone() { # dir url commit-or-tag [extra git clone args]
 if clone dynarmic https://github.com/azahar-emu/dynarmic.git a46601580d5512d324104f985b5f0209dc980ddc; then
   git -C "$DEPS/dynarmic" submodule --quiet update --init --depth 1 externals/fmt externals/mcl externals/robin-map \
     externals/xbyak externals/zycore externals/zydis
-  git -C "$DEPS/dynarmic" apply "$P/dynarmic-gse-precise.patch" "$P/dynarmic-fp16-fcmp.patch" "$P/dynarmic-compile-speed.patch"
-  git -C "$DEPS/dynarmic/externals/xbyak" apply "$P/xbyak-mingw-headers.patch"
+  git -C "$DEPS/dynarmic" apply "$P/dynarmic-gse-precise.patch" "$P/dynarmic-fp16-fcmp.patch" "$P/dynarmic-compile-speed.patch" \
+    "$P/dynarmic-code-cache.patch"
+  git -C "$DEPS/dynarmic/externals/xbyak" apply "$P/xbyak-mingw-headers.patch" "$P/xbyak-reloc-hook.patch"
 fi
 
 # LLVM runtimes for the guest (libc++, libc++abi, libunwind; Apache-2.0 WITH LLVM-exception)
