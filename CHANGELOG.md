@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The LZFSE decoder (asset catalogs) no longer reads out of bounds on damaged data: initial FSE states are checked
+  and the bit reader reads only the bytes it uses (found by the fuzzer, which made CI on main fail).
 - arm64 guests start and warm up about twice as fast: dynarmic compiles guest code with half the CPU time
   (`patches/dynarmic-compile-speed.patch`). A small program starts in 10 ms instead of 80; Biome, esbuild and
   SwiftFormat use 40-55 % less CPU; each guest thread also needs 16 MB less memory.
