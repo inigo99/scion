@@ -16,10 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # clang-20 (and llvm-20, with llvm-20-dev) build the modern-AIR test metallib (tests/metal/air/mkmetallib.py)
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 golang \
+          sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 mingw-w64 cmake ninja-build libboost-dev python3 golang \
             libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
