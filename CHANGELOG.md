@@ -5,6 +5,9 @@
 - arm64 guests start and warm up about twice as fast: dynarmic compiles guest code with half the CPU time
   (`patches/dynarmic-compile-speed.patch`). A small program starts in 10 ms instead of 80; Biome, esbuild and
   SwiftFormat use 40-55 % less CPU; each guest thread also needs 16 MB less memory.
+- arm64 threads share translated code: a block one thread has compiled is copied and relocated by the others instead
+  of compiled again (`patches/dynarmic-code-cache.patch`; `SCION_JIT_CACHE=0` turns it off). SwiftFormat runs 17 %
+  faster and esbuild uses 11 % less CPU; single-threaded programs spend a few percent more to record their blocks.
 
 ## 0.2.0 (2026-11-25)
 

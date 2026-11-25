@@ -312,6 +312,7 @@ HC hc_alias(A dst, A len, A src, A fixed, A cur, A) {
 HC hc_getpid(A, A, A, A, A, A) { return getpid(); }
 HCABI A hc_exit(A code, A, A, A, A, A) {
     TRACE("exit(%lld)\n", (long long)code);
+    if (g_guest_arm) arm64_exit();
     if (g_trace) for (auto &m : g_missing) fprintf(stderr, "[scion] unimplemented import: %s\n", m.c_str());
     fflush(stdout); fflush(stderr);
     _exit((int)code);

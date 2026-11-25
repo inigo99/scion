@@ -109,6 +109,7 @@ extern std::vector<std::string> g_missing;
 /* ---- arm64 guests (arm64.cpp) ---- */
 extern uint32_t *g_arm_thunks;
 void arm64_init();
+void arm64_exit(void); /* process exit */
 uint64_t run_arm64(uint64_t pc, const uint64_t *args, int nargs, uint64_t sp, struct gthread *t);
 void arm64_thread_end(void); /* frees the thread's JITs (end of a guest thread) */
 void arm64_signal(struct gthread *t, int sig); /* async: deliver at the next block boundary */

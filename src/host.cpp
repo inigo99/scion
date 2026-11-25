@@ -434,6 +434,7 @@ static void prof_report();
 A hc_exit(A code, A, A, A, A, A) {
     TRACE("exit(%lld)\n", (long long)code);
     prof_report();
+    if (g_guest_arm) arm64_exit();
     if (g_trace && !g_missing.empty()) for (auto &m : g_missing) fprintf(stderr, "[scion] unimplemented import: %s\n", m.c_str());
     fflush(stdout); fflush(stderr);
     /* guest atexit handlers already ran (libSystem's exit); skip DLL teardown: Vulkan drivers can deadlock in it

@@ -14,6 +14,11 @@
 /* ======================================================================= arm64 guest (dynarmic) */
 uint32_t *g_arm_thunks;
 static Dynarmic::ExclusiveMonitor *g_monitor;
+/* translated code shared by the threads' JITs: a block one thread has compiled is copied by the others.
+ * SCION_JIT_CACHE=0: off; =stats: counters at exit; =verify: compile anyway and report differences from the copy;
+ * =selftest: every thread runs relocated copies of its own blocks (tests the relocation) */
+static std::shared_ptr<Dynarmic::A64::CodeCache> g_code_cache;
+static const char *g_code_cache_mode;
 static std::atomic<size_t> g_cpu_ids{0};
 static const size_t MAX_CPUS = 256;
 
@@ -393,6 +398,9 @@ static ArmEnv *new_env(struct gthread *t) {
     /* SCION_JIT_MB: code cache per thread (dynarmic's default is 128 MB; when it fills, everything is recompiled) */
     if (const char *m = getenv("SCION_JIT_MB")) cfg.code_cache_size = (size_t)strtoul(m, nullptr, 10) << 20;
     if (const char *o = getenv("SCION_OPT")) cfg.optimizations = (Dynarmic::OptimizationFlag)strtoul(o, nullptr, 16); /* tuning */
+    cfg.code_cache = g_code_cache;
+    cfg.code_cache_verify = g_code_cache_mode && !strcmp(g_code_cache_mode, "verify");
+    cfg.code_cache_selftest = g_code_cache_mode && !strcmp(g_code_cache_mode, "selftest");
     e->jit = new Dynarmic::A64::Jit(cfg);
     { std::lock_guard<std::mutex> l(g_inv_mu); e->inv_seen = g_inv_log.size(); }   /* a new JIT has nothing stale */
     return e;
@@ -445,6 +453,8 @@ uint64_t run_arm64(uint64_t pc, const uint64_t *args, int nargs, uint64_t sp, st
 
 void arm64_init() {
     g_monitor = new Dynarmic::ExclusiveMonitor(MAX_CPUS);
+    g_code_cache_mode = getenv("SCION_JIT_CACHE");
+    if (!g_code_cache_mode || strcmp(g_code_cache_mode, "0")) g_code_cache = Dynarmic::A64::MakeCodeCache();
     g_arm_thunks = (uint32_t *)image_alloc(0, 4096);
     for (uint32_t i = 0; i <= HC_COUNT + 1; i++) { g_arm_thunks[2 * i] = 0xD4000001u | (i << 5); g_arm_thunks[2 * i + 1] = 0xD65F03C0u; }
 }
@@ -482,4 +492,9 @@ int arm64_thread_ctl(struct gthread *t, int op, int flavor, void *state) {
     if (!e->parked) return -1; /* ponytail: set_state only while parked at a block boundary */
     memcpy(s, state, n); e->snap_dirty = true;
     return 0;
+}
+
+void arm64_exit() {
+    if (g_code_cache && g_code_cache_mode && strcmp(g_code_cache_mode, "0"))
+        fprintf(stderr, "[scion] JIT code cache: %s\n", Dynarmic::A64::CodeCacheStats(*g_code_cache).c_str());
 }
