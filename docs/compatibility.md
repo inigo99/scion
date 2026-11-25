@@ -58,8 +58,9 @@ These are the big gaps. Each is a good project for a contributor (see [roadmap.m
 - **Services:** no iCloud, Keychain (Security), StoreKit, notifications, XPC services or login items.
 - **Metal:** no ray tracing, mesh shaders or tile shaders; desktop GPUs are not tile-based, so imageblocks and
   programmable blending need emulation that does not exist yet.
-- **Performance:** arm64 code is translated on every run (no cache yet); x86_64 programs are faster. Prefer the x86_64
-  half of a universal binary.
+- **Performance:** arm64 code is translated as it runs, so the first run of an arm64 program is the slowest; later runs
+  reuse the translations kept on disk. x86_64 programs run natively and are faster: prefer the x86_64 half of a
+  universal binary.
 - **Code signing, sandboxing and hardened runtime** are ignored.
 
 ## When an app does not start

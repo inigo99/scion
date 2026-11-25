@@ -8,8 +8,9 @@ compiled again, as long as the guest instructions there are the same. Needs patc
 - UserConfig::code_cache (MakeCodeCache), with code_cache_verify (also decode each block with Zydis and compare, and
   compile cached blocks again and compare) and code_cache_selftest (run every block from a relocated copy) for testing
 - LoadCodeCache / SaveCodeCache: a file of checksummed records, tied to a key (the build of the host) and to the
-  JITs' configuration, read lazily (a record is parsed when its location is first looked for); a few new blocks are
-  appended, more rewrite the file, dropping the records no process has looked for in 8 rewrites
+  JITs' configuration, mapped and read lazily (a record is parsed when its location is first looked for); a few new
+  blocks are appended, more rewrite the file with what other processes saved meanwhile, dropping the records no
+  process has looked for in 8 rewrites
 
 diff --git a/src/dynarmic/CMakeLists.txt b/src/dynarmic/CMakeLists.txt
 index b234cd26..baab7137 100644
@@ -26,10 +27,10 @@ index b234cd26..baab7137 100644
              backend/x64/a64_emit_x64_memory.cpp
 diff --git a/src/dynarmic/backend/x64/a64_code_cache.cpp b/src/dynarmic/backend/x64/a64_code_cache.cpp
 new file mode 100644
-index 00000000..024455c0
+index 00000000..7301c1b6
 --- /dev/null
 +++ b/src/dynarmic/backend/x64/a64_code_cache.cpp
-@@ -0,0 +1,1040 @@
+@@ -0,0 +1,1124 @@
 +/* This file is part of the dynarmic project.
 + * SPDX-License-Identifier: 0BSD
 + */
@@ -74,6 +75,10 @@ index 00000000..024455c0
 +#    include <windows.h>
 +extern "C" IMAGE_DOS_HEADER __ImageBase;
 +#else
++#    include <fcntl.h>
++#    include <sys/mman.h>
++#    include <sys/stat.h>
++#    include <unistd.h>
 +extern "C" char __executable_start;
 +extern "C" char _end;
 +#endif
@@ -100,7 +105,7 @@ index 00000000..024455c0
 +    }
 +    auto& e = it.value();
 +    e.file = Entry::Used;
-+    auto b = Backend::X64::ParseRecord(file, e.record);
++    auto b = file ? Backend::X64::ParseRecord(file, e.record) : nullptr;
 +    if (!b || b->location != location) {
 +        entries.erase(it);  // damaged: not saved again
 +        return nullptr;
@@ -113,26 +118,32 @@ index 00000000..024455c0
 +    return b;
 +}
 +
-+void CodeCache::Insert(std::shared_ptr<const Backend::X64::CachedBlock> block) {
++bool CodeCache::Insert(std::shared_ptr<const Backend::X64::CachedBlock> block) {
 +    std::lock_guard lock{mutex};
-+    auto& e = entries[block->location];
++    const auto [it, created] = entries.try_emplace(block->location);
++    auto& e = it.value();
++    if (created) {
++        count.fetch_add(1, std::memory_order_relaxed);
++    }
 +    if (e.block) {
 +        if (e.block->guest == block->guest) {
-+            return;  // another JIT got there first
++            return false;  // another JIT got there first
 +        }
 +        bytes -= e.block->Bytes();  // the guest code there has changed
 +        blocks--;
 +    } else if (bytes + block->Bytes() > max_bytes) {
-+        if (e.file == Entry::None) {
-+            entries.erase(block->location);
++        if (created) {
++            entries.erase(it);
++            count.fetch_sub(1, std::memory_order_relaxed);
 +        }
-+        return;
++        return false;
 +    }
 +    bytes += block->Bytes();
 +    blocks++;
 +    e.file = Entry::None;  // (its record, if it had one, is replaced)
 +    e.block = std::move(block);
 +    dirty = true;
++    return created;
 +}
 +
 +bool CodeCache::Attach(u64 cfg) {
@@ -141,7 +152,7 @@ index 00000000..024455c0
 +        config = cfg;
 +        if (file_config != cfg) {  // saved by JITs configured differently
 +            entries.clear();
-+            file.clear();
++            count = 0;
 +        }
 +    }
 +    return *config == cfg;
@@ -380,7 +391,8 @@ index 00000000..024455c0
 +    b->pc = pc;
 +    b->processor_id = conf.processor_id;
 +    for (u64 va = pc; va < end; va += 4) {
-+        const auto inst = conf.callbacks->MemoryReadCode(va);
++        const size_t i = (va - pc) / 4;  // (the translator's reads, then those past the end of the block)
++        const auto inst = i < translated.size() ? std::optional<u32>{translated[i]} : conf.callbacks->MemoryReadCode(va);
 +        if (!inst) {
 +            return nullptr;
 +        }
@@ -708,7 +720,9 @@ index 00000000..024455c0
 +}
 +
 +std::optional<EmitX64::BlockDescriptor> A64EmitX64::EmitFromCache(IR::LocationDescriptor location) {
-+    if (!code_cache || conf.code_cache_selftest || !CanCache(location)) {
++    // (nothing to find while every block in the cache came from this JIT)
++    if (!code_cache || conf.code_cache_selftest || code_cache->count.load(std::memory_order_relaxed) == own_blocks
++        || !CanCache(location)) {
 +        return std::nullopt;
 +    }
 +    const auto b = code_cache->Find(location.Value());
@@ -762,7 +776,7 @@ index 00000000..024455c0
 +        return desc;
 +    }
 +    ++code_cache->compiled;
-+    code_cache->Insert(b);
++    own_blocks += code_cache->Insert(b);
 +    if (conf.code_cache_selftest) {
 +        // run the relocated copy instead
 +        InvalidateBasicBlocks(tsl::robin_set<IR::LocationDescriptor>{location});
@@ -858,13 +872,13 @@ index 00000000..024455c0
 +    std::memcpy(out.data() + start + 4, &sum, 4);
 +}
 +
-+std::shared_ptr<CachedBlock> ParseRecord(const std::vector<u8>& file, size_t offset) {
++std::shared_ptr<CachedBlock> ParseRecord(const u8* file, size_t offset) {
 +    u32 size;
-+    std::memcpy(&size, file.data() + offset, 4);  // (bounds checked by LoadCodeCache)
-+    const u8* p = file.data() + offset + record_header;
-+    const u8* const end = file.data() + offset + size;
++    std::memcpy(&size, file + offset, 4);  // (bounds checked by IndexFile)
++    const u8* p = file + offset + record_header;
++    const u8* const end = file + offset + size;
 +    u32 sum;
-+    std::memcpy(&sum, file.data() + offset + 4, 4);
++    std::memcpy(&sum, file + offset + 4, 4);
 +    if (sum != Checksum(p, end - p)) {
 +        return nullptr;
 +    }
@@ -949,106 +963,177 @@ index 00000000..024455c0
 +    return b;
 +}
 +
++// A file mapped read-only (a copy is never made: records are parsed where they are), unmapped by UnmapFile
++static const u8* MapFile(const std::string& path, size_t& size) {
++    size = 0;
++#ifdef _WIN32
++    const HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
++    if (f == INVALID_HANDLE_VALUE) {
++        return nullptr;
++    }
++    LARGE_INTEGER n{};
++    const HANDLE m = GetFileSizeEx(f, &n) && n.QuadPart > 0 && u64(n.QuadPart) <= max_file_size
++                       ? CreateFileMappingA(f, nullptr, PAGE_READONLY, 0, 0, nullptr)
++                       : nullptr;
++    const void* p = m ? MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0) : nullptr;
++    if (m) {
++        CloseHandle(m);
++    }
++    CloseHandle(f);
++    size = p ? size_t(n.QuadPart) : 0;
++    return static_cast<const u8*>(p);
++#else
++    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        return nullptr;
++    }
++    struct stat st;
++    void* p = fstat(fd, &st) == 0 && st.st_size > 0 && u64(st.st_size) <= max_file_size
++                ? mmap(nullptr, size_t(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0)
++                : MAP_FAILED;
++    close(fd);
++    if (p == MAP_FAILED) {
++        return nullptr;
++    }
++    size = size_t(st.st_size);
++    return static_cast<const u8*>(p);
++#endif
++}
++
++static void UnmapFile(const u8* p, size_t size) {
++    if (!p) {
++        return;
++    }
++#ifdef _WIN32
++    (void)size;
++    UnmapViewOfFile(p);
++#else
++    munmap(const_cast<u8*>(p), size);
++#endif
++}
++
++// The records of a mapped cache file saved with `key` (empty if it is not one), as (location, offset) pairs; the
++// configuration it was saved with goes to `config`
++static std::vector<std::pair<u64, u32>> IndexFile(const u8* file, size_t size, u64 key, u64& config) {
++    std::vector<std::pair<u64, u32>> records;
++    u64 saved_key;
++    if (size < header_size || std::memcmp(file, file_magic, 8) != 0) {
++        return records;
++    }
++    std::memcpy(&saved_key, file + 8, 8);
++    std::memcpy(&config, file + 16, 8);
++    if (saved_key != key) {
++        return records;  // saved by another build
++    }
++    for (size_t at = header_size; size - at >= record_header + 8;) {
++        u32 n;
++        u64 location;
++        std::memcpy(&n, file + at, 4);
++        if (n < record_header + 8 || n > size - at) {
++            break;  // (a damaged or partly written end)
++        }
++        std::memcpy(&location, file + at + record_header, 8);
++        records.emplace_back(location, u32(at));
++        at += n;
++    }
++    return records;
++}
++
 +}  // namespace Dynarmic::Backend::X64
 +
 +namespace Dynarmic::A64 {
 +
++CodeCache::~CodeCache() {
++    Backend::X64::UnmapFile(file, file_size);
++}
++
 +void LoadCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key) {
-+    std::vector<u8> file;
-+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
-+        std::fseek(f, 0, SEEK_END);
-+        const long size = std::ftell(f);
-+        std::fseek(f, 0, SEEK_SET);
-+        if (size > 0 && size_t(size) <= Backend::X64::max_file_size) {
-+            file.resize(size_t(size));
-+            if (std::fread(file.data(), 1, file.size(), f) != file.size()) {
-+                file.clear();
-+            }
-+        }
-+        std::fclose(f);
-+    }
-+    using Backend::X64::header_size, Backend::X64::record_header;
-+    u64 saved_key, config;
-+    if (file.size() < header_size || std::memcmp(file.data(), Backend::X64::file_magic, 8) != 0) {
++    size_t size;
++    const u8* const file = Backend::X64::MapFile(path, size);
++    if (!file) {
 +        return;
 +    }
-+    std::memcpy(&saved_key, file.data() + 8, 8);
-+    std::memcpy(&config, file.data() + 16, 8);
-+    if (saved_key != key) {
-+        return;  // saved by another build
-+    }
-+    std::vector<std::pair<u64, u32>> records;
-+    for (size_t at = header_size; at < file.size();) {
-+        u32 size;
-+        u64 location;
-+        if (file.size() - at < record_header + 8) {
-+            break;
-+        }
-+        std::memcpy(&size, file.data() + at, 4);
-+        if (size < record_header + 8 || size > file.size() - at) {
-+            break;
-+        }
-+        std::memcpy(&location, file.data() + at + record_header, 8);
-+        records.emplace_back(location, u32(at));
-+        at += size;
-+    }
++    u64 config = 0;
++    const auto records = Backend::X64::IndexFile(file, size, key, config);
 +    std::lock_guard lock{cache.mutex};
-+    if (cache.config || !cache.entries.empty()) {
-+        return;  // (to be read before the cache is used)
++    if (records.empty() || cache.config || cache.file) {  // (to be read once, before the cache is used)
++        Backend::X64::UnmapFile(file, size);
++        return;
 +    }
 +    cache.entries.reserve(records.size());
 +    for (const auto& [location, at] : records) {
 +        cache.entries[location] = {nullptr, at, CodeCache::Entry::Saved};
 +    }
-+    cache.file = std::move(file);
++    cache.count = cache.entries.size();
++    cache.file = file;
++    cache.file_size = size;
 +    cache.file_config = config;
 +}
 +
 +bool SaveCodeCache(CodeCache& cache, const std::string& path, std::uint64_t key) {
 +    using Backend::X64::Put, Backend::X64::max_file_size;
++    // under the lock throughout: JITs still running wait (this is for the end of the process)
++    std::lock_guard lock{cache.mutex};
++    if (!cache.dirty || !cache.config) {
++        return false;
++    }
++    cache.dirty = false;
 +    std::vector<u8> added, out;
-+    {
-+        std::lock_guard lock{cache.mutex};
-+        if (!cache.dirty || !cache.config) {
++    added.reserve(std::min(cache.bytes, max_file_size));
++    for (const auto& [location, e] : cache.entries) {
++        if (e.block && e.file == CodeCache::Entry::None && !e.block->process_local && added.size() < max_file_size) {
++            Backend::X64::Serialize(*e.block, 0, added);
++        }
++    }
++    if (cache.file && cache.file_config == *cache.config && added.size() < cache.file_size / 4
++        && cache.file_size + added.size() <= max_file_size) {
++        // a few new blocks: appended (the file is rewritten, and its unused records aged, once more are added)
++        std::FILE* f = std::fopen(path.c_str(), "ab");
++        if (!f) {
 +            return false;
 +        }
-+        cache.dirty = false;
-+        added.reserve(std::min(cache.bytes, max_file_size));
++        const bool written = std::fwrite(added.data(), 1, added.size(), f) == added.size();
++        return std::fclose(f) == 0 && written;
++    }
++    out.insert(out.end(), Backend::X64::file_magic, Backend::X64::file_magic + 8);
++    Put<u64>(out, key);
++    Put<u64>(out, *cache.config);
++    const auto copy = [&](const u8* file, u32 at, int age) {
++        u32 size;
++        std::memcpy(&size, file + at, 4);
++        if (age < 8 && out.size() + size <= max_file_size) {
++            out.insert(out.end(), file + at, file + at + size);
++            out[out.size() - size + 8] = u8(age);
++        }
++    };
++    // the file's records: as they are if a process looked for them, a save older if not (dropped at 8)
++    if (cache.file) {
 +        for (const auto& [location, e] : cache.entries) {
-+            if (e.block && e.file == CodeCache::Entry::None && !e.block->process_local && added.size() < max_file_size) {
-+                Backend::X64::Serialize(*e.block, 0, added);
++            if (e.file != CodeCache::Entry::None) {
++                copy(cache.file, e.record, e.file == CodeCache::Entry::Used ? 0 : cache.file[e.record + 8] + 1);
 +            }
 +        }
-+        if (!cache.file.empty() && cache.file_config == *cache.config && added.size() < cache.file.size() / 4
-+            && cache.file.size() + added.size() <= max_file_size) {
-+            // a few new blocks: appended (the file is rewritten, and its unused records aged, once more are added)
-+            std::FILE* f = std::fopen(path.c_str(), "ab");
-+            if (!f) {
-+                return false;
-+            }
-+            const bool written = std::fwrite(added.data(), 1, added.size(), f) == added.size();
-+            return std::fclose(f) == 0 && written;
-+        }
-+        out.insert(out.end(), Backend::X64::file_magic, Backend::X64::file_magic + 8);
-+        Put<u64>(out, key);
-+        Put<u64>(out, *cache.config);
-+        // the file's records: as they are if a process looked for them, a save older if not (dropped at 8)
-+        for (const auto& [location, e] : cache.entries) {
-+            if (e.file == CodeCache::Entry::None) {
-+                continue;
-+            }
-+            u32 size;
-+            std::memcpy(&size, cache.file.data() + e.record, 4);
-+            const u8 age = e.file == CodeCache::Entry::Used ? 0 : cache.file[e.record + 8] + 1;
-+            if (age < 8 && out.size() + size <= max_file_size) {
-+                out.insert(out.end(), cache.file.begin() + e.record, cache.file.begin() + e.record + size);
-+                out[out.size() - size + 8] = age;
++    }
++    // and those another process of the same program has saved since this one started
++    size_t now_size;
++    if (const u8* now = Backend::X64::MapFile(path, now_size)) {
++        u64 now_config = 0;
++        tsl::robin_set<u64> seen;
++        for (const auto& [location, at] : Backend::X64::IndexFile(now, now_size, key, now_config)) {
++            if (now_config == *cache.config && !cache.entries.count(location) && seen.insert(location).second) {
++                copy(now, at, now[at + 8]);
 +            }
 +        }
++        Backend::X64::UnmapFile(now, now_size);
 +    }
 +    if (out.size() + added.size() > max_file_size) {
 +        added.clear();
 +    }
++    // Windows does not replace a file that is mapped: this process lets go of it (and of its records) first
++    Backend::X64::UnmapFile(cache.file, cache.file_size);
++    cache.file = nullptr;
++    cache.file_size = 0;
++
 +    const std::string tmp = fmt::format("{}.{:x}.tmp", path, reinterpret_cast<uintptr_t>(&out));
 +    std::FILE* f = std::fopen(tmp.c_str(), "wb");
 +    if (!f) {
@@ -1072,10 +1157,10 @@ index 00000000..024455c0
 +}  // namespace Dynarmic::A64
 diff --git a/src/dynarmic/backend/x64/a64_code_cache.h b/src/dynarmic/backend/x64/a64_code_cache.h
 new file mode 100644
-index 00000000..b10c5488
+index 00000000..28879422
 --- /dev/null
 +++ b/src/dynarmic/backend/x64/a64_code_cache.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,118 @@
 +/* This file is part of the dynarmic project.
 + * SPDX-License-Identifier: 0BSD
 + */
@@ -1157,7 +1242,7 @@ index 00000000..b10c5488
 +};
 +
 +/// A block saved by SaveCodeCache, read back (null if it is damaged)
-+std::shared_ptr<CachedBlock> ParseRecord(const std::vector<u8>& file, size_t offset);
++std::shared_ptr<CachedBlock> ParseRecord(const u8* file, size_t offset);
 +
 +}  // namespace Dynarmic::Backend::X64
 +
@@ -1166,7 +1251,8 @@ index 00000000..b10c5488
 +class CodeCache {
 +public:
 +    std::shared_ptr<const Backend::X64::CachedBlock> Find(u64 location);
-+    void Insert(std::shared_ptr<const Backend::X64::CachedBlock> block);
++    /// True if it made an entry for a location the cache had not seen
++    bool Insert(std::shared_ptr<const Backend::X64::CachedBlock> block);
 +    /// False if `config` (A64EmitX64::CacheConfig) differs from that of the JITs already using the cache
 +    bool Attach(u64 config);
 +
@@ -1180,13 +1266,16 @@ index 00000000..b10c5488
 +        enum : u8 { None, Saved, Used } file = None;  // its record: none (or replaced), not looked for yet, looked for
 +    };
 +    tsl::robin_map<u64, Entry> entries;  // by location
++    std::atomic<size_t> count{0};        // entries.size(), read without the lock
 +    size_t blocks = 0, bytes = 0;
 +    std::optional<u64> config;
 +    bool dirty = false;  // blocks were added since the file was read
 +
-+    // blocks saved by an earlier process (LoadCodeCache), each parsed when a JIT first looks for it
-+    std::vector<u8> file;
++    // blocks saved by an earlier process (LoadCodeCache), each parsed when a JIT first looks for it: the file, mapped
++    const u8* file = nullptr;
++    size_t file_size = 0;
 +    u64 file_config = 0;
++    ~CodeCache();
 +};
 +
 +}  // namespace Dynarmic::A64
@@ -1261,7 +1350,7 @@ index cec78138..71f444d4 100644
          EmitPatchJmp(terminal.next, next_bb->entrypoint);
      } else {
 diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
-index d4904b9f..d1c6e5aa 100644
+index d4904b9f..0dd0c850 100644
 --- a/src/dynarmic/backend/x64/a64_emit_x64.h
 +++ b/src/dynarmic/backend/x64/a64_emit_x64.h
 @@ -7,8 +7,10 @@
@@ -1304,7 +1393,7 @@ index d4904b9f..d1c6e5aa 100644
      void ClearCache() override;
  
      void InvalidateCacheRanges(const boost::icl::interval_set<u64>& ranges);
-@@ -79,12 +96,33 @@ protected:
+@@ -79,12 +96,40 @@ protected:
      void GenFastmemFallbacks();   // reserves the area; each fallback is generated on first use
      u8* fallback_cur = nullptr;
      u8* fallback_end = nullptr;
@@ -1333,6 +1422,13 @@ index d4904b9f..d1c6e5aa 100644
 +    bool CanCache(IR::LocationDescriptor location) const;
 +    std::shared_ptr<const CachedBlock> verify_against;  // code_cache_verify
 +    A64::CodeCache* code_cache = nullptr;  // conf.code_cache, if this JIT can use it
++    size_t own_blocks = 0;                 // the cache's entries this JIT made
++
++public:
++    /// The guest instructions the translator read for the block being compiled (from its pc on), for the code cache
++    std::vector<u32> translated;
++
++protected:
 +    u64 CacheConfig() const;
 +
      const void* terminal_handler_pop_rsb_hint;
@@ -1367,10 +1463,10 @@ index 2d11e757..d90afca8 100644
  }
  
 diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
-index 86572bcd..6a2e773c 100644
+index 86572bcd..2c36883b 100644
 --- a/src/dynarmic/backend/x64/a64_interface.cpp
 +++ b/src/dynarmic/backend/x64/a64_interface.cpp
-@@ -268,6 +268,10 @@ private:
+@@ -268,8 +268,19 @@ private:
          }
          block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
  
@@ -1379,8 +1475,18 @@ index 86572bcd..6a2e773c 100644
 +        }
 +
          // JIT Compile
-         const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
+-        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
++        emitter.translated.clear();
++        const auto get_code = [this, pc = A64::LocationDescriptor{current_location}.PC()](u64 vaddr) {
++            const auto inst = conf.callbacks->MemoryReadCode(vaddr);
++            if (inst && vaddr == pc + 4 * emitter.translated.size()) {
++                emitter.translated.push_back(*inst);
++            }
++            return inst;
++        };
          IR::Block ir_block = A64::Translate(A64::LocationDescriptor{current_location}, get_code,
+                                             {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+         Optimization::PolyfillPass(ir_block, polyfill_options);
 diff --git a/src/dynarmic/backend/x64/block_of_code.h b/src/dynarmic/backend/x64/block_of_code.h
 index 3f7573af..e15229b2 100644
 --- a/src/dynarmic/backend/x64/block_of_code.h
