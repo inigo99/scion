@@ -52,7 +52,7 @@ under its open licenses), and you do not need a Mac or an Apple SDK.
 
 ## On Linux
 
-**Natively (preview).** Download `scion-<version>-linux-x86_64.tar.xz` (`.tar.gz` up to 0.2.0) from
+**Natively (preview).** Download `scion-<version>-linux-x86_64.tar.xz` from
 [Releases](../../releases), unpack it and run `scion` from it. It needs a recent distribution (built on Ubuntu 24.04)
 with SDL2, FreeType, fontconfig, libpng, libjpeg, Vulkan and LLVM 20, plus a Vulkan driver for Metal apps:
 

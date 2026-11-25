@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-25)
 
+- **Native Linux host (preview)**, no Wine: `scion` for Linux runs command-line programs, AppKit and SwiftUI apps and
+  Metal, x86_64 and arm64, with windows, input, controllers and audio through SDL2 and Metal on Vulkan
+  (`scion-metal.so`, `scion-msl.so`); `scion install` adds freedesktop.org menu entries, icons and file types. Releases
+  include `scion-<version>-linux-x86_64.tar.xz`. Under Wine, Linux paths given to `scion.exe` now work.
+- Fixed: NSTableView column rectangles read `-width` through the wrong method signature (garbage column widths).
+- Fixed: `-tableView:isGroupRow:` delegate answers could be misread; `+[NSString pathWithComponents:]` was missing
+  (`+[NSURL fileURLWithPathComponents:]` raised).
+- The core build is free of compiler warnings; `src/foundation/swift.m` is split into `calendar.m` and `url.m`.
+- CI: a Windows test job, a manual heavy build (Metal host and Swift) and a release workflow on `v*` tags.
+- CI: actions on Node 24; test and LLVM builds without warnings.
 - Faster and lighter:
   - Mach-O images are mapped from their files instead of read and copied (native Linux host): large programs start
     several times faster (Biome: 120 → 15 ms) with half the memory.
@@ -13,24 +23,11 @@
 - Hardened readers: the loader checks every offset and size of a Mach-O file and names what it refuses; binary property
   lists can no longer expand exponentially or read past their end (Foundation and `scion install`). New libFuzzer
   targets in `tests/fuzz`, run by CI.
-- Smaller releases: stripped host binaries, `scion-msl.so` without Clang's exported symbols, and the Linux archive as
-  `.tar.xz` (35 → 19 MB).
+- Smaller releases: stripped host binaries and `scion-msl.so` without Clang's exported symbols; the Linux archive is a
+  `.tar.xz` (19 MB).
 - Build and CI: `src/build.sh`, `tests/build.sh` and `tests/run.sh` work in parallel (`JOBS`; the local suite takes
   6 → 3.5 minutes on two cores), and the input tests wait for their events instead of fixed delays. CI builds once,
   then runs the Wine, native, Windows and fuzzing jobs side by side.
-
-## 0.2.0 (2026-11-25)
-
-- **Native Linux host (preview)**, no Wine: `scion` for Linux runs command-line programs, AppKit and SwiftUI apps and
-  Metal, x86_64 and arm64, with windows, input, controllers and audio through SDL2 and Metal on Vulkan
-  (`scion-metal.so`, `scion-msl.so`); `scion install` adds freedesktop.org menu entries, icons and file types. Releases
-  include `scion-<version>-linux-x86_64.tar.gz`. Under Wine, Linux paths given to `scion.exe` now work.
-- Fixed: NSTableView column rectangles read `-width` through the wrong method signature (garbage column widths).
-- Fixed: `-tableView:isGroupRow:` delegate answers could be misread; `+[NSString pathWithComponents:]` was missing
-  (`+[NSURL fileURLWithPathComponents:]` raised).
-- The core build is free of compiler warnings; `src/foundation/swift.m` is split into `calendar.m` and `url.m`.
-- CI: a Windows test job, a manual heavy build (Metal host and Swift) and a release workflow on `v*` tags.
-- CI: actions on Node 24; test and LLVM builds without warnings.
 
 ## 0.1.0 (2026-11-24)
 

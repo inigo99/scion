@@ -53,7 +53,7 @@ sus licencias abiertas), y no necesitas un Mac ni el SDK de Apple.
 
 ## En Linux
 
-**De forma nativa (vista previa).** Descarga `scion-<versión>-linux-x86_64.tar.xz` (`.tar.gz` hasta la 0.2.0) desde
+**De forma nativa (vista previa).** Descarga `scion-<versión>-linux-x86_64.tar.xz` desde
 [Releases](../../releases), descomprímelo y ejecuta `scion` desde ahí. Necesita una distribución reciente (se compila en
 Ubuntu 24.04) con SDL2, FreeType, fontconfig, libpng, libjpeg, Vulkan y LLVM 20, y un driver de Vulkan para las apps que
 usan Metal:
