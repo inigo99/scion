@@ -112,7 +112,9 @@ bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot) {
 }
 int host_pid() { return (int)GetCurrentProcessId(); }
 void *image_alloc(uint64_t at, uint64_t len) {
-    void *p = VirtualAlloc((void *)at, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    /* an image with no address of its own (dylibs linked at 0) goes where low_alloc puts it, not where Windows would
+     * (a random address): the same place every run, so the arm64 code cache on disk finds its code again */
+    void *p = at ? VirtualAlloc((void *)at, len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) : nullptr;
     return p ? p : low_alloc(len, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 }
 /* read into memory rather than mapped: a mapped file cannot be replaced while the app runs (self-updaters) */
@@ -1220,7 +1222,7 @@ int wmain(int wargc, wchar_t **wargv) {
     uint64_t *table = (uint64_t *)g_libsys->syms["_scion_hc"];
     if (!table) die("libSystem lacks _scion_hc");
     if (main->arm) {
-        arm64_init();
+        arm64_init(mainpath);
         for (int i = 0; i < HC_COUNT; i++) table[i] = (uint64_t)(g_arm_thunks + 2 * i);
         g_missing_stub = (uint64_t)(g_arm_thunks + 2 * HC_exit); /* exit(x0) */
     } else {

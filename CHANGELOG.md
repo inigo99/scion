@@ -8,6 +8,11 @@
 - arm64 threads share translated code: a block one thread has compiled is copied and relocated by the others instead
   of compiled again (`patches/dynarmic-code-cache.patch`; `SCION_JIT_CACHE=0` turns it off). SwiftFormat runs 17 %
   faster and esbuild uses 11 % less CPU; single-threaded programs spend a few percent more to record their blocks.
+- arm64 translated code is kept on disk for the next run of the same program (`%LOCALAPPDATA%\scion\jit`,
+  `~/.cache/scion/jit`, 512 MB at most, safe to delete): from the second run Biome, esbuild and SwiftFormat start
+  45-55 % faster with 50-60 % less CPU, and small programs use 40 % less; the first run spends a little more to save
+  it. `SCION_JIT_CACHE=nodisk` keeps it in memory only.
+- Windows: dylibs linked at address 0 load at the same address on every run instead of a random one.
 
 ## 0.2.0 (2026-11-25)
 

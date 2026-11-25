@@ -7,6 +7,7 @@
 #include <optional>
 #include <algorithm>
 #include <condition_variable>
+#include <filesystem>
 #include <dynarmic/interface/A64/a64.h>
 #include <dynarmic/interface/A64/config.h>
 #include <dynarmic/interface/exclusive_monitor.h>
@@ -14,11 +15,57 @@
 /* ======================================================================= arm64 guest (dynarmic) */
 uint32_t *g_arm_thunks;
 static Dynarmic::ExclusiveMonitor *g_monitor;
-/* translated code shared by the threads' JITs: a block one thread has compiled is copied by the others.
- * SCION_JIT_CACHE=0: off; =stats: counters at exit; =verify: compile anyway and report differences from the copy;
- * =selftest: every thread runs relocated copies of its own blocks (tests the relocation) */
+/* translated code shared by the threads' JITs (a block one thread has compiled is copied by the others) and kept on
+ * disk for the next run of the same program, in <cache>/scion/jit/<hash of its path>.bin.
+ * SCION_JIT_CACHE=0: off; =nodisk: no file; =stats: counters at exit; =verify: compile anyway and report differences
+ * from the copy; =selftest: every thread runs relocated copies of its own blocks (tests the relocation) */
 static std::shared_ptr<Dynarmic::A64::CodeCache> g_code_cache;
 static const char *g_code_cache_mode;
+static std::string g_code_cache_file;
+static uint64_t g_code_cache_key;   /* this build of Scion: saved code calls into it */
+
+static uint64_t fnv(uint64_t h, const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) { h ^= ((const unsigned char *)p)[i]; h *= 1099511628211ull; }
+    return h;
+}
+static void code_cache_open(const std::string &main_path) {
+    if (g_code_cache_mode && !strcmp(g_code_cache_mode, "nodisk")) return;
+    std::string dir;
+    uint64_t key = 1469598103934665603ull;
+#ifdef _WIN32
+    const char *base = getenv("LOCALAPPDATA");
+    if (!base) return;
+    dir = std::string(base) + "\\scion";
+    CreateDirectoryA(dir.c_str(), nullptr);
+    dir += "\\jit";
+    CreateDirectoryA(dir.c_str(), nullptr);
+    char exe[MAX_PATH], full[MAX_PATH];
+    WIN32_FILE_ATTRIBUTE_DATA st;
+    if (!GetModuleFileNameA(nullptr, exe, sizeof exe) || !GetFileAttributesExA(exe, GetFileExInfoStandard, &st)) return;
+    key = fnv(key, &st.nFileSizeLow, sizeof st.nFileSizeLow);
+    key = fnv(key, &st.ftLastWriteTime, sizeof st.ftLastWriteTime);
+    const std::string path = GetFullPathNameA(main_path.c_str(), sizeof full, full, nullptr) ? full : main_path;
+    const char *sep = "\\";
+#else
+    const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+    if (!xdg && !home) return;
+    dir = xdg ? xdg : std::string(home) + "/.cache";
+    mkdir(dir.c_str(), 0755); dir += "/scion"; mkdir(dir.c_str(), 0755); dir += "/jit"; mkdir(dir.c_str(), 0755);
+    struct stat st;
+    if (stat("/proc/self/exe", &st)) return;
+    key = fnv(key, &st.st_size, sizeof st.st_size);
+    key = fnv(key, &st.st_mtim, sizeof st.st_mtim);
+    char *real = realpath(main_path.c_str(), nullptr);
+    const std::string path = real ? real : main_path;
+    free(real);
+    const char *sep = "/";
+#endif
+    char name[32];
+    snprintf(name, sizeof name, "%016llx.bin", (unsigned long long)fnv(1469598103934665603ull, path.data(), path.size()));
+    g_code_cache_file = dir + sep + name;
+    g_code_cache_key = key;
+    Dynarmic::A64::LoadCodeCache(*g_code_cache, g_code_cache_file, g_code_cache_key);
+}
 static std::atomic<size_t> g_cpu_ids{0};
 static const size_t MAX_CPUS = 256;
 
@@ -451,10 +498,10 @@ uint64_t run_arm64(uint64_t pc, const uint64_t *args, int nargs, uint64_t sp, st
 }
 
 
-void arm64_init() {
+void arm64_init(const std::string &main_path) {
     g_monitor = new Dynarmic::ExclusiveMonitor(MAX_CPUS);
     g_code_cache_mode = getenv("SCION_JIT_CACHE");
-    if (!g_code_cache_mode || strcmp(g_code_cache_mode, "0")) g_code_cache = Dynarmic::A64::MakeCodeCache();
+    if (!g_code_cache_mode || strcmp(g_code_cache_mode, "0")) { g_code_cache = Dynarmic::A64::MakeCodeCache(); code_cache_open(main_path); }
     g_arm_thunks = (uint32_t *)image_alloc(0, 4096);
     for (uint32_t i = 0; i <= HC_COUNT + 1; i++) { g_arm_thunks[2 * i] = 0xD4000001u | (i << 5); g_arm_thunks[2 * i + 1] = 0xD65F03C0u; }
 }
@@ -495,6 +542,25 @@ int arm64_thread_ctl(struct gthread *t, int op, int flavor, void *state) {
 }
 
 void arm64_exit() {
-    if (g_code_cache && g_code_cache_mode && strcmp(g_code_cache_mode, "0"))
+    if (!g_code_cache) return;
+    if (g_code_cache_mode && strcmp(g_code_cache_mode, "nodisk"))
         fprintf(stderr, "[scion] JIT code cache: %s\n", Dynarmic::A64::CodeCacheStats(*g_code_cache).c_str());
+    if (g_code_cache_file.empty() || !Dynarmic::A64::SaveCodeCache(*g_code_cache, g_code_cache_file, g_code_cache_key)) return;
+    /* the programs' caches together stay under 512 MB: the least recently written go */
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::pair<fs::file_time_type, fs::path>> files;
+    uintmax_t total = 0;
+    for (auto &f : fs::directory_iterator(fs::path(g_code_cache_file).parent_path(), ec)) {
+        if (f.path().extension() != ".bin") continue;
+        total += f.file_size(ec);
+        files.emplace_back(f.last_write_time(ec), f.path());
+    }
+    std::sort(files.begin(), files.end());
+    for (auto &f : files) {
+        if (total <= (512u << 20)) break;
+        if (f.second == fs::path(g_code_cache_file)) continue;
+        uintmax_t n = fs::file_size(f.second, ec);
+        if (fs::remove(f.second, ec)) total -= n;
+    }
 }
