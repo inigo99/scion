@@ -28,8 +28,7 @@ comandos, apps de AppKit y SwiftUI y gráficos Metal, para un conjunto de progra
 | **Swift** | El runtime y la biblioteca estándar de Swift, los overlays de Darwin, Dispatch y Foundation, Swift Concurrency, y Combine y SwiftUI propios de Scion. |
 | **Se siente como Windows** | Ventanas Win32 reales, menús, diálogos de archivo, iconos en el área de notificación, teclado, ratón, mandos XInput con vibración y audio WASAPI. `scion install` añade una app al menú Inicio con su icono y sus tipos de archivo. |
 
-En Linux funciona de forma nativa (una vista previa, compilando desde el código fuente) o con
-[Wine](https://www.winehq.org/): mira [En Linux](#en-linux).
+En Linux funciona de forma nativa (una vista previa) o con [Wine](https://www.winehq.org/): mira [En Linux](#en-linux).
 
 ## Empezar
 
@@ -54,23 +53,30 @@ sus licencias abiertas), y no necesitas un Mac ni el SDK de Apple.
 
 ## En Linux
 
-Scion funciona en Linux a través de Wine, igual que las pruebas en la integración continua. Necesitas Wine 9 o más
-reciente y, para las apps que usan Metal, un driver de Vulkan (los de Mesa valen):
+**De forma nativa (vista previa).** Descarga `scion-<versión>-linux-x86_64.tar.gz` desde [Releases](../../releases),
+descomprímelo y ejecuta `scion` desde ahí. Necesita una distribución reciente (se compila en Ubuntu 24.04) con SDL2,
+FreeType, fontconfig, libpng, libjpeg, Vulkan y LLVM 20, y un driver de Vulkan para las apps que usan Metal:
 
 ```sh
-sudo apt install wine64 mesa-vulkan-drivers    # Debian/Ubuntu; en otras distribuciones, sus paquetes
-wine scion.exe ruta/a/herramienta --help
-wine scion.exe "ruta/a/Una App.app"
-wine scion.exe install "ruta/a/Una App.app"    # Wine lo convierte en una entrada .desktop y asociaciones de archivo
+sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libvulkan1 libllvm20 \
+                 mesa-vulkan-drivers zenity          # Debian/Ubuntu; zenity da los diálogos de archivo
+./scion ruta/a/herramienta --help
+./scion "ruta/a/Una App.app"
+./scion install "ruta/a/Una App.app"     # entrada en el menú de aplicaciones, icono y tipos de archivo (freedesktop.org)
+./scion uninstall "ruta/a/Una App.app"
 ```
 
-Las rutas de Linux funcionan tal cual: Scion las convierte en rutas de la unidad `Z:` de Wine.
+Funcionan programas de línea de comandos, apps de AppKit y SwiftUI y Metal, de Intel y de Apple Silicon; toda la
+batería de pruebas pasa de forma nativa. Falta todavía: la barra de menús y los iconos en la bandeja
+([issue](../../issues/10)).
 
-**Anfitrión nativo (vista previa).** Al compilar desde el código fuente también se genera `bin/scion`, un programa de
-Linux que ejecuta programas de macOS sin Wine: `bin/scion ruta/a/herramienta` o `bin/scion "ruta/a/Una App.app"`.
-Funcionan programas de línea de comandos, apps de AppKit y SwiftUI y Metal, de Intel y de Apple Silicon, con ventanas,
-entrada, mandos y audio a través de SDL2 y Metal sobre Vulkan (`scion-metal.so`, `scion-msl.so`); pasa toda la batería
-de pruebas salvo `scion install`. Falta todavía: la barra de menús, los iconos en la bandeja y `scion install`. Se agradece ayuda ([issue](../../issues/10)).
+**Con Wine.** El `scion.exe` del zip de Windows también funciona con Wine 9 o más reciente, que es como se ejecutaron
+primero las pruebas en la integración continua:
+
+```sh
+sudo apt install wine64 mesa-vulkan-drivers
+wine scion.exe "ruta/a/Una App.app"              # las rutas de Linux funcionan tal cual: Scion las convierte en rutas Z:
+```
 
 ## Cómo funciona
 

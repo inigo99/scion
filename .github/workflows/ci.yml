@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install packages
         run: |
@@ -21,7 +21,7 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
 
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps
           key: deps-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-dynarmic.sh', 'patches/**') }}
@@ -37,7 +37,7 @@ jobs:
 
       # The MSL compiler of the native host links a patched Clang (20 minutes or so, cached)
       - name: Cache the patched Clang for Linux
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             deps/llvm20/clang/include
@@ -75,22 +75,20 @@ jobs:
           wineboot -i >/dev/null 2>&1 || true
           tests/run.sh
 
-      # Still missing on the native host: `scion install`
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: install
         run: tests/run.sh
 
       - name: Upload the build
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scion-bin
           path: bin/
 
       - name: Upload the tests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scion-tests
           path: out/tests/
@@ -103,12 +101,12 @@ jobs:
     timeout-minutes: 60
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: scion-bin
           path: bin
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: scion-tests
           path: out/tests

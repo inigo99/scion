@@ -6,7 +6,9 @@
 # an Xvfb is started on :88; Mesa's lavapipe provides software Vulkan (docs/testing.md).
 cd "$(dirname "$0")/.." || exit 1
 R=$(pwd); SCION=${SCION:-$R/bin/scion.exe}
-case $SCION in *.exe) RUN=wine;; *) RUN=;; esac   # SCION=bin-linux/scion: the native Linux host (#10), no Wine
+case $SCION in *.exe) RUN=wine;; *) RUN=;; esac   # SCION=bin/scion: the native Linux host, no Wine
+# the native host's `scion install` writes .desktop files: into a scratch folder, not your desktop
+[ -n "$RUN" ] || { XDG_DATA_HOME=$(mktemp -d); export XDG_DATA_HOME; trap 'rm -rf "$XDG_DATA_HOME"' EXIT; }
 cd out/tests || { echo "out/tests is missing: run tests/build.sh first"; exit 1; }
 export WINEDEBUG=${WINEDEBUG:--all}
 if [ -z "$DISPLAY" ]; then

@@ -1,5 +1,6 @@
-# Publishes a release when a tag v* is pushed: builds the core, adds the Metal DLLs and the Swift libraries from the
-# latest successful heavy.yml run (or, failing that, from the previous release), packages and uploads the zip.
+# Publishes a release when a tag v* is pushed: builds the core (Windows and the native Linux host), adds the Metal DLLs
+# and the Swift libraries from the latest successful heavy.yml run (or, failing that, from the previous release), builds
+# the Linux Metal libraries, packages and uploads the Windows zip and the Linux tarball.
 name: Release
 on:
   push:
@@ -16,22 +17,36 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 zip
+          sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 zip \
+            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps
           key: deps-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-dynarmic.sh', 'patches/**') }}
       - run: |
           scripts/fetch-deps.sh
           [ -f deps/dynarmic/build-win/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh
+          [ -f deps/dynarmic/build-linux/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh --linux
       - run: src/build.sh
+      - name: Cache the patched Clang for Linux
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps/llvm20/clang/include
+            deps/llvm20/build-linux/include
+            deps/llvm20/build-linux/lib/libclang*.a
+          key: clang-linux-${{ hashFiles('patches/clang-msl.patch', 'scripts/build-clang-linux.sh') }}
+      - name: Linux Metal libraries
+        run: |
+          if [ ! -f deps/llvm20/build-linux/lib/libclangCodeGen.a ]; then scripts/fetch-deps.sh --metal; scripts/build-clang-linux.sh; fi
+          src/build_metal.sh --linux
       - name: Metal and Swift libraries
         run: |
           run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow heavy.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
@@ -50,5 +65,7 @@ jobs:
         run: |
           v=${GITHUB_REF_NAME#v}
           scripts/package.sh "$v"
+          scripts/package.sh "$v" --linux
           notes=$(awk -v v="$v" '/^## /{p = index($0 " ", "## " v " ") == 1; next} p' CHANGELOG.md)
-          gh release create "$GITHUB_REF_NAME" "out/scion-$v-windows-x64.zip" --title "Scion $v" --notes "${notes:-See CHANGELOG.md.}"
+          gh release create "$GITHUB_REF_NAME" "out/scion-$v-windows-x64.zip" "out/scion-$v-linux-x86_64.tar.gz" \
+            --title "Scion $v" --notes "${notes:-See CHANGELOG.md.}"

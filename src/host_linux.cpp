@@ -804,36 +804,18 @@ static std::string exe_dir() {
     char b[PATH_MAX]; ssize_t n = readlink("/proc/self/exe", b, sizeof b - 1);
     std::string s(b, n > 0 ? (size_t)n : 0); return s.substr(0, s.find_last_of('/'));
 }
-/* App.app -> its Contents/MacOS executable: CFBundleExecutable of an XML Info.plist, else the only file there.
- * ponytail: binary plists fall back to the directory listing */
-std::string mw_bundle_executable(const std::string &app) {
-    std::string a = app; while (a.size() > 1 && a.back() == '/') a.pop_back();
-    if (a.size() < 4 || strcasecmp(a.c_str() + a.size() - 4, ".app")) return "";
-    char full[PATH_MAX]; if (realpath(a.c_str(), full)) a = full;   /* absolute, as the Windows host's: NSBundle paths build on it */
-    std::string dir = a + "/Contents/MacOS/";
-    if (FILE *f = fopen((a + "/Contents/Info.plist").c_str(), "rb")) {
-        std::string x; char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, f)) > 0) x.append(buf, n); fclose(f);
-        size_t k = x.find("<key>CFBundleExecutable</key>");
-        if (k != std::string::npos) {
-            size_t s = x.find("<string>", k), e = x.find("</string>", s);
-            if (s != std::string::npos && e != std::string::npos) { std::string exe = dir + x.substr(s + 8, e - s - 8); if (!access(exe.c_str(), R_OK)) return exe; }
-        }
-    }
-    std::string only; int count = 0;
-    if (FILE *p = popen(("ls -1 '" + dir + "' 2>/dev/null").c_str(), "r")) {   /* ponytail: opendir if it matters */
-        char line[1024]; while (fgets(line, sizeof line, p)) { line[strcspn(line, "\n")] = 0; only = line; count++; }
-        pclose(p);
-    }
-    return count == 1 ? dir + only : "";
-}
+bool mw_subcommand_linux(int argc, char **argv, int *rc);   /* install_linux.cpp */
 
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: scion <macOS program | App.app> [args...]\n"
+                        "       scion install <App.app>      menu entry, icon and file types (freedesktop.org)\n"
+                        "       scion uninstall <App.app | bundle id>\n"
                         "   SCION_TRACE=1 traces the program; SCION_ARCH=arm64 runs the arm64 slice of a universal binary.\n"
                         "   Linux host (#10): command-line programs for now.\n");
         return 2;
     }
+    if (int rc; mw_subcommand_linux(argc, argv, &rc)) return rc;
     g_trace = getenv("SCION_TRACE") != nullptr;
     struct sigaction sa = {}; sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     sa.sa_sigaction = on_fault;
