@@ -114,7 +114,7 @@ struct ArmEnv final : Dynarmic::A64::UserCallbacks {
         if (!valid(a, sizeof(T), true)) { fault(a, true); return false; }
         return __atomic_compare_exchange_n((T *)a, &exp, v, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     }
-    /* ponytail: guest VA == host VA, accesses go through callbacks; enable fastmem when speed matters */
+    /* the slow path: accesses that fastmem cannot take (faults, vm_remap aliases, exclusives) */
     uint8_t MemoryRead8(uint64_t a) override { return rd<uint8_t>(a); }
     uint16_t MemoryRead16(uint64_t a) override { return rd<uint16_t>(a); }
     uint32_t MemoryRead32(uint64_t a) override { return rd<uint32_t>(a); }
@@ -276,7 +276,7 @@ struct ArmEnv final : Dynarmic::A64::UserCallbacks {
         if (n == HC_COUNT + 1) { sigreturn(); return; }
         if (n >= HC_COUNT) { jit->HaltExecution(); return; } /* return-from-entry trap */
         A a[6]; for (int i = 0; i < 6; i++) a[i] = (A)jit->GetRegister(i);
-        take_snapshot(); in_hostcall = true;     /* a suspender may read our registers while we block */
+        in_hostcall = true;     /* a suspender reads our registers (snapshot on demand) while we block */
         A r = g_hc[n](a[0], a[1], a[2], a[3], a[4], a[5]);
         in_hostcall = false;
         jit->SetRegister(0, (uint64_t)r);
@@ -456,6 +456,7 @@ bool arm64_thread_peek(struct gthread *t, struct darm_state *st, bool *hostcall,
     ArmEnv *e = (ArmEnv *)t->host;
     if (!e || !e->jit) return false;
     arm64_thread_ctl(t, D_THREAD_SUSPEND, 0, nullptr);
+    if (!e->parked) e->take_snapshot();
     *st = e->snap; *hostcall = e->in_hostcall && !e->parked; *callbacks = e->callbacks; *code_reads = e->code_reads;
     arm64_thread_ctl(t, D_THREAD_RESUME, 0, nullptr);
     return true;
@@ -477,7 +478,7 @@ int arm64_thread_ctl(struct gthread *t, int op, int flavor, void *state) {
     if (flavor != D_ARM_THREAD_STATE64 && flavor != D_ARM_NEON_STATE64) return -4;
     void *s = flavor == D_ARM_NEON_STATE64 ? (void *)&e->neon : (void *)&e->snap;
     size_t n = flavor == D_ARM_NEON_STATE64 ? sizeof e->neon : sizeof e->snap;
-    if (op == D_THREAD_GET_STATE) { memcpy(state, s, n); return 0; }
+    if (op == D_THREAD_GET_STATE) { if (!e->parked) e->take_snapshot(); memcpy(state, s, n); return 0; }
     if (!e->parked) return -1; /* ponytail: set_state only while parked at a block boundary */
     memcpy(s, state, n); e->snap_dirty = true;
     return 0;

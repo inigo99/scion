@@ -38,6 +38,10 @@ std::string win_to_darwin(const std::string &w);
 std::wstring darwin_to_win(const char *p, int dirfd);
 void *low_alloc(size_t n, DWORD type, DWORD prot); /* guest memory below 2^39 (Windows) */
 void *image_alloc(uint64_t at, uint64_t len);    /* an image's RWX mapping, at its address if free */
+/* the whole file, read-only and never unmapped (images live as long as the process); nullptr on failure */
+const uint8_t *host_map_file(const std::string &path, size_t *size);
+/* the file's [off, off+len) copy-on-write and RWX at dst (inside an image_alloc mapping), page-aligned; false: copy it */
+bool host_map_segment(void *dst, uint64_t len, const std::string &path, uint64_t off);
 /* the mapping around a: [lo, hi) with D_PROT_* bits; false if nothing is mapped there */
 bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot);
 int host_pid();
@@ -54,7 +58,7 @@ struct linkedit { uint32_t cmd, cmdsize, off, size; };
 #define CPU_ARM64 0x0100000cu
 struct Image {
     std::string path;
-    std::vector<uint8_t> file;
+    const uint8_t *file = nullptr; size_t file_size = 0;   /* host_map_file */
     uint8_t *mh = nullptr;      /* header inside file */
     uint8_t *base = nullptr;    /* mapped address of the lowest segment */
     int64_t slide = 0;

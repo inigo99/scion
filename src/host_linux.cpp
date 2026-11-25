@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <algorithm>
 #include <unordered_map>
@@ -196,15 +197,35 @@ void *image_alloc(uint64_t at, uint64_t len) {
     void *p = at ? mmap((void *)at, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) : MAP_FAILED;
     return p != MAP_FAILED ? p : low_map(len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
+const uint8_t *host_map_file(const std::string &path, size_t *size) {
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC); if (fd < 0) return nullptr;
+    struct stat st; void *p = fstat(fd, &st) || !st.st_size ? MAP_FAILED : mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return nullptr;
+    *size = (size_t)st.st_size; return (const uint8_t *)p;
+}
+bool host_map_segment(void *dst, uint64_t len, const std::string &path, uint64_t off) {
+    if (((uint64_t)dst | len | off) & 0xFFF) return false;
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC); if (fd < 0) return false;
+    void *p = mmap(dst, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_FIXED, fd, (off_t)off);   /* noexec mounts refuse */
+    close(fd);
+    return p == dst;
+}
 void *low_alloc(size_t n, DWORD, DWORD) { return low_map(n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); }
-/* host_mem_query: /proc/self/maps, parsed again when guest memory changes or an address is not in the copy */
+/* host_mem_query: a copy of /proc/self/maps, parsed again when an answer would come from a region that guest code
+ * unmapped or reprotected since (or the address is not in the copy). Reading it again on every change made threads
+ * that start and end all the time queue up behind each other on the mutex. */
 struct MapRegion { uint64_t lo, hi; int prot; };
 static std::mutex g_maps_mu;
 static std::vector<MapRegion> g_maps;
-static std::atomic<uint64_t> g_maps_gen{1}; static uint64_t g_maps_seen;
-static void maps_changed() { g_maps_gen++; if (g_guest_arm) arm64_mem_changed(); }
+static std::vector<std::pair<uint64_t, uint64_t>> g_maps_dirty;   /* [lo, hi) changed since the copy */
+static bool g_maps_loaded;
+static void maps_changed(uint64_t a, uint64_t n) {
+    { std::lock_guard<std::mutex> l(g_maps_mu); g_maps_dirty.push_back({a, a + n}); }
+    if (g_guest_arm) arm64_mem_changed();
+}
 static void maps_load() {
-    g_maps.clear();
+    g_maps.clear(); g_maps_dirty.clear(); g_maps_loaded = true;
     FILE *f = fopen("/proc/self/maps", "r"); if (!f) return;
     char line[512];
     while (fgets(line, sizeof line, f)) {
@@ -216,10 +237,15 @@ static void maps_load() {
 }
 bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot) {
     std::lock_guard<std::mutex> l(g_maps_mu);
+    if (!g_maps_loaded || g_maps_dirty.size() > 64) maps_load();
     for (int pass = 0; pass < 2; pass++) {
-        if (pass || g_maps_seen != g_maps_gen.load()) { g_maps_seen = g_maps_gen.load(); maps_load(); }
+        if (pass) maps_load();
         auto it = std::upper_bound(g_maps.begin(), g_maps.end(), a, [](uint64_t x, const MapRegion &r) { return x < r.lo; });
-        if (it != g_maps.begin() && a < (--it)->hi) { *lo = it->lo; *hi = it->hi; *prot = it->prot; return true; }
+        if (it == g_maps.begin() || a >= (--it)->hi) continue;
+        bool stale = false;
+        for (auto &d : g_maps_dirty) if (d.first < it->hi && it->lo < d.second) { stale = true; break; }
+        if (stale) continue;
+        *lo = it->lo; *hi = it->hi; *prot = it->prot; return true;
     }
     return false;
 }
@@ -238,13 +264,13 @@ HC hc_mmap(A addr, A len, A prot, A flags, A fd, A off) {
         if (!p) p = MAP_FAILED;
     }
     if (p == MAP_FAILED) return derr();
-    maps_changed();
+    if (flags & D_MAP_FIXED) maps_changed((uint64_t)p, (uint64_t)len);   /* it may replace mappings; one in a hole changes no answer */
     return (A)p;
 }
 HC hc_munmap(A addr, A len, A, A, A, A) {
     if (g_guest_arm) { arm64_alias_set((uint64_t)addr, ((uint64_t)len + 0xFFF) & ~0xFFFull, 0); arm64_invalidate((uint64_t)addr, (uint64_t)len); }
     A r = chk(munmap((void *)addr, (size_t)len));
-    maps_changed();
+    maps_changed((uint64_t)addr, (uint64_t)len);
     return r;
 }
 HC hc_mprotect(A addr, A len, A prot, A, A, A) {
@@ -254,7 +280,7 @@ HC hc_mprotect(A addr, A len, A prot, A, A, A) {
     uint64_t a = addr & ~0xFFFull, n = ((uint64_t)addr + len - a + 0xFFF) & ~0xFFFull;
     if (g_guest_arm) arm64_invalidate(a, n);   /* executable code may have changed */
     A r = chk(mprotect((void *)a, n, (int)(prot & 7)));
-    maps_changed();
+    maps_changed(a, n);
     return r;
 }
 /* copy without faulting (mach_vm_read_overwrite / mach_vm_write): the kernel reports a bad address as EFAULT */
@@ -274,7 +300,7 @@ HC hc_alias(A dst, A len, A src, A fixed, A cur, A) {
     void *d = fixed ? mmap((void *)dst, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0)
                     : low_map(n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (!d || d == MAP_FAILED) return -D_ENOMEM;
-    maps_changed();
+    maps_changed((uint64_t)d, n);
     arm64_invalidate((uint64_t)d, n);
     arm64_alias_set((uint64_t)d, n, s);
     if (cur) *(int *)cur = prot;
@@ -454,7 +480,7 @@ static void *thread_entry(void *p) {
     run_arm64((uint64_t)ts.start, a, 1, t->stack_top, t);
     arm64_thread_end();
     munmap(stk, (size_t)ts.stacksize);   /* games and servers start and end threads all the time */
-    maps_changed();
+    maps_changed((uint64_t)stk, (uint64_t)ts.stacksize);
     t->stack_top = 0;
     return nullptr;
 }
@@ -603,8 +629,9 @@ static void on_fault(int sig, siginfo_t *si, void *ucv) {
 }
 /* Asynchronous signals to another guest thread (Go's SIGURG preemption): pending bits in its HostThread and a host
  * signal; it is delivered only while the thread runs guest code and is not in a handler already, otherwise it waits
- * and a pump thread pokes the thread again every millisecond. */
+ * and a pump thread pokes the thread again every millisecond while any is pending (and sleeps otherwise). */
 static std::atomic<bool> g_pump_on;
+static std::mutex g_pump_mu; static std::condition_variable g_pump_cv; static uint64_t g_pump_seq;
 static void on_guest_signal(int, siginfo_t *, void *ucv) {
     struct gthread *t = tl_self; if (!t) return;
     ucontext_t *uc = (ucontext_t *)ucv;
@@ -617,10 +644,14 @@ static void on_guest_signal(int, siginfo_t *, void *ucv) {
     }
 }
 static void *signal_pump(void *) {
-    for (;;) {
-        struct timespec ms = {0, 1000000}; nanosleep(&ms, nullptr);
-        std::lock_guard<std::mutex> l(g_thrmu);
-        for (struct gthread *t : g_threads) if (ht(t)->pending.load() && t->tid) pthread_kill(ht(t)->pt, SIG_GUEST);
+    for (uint64_t seen = 0;;) {
+        { std::unique_lock<std::mutex> l(g_pump_mu); g_pump_cv.wait(l, [&] { return g_pump_seq != seen; }); seen = g_pump_seq; }
+        for (bool any = true; any;) {
+            struct timespec ms = {0, 1000000}; nanosleep(&ms, nullptr);
+            std::lock_guard<std::mutex> l(g_thrmu);
+            any = false;
+            for (struct gthread *t : g_threads) if (ht(t)->pending.load() && t->tid) { pthread_kill(ht(t)->pt, SIG_GUEST); any = true; }
+        }
     }
 }
 HC hc_tkill(A tp, A sig, A, A, A, A) {
@@ -630,6 +661,7 @@ HC hc_tkill(A tp, A sig, A, A, A, A) {
     ht(t)->pending.fetch_or(1ull << sig);
     if (!g_pump_on.exchange(true)) { pthread_t p; pthread_create(&p, nullptr, signal_pump, nullptr); pthread_detach(p); }
     pthread_kill(ht(t)->pt, SIG_GUEST);
+    { std::lock_guard<std::mutex> l(g_pump_mu); g_pump_seq++; } g_pump_cv.notify_one();
     return 0;
 }
 /* thread_suspend / thread_get_state: the target parks in a host signal handler, its context at hand */

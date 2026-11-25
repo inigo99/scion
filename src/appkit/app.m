@@ -442,7 +442,7 @@ FORWARD(magnifyWithEvent) FORWARD(rotateWithEvent) FORWARD(swipeWithEvent) FORWA
             if (mask & NSEventMaskFromType([e type])) { found = [e retain]; if (dq) [g_queue removeObjectIdenticalTo:e]; break; }
         NSTimeInterval t = [NSDate timeIntervalSinceReferenceDate];
         if (found || t >= deadline || _stop) { objc_autoreleasePoolPop(pool); break; }
-        NSTimeInterval wait = fmin(deadline, [rl _nextTimer]) - t;
+        NSTimeInterval wait = fmin(deadline, [rl _nextTimerInMode:mode]) - t;
         if (wait > 0.05) wait = 0.05;  /* ponytail: wake at least every 50 ms (sources the wake hook does not cover) */
         MwEvent h;
         if (wait > 0 && ui(UI_NEXT_EVENT, U(&h), (uint64_t)(wait * 1e9), 0, 0, 0) == 1) { handle(&h); }

@@ -27,7 +27,8 @@ if [ "$1" = --linux ]; then
   [ -f $CL/build-linux/lib/libclangCodeGen.a ] || { echo "note: no patched Clang for Linux (scripts/build-clang-linux.sh): skipping scion-msl.so"; exit 0; }
   { echo 'R"__mw('; cat metal/msl/metal_stdlib.h; echo ')__mw"'; } > $O/metal_stdlib.inc
   $CXX $($LC --cxxflags) -fno-rtti -fexceptions -I$O -I$CL/clang/include -I$CL/build-linux/include -c metal/msl/msl.cpp -o $O/msl.o
-  g++ -shared -o $OUT/scion-msl.so $O/msl.o -Wl,--start-group $CL/build-linux/lib/libclang*.a -Wl,--end-group \
+  # Clang's own symbols stay internal (--exclude-libs) so the unused ones can go (--gc-sections): 66 -> 54 MB, 46 stripped
+  g++ -shared -Wl,--exclude-libs,ALL -Wl,--gc-sections -o $OUT/scion-msl.so $O/msl.o -Wl,--start-group $CL/build-linux/lib/libclang*.a -Wl,--end-group \
     -L$($LC --libdir) -lLLVM-20 -Wl,-rpath,$($LC --libdir) -ldl -lpthread
   echo "OK -> $OUT/scion-msl.so"; exit 0
 fi

@@ -16,13 +16,19 @@ static void raw(uint32_t type, uint32_t code, int down, float dx, float dy) {
 static int fails;
 #define CHECK(c, ...) do { if (c) printf("  ok: " __VA_ARGS__); else { printf("  FAIL: " __VA_ARGS__); fails++; } printf("\n"); fflush(stdout); } while (0)
 
+/* runs the main run loop until done() or 2 s (input arrives through another thread: slower on a loaded machine) */
+static void run_until(BOOL (^done)(void)) {
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:2];
+    do [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]]; while (!done() && end.timeIntervalSinceNow > 0);
+}
+
 int main(void) {
     @autoreleasepool {
         __block int kbConn = 0, mouseConn = 0;
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:GCKeyboardDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) { kbConn++; }];
         [nc addObserverForName:GCMouseDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) { mouseConn++; }];
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        run_until(^{ return (BOOL)(kbConn && mouseConn); });
         CHECK(kbConn == 1 && mouseConn == 1 && GCKeyboard.coalescedKeyboard && GCMouse.current && GCMouse.mice.count == 1, "keyboard and mouse connected at launch");
 
         NSMutableArray *keys = [NSMutableArray array];
@@ -32,11 +38,11 @@ int main(void) {
         };
         raw(KEY, 0x1A /* W */, 1, 0, 0); raw(KEY, 0x1A, 1, 0, 0); /* the second is a repeat */
         raw(KEY, 0xE1 /* left shift */, 1, 0, 0);
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        run_until(^{ return (BOOL)(keys.count >= 2); });
         CHECK(([keys isEqualToArray:@[@"26+", @"225+"]]), "keyChangedHandler with HID codes, no repeats (%s)", [[keys componentsJoinedByString:@" "] UTF8String]);
         CHECK(kb.anyKeyPressed && [kb buttonForKeyCode:GCKeyCodeKeyW].pressed && [kb buttonForKeyCode:GCKeyCodeLeftShift].pressed, "anyKeyPressed and buttonForKeyCode:");
         raw(KEY, 0x1A, 0, 0, 0); raw(KEY, 0xE1, 0, 0, 0);
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        run_until(^{ return (BOOL)(keys.count >= 4); });
         CHECK(!kb.anyKeyPressed && keys.count == 4, "after release no key stays pressed");
 
         GCMouseInput *m = GCMouse.current.mouseInput;
@@ -47,7 +53,7 @@ int main(void) {
         raw(MOVE, 0, 0, 5, 3); raw(MOVE, 0, 0, 7, -10);
         raw(BUTTON, 0, 1, 0, 0); raw(BUTTON, 0, 0, 0, 0);
         raw(SCROLL, 0, 0, 0, 2);
-        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        run_until(^{ return (BOOL)(sx == 12 && sy == 7 && left == 1 && !m.leftButton.pressed && wheel == 2 && m.scroll.yAxis.value == 0); });
         CHECK(sx == 12 && sy == 7 && moves >= 1, "mouseMovedHandler: raw deltas with y up (%g, %g in %d)", sx, sy, moves);
         CHECK(left == 1 && !m.leftButton.pressed, "left button");
         CHECK(wheel == 2 && m.scroll.yAxis.value == 0, "wheel: one delta and back to rest");

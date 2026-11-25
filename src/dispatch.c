@@ -133,6 +133,8 @@ struct dqueue {
 };
 /* set by AppKit: wakes the main thread when it sleeps in the event loop */
 void (*_scion_main_wake)(void);
+void (*_scion_main_rl_wake)(void);   /* Foundation: the main NSRunLoop */
+static pthread_cond_t main_cv;   /* zero = initialized, as pool_cv */
 struct dqueue _dispatch_main_q = {_dispatch_object_class, "com.apple.main-thread", 1, 0, 1, 1};
 struct dqueue_attr { void *isa; int concurrent; } _dispatch_queue_attr_concurrent = {_dispatch_object_class, 1};
 static struct dqueue global_q[6] = {
@@ -212,7 +214,11 @@ void dispatch_async_f(struct dqueue *q, void *ctx, dfunc fn) {
     if (start) q->running = 1;
     pthread_mutex_unlock(&q->lock);
     if (start) pool_push(drain, q);
-    if (q->is_main && _scion_main_wake) _scion_main_wake();
+    if (q->is_main) {
+        pthread_mutex_lock(&q->lock); pthread_cond_broadcast(&main_cv); pthread_mutex_unlock(&q->lock);   /* dispatch_main */
+        if (_scion_main_rl_wake) _scion_main_rl_wake();
+        if (_scion_main_wake) _scion_main_wake();
+    }
 }
 static void run_and_release(void *b) { call_block(b); _Block_release(b); }
 void dispatch_async(struct dqueue *q, void *block) { dispatch_async_f(q, _Block_copy(block), run_and_release); }
@@ -230,7 +236,14 @@ int _scion_dispatch_drain_main(void) {
         set_current(&_dispatch_main_q); it->fn(it->ctx); set_current(0); free(it); n++;
     }
 }
-void dispatch_main(void) { for (;;) if (!_scion_dispatch_drain_main()) usleep(1000); }
+void dispatch_main(void) {
+    for (;;) {
+        _scion_dispatch_drain_main();
+        pthread_mutex_lock(&_dispatch_main_q.lock);
+        while (!_dispatch_main_q.head) pthread_cond_wait(&main_cv, &_dispatch_main_q.lock);
+        pthread_mutex_unlock(&_dispatch_main_q.lock);
+    }
+}
 
 struct sync_ctx { dfunc fn; void *ctx; pthread_mutex_t m; pthread_cond_t cv; int done; };
 static void sync_tramp(void *p) {

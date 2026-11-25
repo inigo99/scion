@@ -5,18 +5,22 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One job builds everything; the test jobs (Wine, the native Linux host, Windows) and the fuzzers then run side by side
+# on its artifacts.
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      skip: ${{ steps.release.outputs.skip }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-build libboost-dev \
-            python3 golang wine64 xvfb mesa-vulkan-drivers libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
+          sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 golang \
+            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
 
@@ -56,6 +60,7 @@ jobs:
       # The Metal host DLLs and the Swift libraries take hours to build; CI reuses them from the latest release when
       # there is one, and otherwise skips the tests that need them.
       - name: Reuse the Metal and Swift libraries of the latest release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -64,39 +69,56 @@ jobs:
             cp --update=none /tmp/release/x/*/scion-metal.dll /tmp/release/x/*/scion-msl.dll bin/ || true
             cp --update=none /tmp/release/x/*/lib/*.dylib bin/lib/ || true
           fi
-          [ -f bin/scion-metal.dll ] || echo "SCION_SKIP=Metal|MSL|AppKit|2D drawing" >> "$GITHUB_ENV"
+          [ -f bin/scion-metal.dll ] || echo "skip=Metal|MSL|AppKit|2D drawing" >> "$GITHUB_OUTPUT"
 
       - name: Build the tests
         run: tests/build.sh
 
-      - name: Run the tests (Wine)
+      # artifacts do not keep file modes: the archive does
+      - name: Pack the build and the tests
+        run: tar cf build.tar bin out/tests
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scion-build
+          path: build.tar
+          retention-days: 7
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [wine, native]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install packages
         run: |
-          mkdir -p /run/user/$(id -u) || true
-          wineboot -i >/dev/null 2>&1 || true
-          tests/run.sh
-
-      - name: Run the tests (native Linux host, no Wine)
+          sudo apt-get update
+          sudo apt-get install -y xvfb mesa-vulkan-drivers libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16t64 \
+            libjpeg-turbo8 libvulkan1 libllvm20 ${{ matrix.host == 'wine' && 'wine64' || '' }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: scion-build
+      - run: tar xf build.tar
+      - name: Run the tests (${{ matrix.host }})
         env:
-          SCION: ${{ github.workspace }}/bin/scion
-        run: tests/run.sh
-
-      - name: Upload the build
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: scion-bin
-          path: bin/
-
-      - name: Upload the tests
-        uses: actions/upload-artifact@v7
-        with:
-          name: scion-tests
-          path: out/tests/
+          SCION_SKIP: ${{ needs.build.outputs.skip }}
+        run: |
+          if [ ${{ matrix.host }} = wine ]; then
+            mkdir -p /run/user/$(id -u) || true
+            wineboot -i >/dev/null 2>&1 || true
+          else
+            export SCION="$PWD/bin/scion"
+          fi
+          tests/run.sh
 
   # The same tests on real Windows. GitHub's runners have no Vulkan driver, so the tests that need Metal are skipped
   # (the AppKit and drawing tests include an MTKView). Experimental until it has been green for a while.
   windows:
-    needs: build-and-test
+    needs: build
     runs-on: windows-latest
     timeout-minutes: 60
     continue-on-error: true
@@ -104,13 +126,34 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: scion-bin
-          path: bin
-      - uses: actions/download-artifact@v8
-        with:
-          name: scion-tests
-          path: out/tests
+          name: scion-build
+      - run: tar xf build.tar
       - name: Run the tests (Windows)
         env:
           SCION_SKIP: Metal|MSL|AppKit|2D drawing
         run: powershell -ExecutionPolicy Bypass -File tests\run.ps1
+
+  # The readers of files that come with an app (Mach-O, Info.plist, .icns, LZFSE), with libFuzzer, ASan and UBSan
+  fuzz:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libclang-rt-18-dev llvm-18
+          sudo sysctl vm.mmap_rnd_bits=28   # ASan's shadow memory and the runners' address randomization
+      - uses: actions/download-artifact@v8
+        with:
+          name: scion-build
+      - run: tar xf build.tar
+      - name: Fuzz (2 minutes per reader)
+        run: tests/fuzz/run.sh 120
+      - name: Keep the findings
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings
+          path: out/fuzz/*/*-*

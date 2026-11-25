@@ -91,6 +91,7 @@ NSMenuItem *mw_popup_choose(NSMenu *m, NSWindow *w, NSPoint p); /* menu.m: the c
 @interface NSRunLoop (MWRunLoop)
 - (int)_pass; - (int)_passInMode:(NSString *)m;
 - (NSTimeInterval)_nextTimer;
+- (NSTimeInterval)_nextTimerInMode:(NSString *)m;
 @end
 
 /* nib.m */

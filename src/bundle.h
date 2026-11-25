@@ -83,10 +83,11 @@ static bool x_value(XmlIn &x, PVal &v, int depth) {
     return x_lit(x, ("</" + tag + ">").c_str());
 }
 /* binary bplist00 */
-struct BinIn { const uint8_t *b; size_t n; std::vector<uint64_t> offs; unsigned refsz; };
+/* budget: objects may be shared, so a small file can describe an exponentially large tree */
+struct BinIn { const uint8_t *b; size_t n; std::vector<uint64_t> offs; unsigned refsz; size_t budget = 1 << 20; };
 static uint64_t be(const uint8_t *p, unsigned n) { uint64_t v = 0; for (unsigned i = 0; i < n; i++) v = v << 8 | p[i]; return v; }
 static bool b_value(BinIn &r, uint64_t idx, PVal &v, int depth) {
-    if (idx >= r.offs.size() || depth > 64) return false;
+    if (idx >= r.offs.size() || depth > 64 || !r.budget--) return false;
     size_t pos = (size_t)r.offs[idx]; if (pos >= r.n) return false;
     uint8_t m = r.b[pos++]; unsigned hi = m >> 4, lo = m & 15;
     uint64_t cnt = lo;
@@ -137,7 +138,7 @@ static bool parse_plist(const std::string &f, PVal &out) {
     if (f.size() > 40 && !memcmp(f.data(), "bplist00", 8)) {
         const uint8_t *b = (const uint8_t *)f.data(), *t = b + f.size() - 32;
         BinIn r{b, f.size(), {}, t[7]}; unsigned offsz = t[6]; uint64_t count = be(t + 8, 8), top = be(t + 16, 8), table = be(t + 24, 8);
-        if (offsz < 1 || offsz > 8 || r.refsz < 1 || r.refsz > 8 || count > f.size() || top >= count || table + count * offsz > f.size() - 32) return false;
+        if (offsz < 1 || offsz > 8 || r.refsz < 1 || r.refsz > 8 || count > f.size() || top >= count || table > f.size() - 32 || count * offsz > f.size() - 32 - table) return false;
         for (uint64_t i = 0; i < count; i++) r.offs.push_back(be(b + table + i * offsz, offsz));
         return b_value(r, top, out, 0);
     }

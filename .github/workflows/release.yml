@@ -67,5 +67,5 @@ jobs:
           scripts/package.sh "$v"
           scripts/package.sh "$v" --linux
           notes=$(awk -v v="$v" '/^## /{p = index($0 " ", "## " v " ") == 1; next} p' CHANGELOG.md)
-          gh release create "$GITHUB_REF_NAME" "out/scion-$v-windows-x64.zip" "out/scion-$v-linux-x86_64.tar.gz" \
+          gh release create "$GITHUB_REF_NAME" "out/scion-$v-windows-x64.zip" "out/scion-$v-linux-x86_64.tar.xz" \
             --title "Scion $v" --notes "${notes:-See CHANGELOG.md.}"
