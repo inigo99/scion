@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Native Linux host (preview)**, no Wine: `scion` for Linux runs command-line programs, AppKit and SwiftUI apps and
+  Metal, x86_64 and arm64, with windows, input, controllers and audio through SDL2 and Metal on Vulkan
+  (`scion-metal.so`, `scion-msl.so`); `scion install` adds freedesktop.org menu entries, icons and file types. Releases
+  include `scion-<version>-linux-x86_64.tar.gz`. Under Wine, Linux paths given to `scion.exe` now work.
 - Fixed: NSTableView column rectangles read `-width` through the wrong method signature (garbage column widths).
 - Fixed: `-tableView:isGroupRow:` delegate answers could be misread; `+[NSString pathWithComponents:]` was missing
   (`+[NSURL fileURLWithPathComponents:]` raised).

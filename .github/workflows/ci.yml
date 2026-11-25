@@ -75,11 +75,9 @@ jobs:
           wineboot -i >/dev/null 2>&1 || true
           tests/run.sh
 
-      # Still missing on the native host: `scion install`
       - name: Run the tests (native Linux host, no Wine)
         env:
           SCION: ${{ github.workspace }}/bin/scion
-          SCION_SKIP: install
         run: tests/run.sh
 
       - name: Upload the build

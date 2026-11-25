@@ -52,7 +52,7 @@ SwiftUI {arch}                     | SWIFTUI OK           | - | swift_swiftui_{a
 Swift: Darwin, Dispatch {arch}     | SYSTEM OK            | - | swift_system_{arch}
 Swift: Foundation {arch}           | FOUNDATION OK        | - | swift_foundation_{arch}
 plist, Bundle, UserDefaults {arch} | PLIST OK             | SCION_ARCH={arch} | Sample.app
-# Windows integration: Start menu shortcut, icon, file types and uninstall entry
+# Desktop integration: Windows (Start menu shortcut, icon, file types, uninstall entry), Linux (.desktop, icon, MIME)
 app bundle {arch}                  | fib(49) = 7778742049 | SCION_ARCH={arch} | Hello.app
 scion install                      | Hello installed      | - | install Hello.app
 scion uninstall                    | uninstalled          | - | uninstall dev.scion.hello

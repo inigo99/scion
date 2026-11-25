@@ -28,8 +28,7 @@ work today, for a growing set of programs.
 | **Swift** | Swift's runtime and standard library, the Darwin/Dispatch/Foundation overlays, Swift Concurrency, and Scion's own Combine and SwiftUI. |
 | **Feels like Windows** | Real Win32 windows, menus, file dialogs, notification-area icons, keyboard, mouse, XInput gamepads with rumble, WASAPI audio. `scion install` adds an app to the Start menu with its icon and file types. |
 
-On Linux it runs natively (a preview, built from source) or under [Wine](https://www.winehq.org/): see
-[On Linux](#on-linux).
+On Linux it runs natively (a preview) or under [Wine](https://www.winehq.org/): see [On Linux](#on-linux).
 
 ## Quick start
 
@@ -53,24 +52,29 @@ under its open licenses), and you do not need a Mac or an Apple SDK.
 
 ## On Linux
 
-Scion runs on Linux through Wine, the same way the test suite runs in CI. You need Wine 9 or newer and, for Metal apps,
-a Vulkan driver (Mesa's are fine):
+**Natively (preview).** Download `scion-<version>-linux-x86_64.tar.gz` from [Releases](../../releases), unpack it and
+run `scion` from it. It needs a recent distribution (built on Ubuntu 24.04) with SDL2, FreeType, fontconfig, libpng,
+libjpeg, Vulkan and LLVM 20, plus a Vulkan driver for Metal apps:
 
 ```sh
-sudo apt install wine64 mesa-vulkan-drivers    # Debian/Ubuntu; use your distribution's packages elsewhere
-wine scion.exe path/to/tool --help
-wine scion.exe "path/to/Some App.app"
-wine scion.exe install "path/to/Some App.app"  # Wine turns this into a .desktop entry and file associations
+sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libvulkan1 libllvm20 \
+                 mesa-vulkan-drivers zenity          # Debian/Ubuntu; zenity gives the file dialogs
+./scion path/to/tool --help
+./scion "path/to/Some App.app"
+./scion install "path/to/Some App.app"   # application menu entry, icon and file types (freedesktop.org)
+./scion uninstall "path/to/Some App.app"
 ```
 
-Linux paths work as they are: Scion turns them into Wine's `Z:` paths.
+Command-line programs, AppKit and SwiftUI apps and Metal run, Intel and Apple Silicon; the whole test suite passes
+natively. Not there yet: the menu bar and status items in the tray ([issue](../../issues/10)).
 
-**Native host (preview).** A build from source also produces `bin/scion`, a Linux program that runs macOS programs
-without Wine: `bin/scion path/to/tool` or `bin/scion "path/to/Some App.app"`. Command-line programs, AppKit/SwiftUI
-apps and Metal run, Intel and Apple Silicon, with windows, input, controllers and audio through SDL2 and Metal on
-Vulkan (`scion-metal.so`, `scion-msl.so`); the whole test suite passes except `scion install`. Still missing: the menu
-bar, status items in the tray and `scion install`. Help is welcome
-([issue](../../issues/10)).
+**With Wine.** `scion.exe` from the Windows zip runs under Wine 9 or newer too, which is how the test suite first ran
+in CI:
+
+```sh
+sudo apt install wine64 mesa-vulkan-drivers
+wine scion.exe "path/to/Some App.app"           # Linux paths work as they are: Scion turns them into Z: paths
+```
 
 ## How it works
 

@@ -108,4 +108,6 @@ lib/       AppKit.dylib  Foundation.dylib  libSystem.B.dylib  ...  libswiftCore.
 ```
 
 plus `README.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md` and `licenses/`. `scion.exe` finds `lib/` next to
-itself. `scripts/package.sh 0.1.0` builds `out/scion-0.1.0-windows-x64.zip` from `bin/`.
+itself. `scripts/package.sh 0.1.0` builds `out/scion-0.1.0-windows-x64.zip` from `bin/`, and
+`scripts/package.sh 0.1.0 --linux` builds `out/scion-0.1.0-linux-x86_64.tar.gz` (`scion`, `scion-metal.so`,
+`scion-msl.so` and the same `lib/`).

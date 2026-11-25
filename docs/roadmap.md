@@ -30,8 +30,8 @@ These are the areas where work has the most effect. Each is self-contained enoug
 **Linux**
 - A native Linux host (no Wine), `src/host_linux.cpp` and `src/ui_linux.cpp`: command-line programs and AppKit/SwiftUI
   apps and Metal run, x86_64 and arm64, with windows, input, controllers and audio on SDL2 and Metal on Vulkan
-  (`scion-metal.so`, `scion-msl.so`). Next: a menu bar, status items in the tray (StatusNotifierItem), `.desktop`
-  integration for `scion install`, a Linux release archive.
+  (`scion-metal.so`, `scion-msl.so`), `scion install` as freedesktop.org entries, a release tarball. Next: a menu
+  bar, status items in the tray (StatusNotifierItem), HiDPI, a Flatpak or AppImage.
 
 **Run more apps**
 - Networking: BSD sockets on Winsock, then `URLSession` (most apps need it, even if only for update checks).
