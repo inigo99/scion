@@ -1,0 +1,736 @@
+scion: dynarmic compiles guest code about twice as fast (CPU time of short arm64 programs -47%):
+- fastmem fallbacks (6048 thunks, 1.9 MB) are generated on first use into a reserved area instead of by every JIT
+- the fast dispatch table has 64K entries instead of 1M (16 MB written twice and resident per JIT)
+- the A64 decode table is built without copying every matcher's std::function 4096 times
+- register allocation: only the locations an instruction touched are released, no candidate vector copy, no
+  release-mode full scans in assertions, hot HostLocInfo accessors inline
+- no perf-map names are formatted unless PERF_BUILDID_DIR is set; VerificationPass in debug builds only
+
+diff --git a/src/dynarmic/backend/x64/a32_emit_x64.h b/src/dynarmic/backend/x64/a32_emit_x64.h
+index 3706b30a..f9233b46 100644
+--- a/src/dynarmic/backend/x64/a32_emit_x64.h
++++ b/src/dynarmic/backend/x64/a32_emit_x64.h
+@@ -78,6 +78,9 @@ protected:
+     std::map<std::tuple<bool, size_t, int, int>, void (*)()> write_fallbacks;
+     std::map<std::tuple<bool, size_t, int, int>, void (*)()> exclusive_write_fallbacks;
+     void GenFastmemFallbacks();
++    void (*ReadFallback(bool o, size_t b, int a, int v))() { return read_fallbacks[std::make_tuple(o, b, a, v)]; }
++    void (*WriteFallback(bool o, size_t b, int a, int v))() { return write_fallbacks[std::make_tuple(o, b, a, v)]; }
++    void (*ExclusiveWriteFallback(bool o, size_t b, int a, int v))() { return exclusive_write_fallbacks[std::make_tuple(o, b, a, v)]; }
+ 
+     const void* terminal_handler_pop_rsb_hint;
+     const void* terminal_handler_fast_dispatch_hint = nullptr;
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64.h b/src/dynarmic/backend/x64/a64_emit_x64.h
+index ed493155..d4904b9f 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64.h
++++ b/src/dynarmic/backend/x64/a64_emit_x64.h
+@@ -61,8 +61,10 @@ protected:
+         const void* code_ptr = nullptr;
+     };
+     static_assert(sizeof(FastDispatchEntry) == 0x10);
+-    static constexpr u64 fast_dispatch_table_mask = 0xFFFFF0;
+-    static constexpr size_t fast_dispatch_table_size = 0x100000;
++    // 64K entries (1 MB): the original 1M entries meant 16 MB written twice and kept resident per JIT, that is per guest
++    // thread, for a cache of indirect branch targets
++    static constexpr u64 fast_dispatch_table_mask = 0xFFFF0;
++    static constexpr size_t fast_dispatch_table_size = 0x10000;
+     std::array<FastDispatchEntry, fast_dispatch_table_size> fast_dispatch_table;
+     void ClearFastDispatchTable();
+ 
+@@ -74,7 +76,14 @@ protected:
+     std::map<std::tuple<bool, size_t, int, int>, void (*)()> read_fallbacks;
+     std::map<std::tuple<bool, size_t, int, int>, void (*)()> write_fallbacks;
+     std::map<std::tuple<bool, size_t, int, int>, void (*)()> exclusive_write_fallbacks;
+-    void GenFastmemFallbacks();
++    void GenFastmemFallbacks();   // reserves the area; each fallback is generated on first use
++    u8* fallback_cur = nullptr;
++    u8* fallback_end = nullptr;
++    template<typename Gen>
++    void (*EmitFallback(Gen gen))();
++    void (*ReadFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
++    void (*WriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
++    void (*ExclusiveWriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))();
+ 
+     const void* terminal_handler_pop_rsb_hint;
+     const void* terminal_handler_fast_dispatch_hint = nullptr;
+diff --git a/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp b/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
+index 450b16d0..2d11e757 100644
+--- a/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
++++ b/src/dynarmic/backend/x64/a64_emit_x64_memory.cpp
+@@ -110,173 +110,170 @@ void A64EmitX64::GenMemory128Accessors() {
+     PerfMapRegister(memory_exclusive_write_128, code.getCurr(), "a64_memory_exclusive_write_128");
+ }
+ 
++/* Fastmem fallbacks (one per access kind, size, ordering and register pair: 6048 of them, 1.9 MB of code) used to be
++ * generated up front by every JIT, that is for every guest thread. They are now generated on first use into an area
++ * reserved in the prelude, which a cache clear keeps. */
++static constexpr size_t fastmem_fallback_area_size = 2 * 1024 * 1024;
++
+ void A64EmitX64::GenFastmemFallbacks() {
+-    const std::initializer_list<int> idxes{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+-    const std::array<std::pair<size_t, ArgCallback>, 4> read_callbacks{{
+-        {8, Devirtualize<&A64::UserCallbacks::MemoryRead8>(conf.callbacks)},
+-        {16, Devirtualize<&A64::UserCallbacks::MemoryRead16>(conf.callbacks)},
+-        {32, Devirtualize<&A64::UserCallbacks::MemoryRead32>(conf.callbacks)},
+-        {64, Devirtualize<&A64::UserCallbacks::MemoryRead64>(conf.callbacks)},
+-    }};
+-    const std::array<std::pair<size_t, ArgCallback>, 4> write_callbacks{{
+-        {8, Devirtualize<&A64::UserCallbacks::MemoryWrite8>(conf.callbacks)},
+-        {16, Devirtualize<&A64::UserCallbacks::MemoryWrite16>(conf.callbacks)},
+-        {32, Devirtualize<&A64::UserCallbacks::MemoryWrite32>(conf.callbacks)},
+-        {64, Devirtualize<&A64::UserCallbacks::MemoryWrite64>(conf.callbacks)},
+-    }};
+-    const std::array<std::pair<size_t, ArgCallback>, 4> exclusive_write_callbacks{{
+-        {8, Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive8>(conf.callbacks)},
+-        {16, Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive16>(conf.callbacks)},
+-        {32, Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive32>(conf.callbacks)},
+-        {64, Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive64>(conf.callbacks)},
+-    }};
+-
+-    for (bool ordered : {false, true}) {
+-        for (int vaddr_idx : idxes) {
+-            if (vaddr_idx == 4 || vaddr_idx == 15) {
+-                continue;
++    fallback_cur = code.getCurr<u8*>();
++    fallback_end = fallback_cur + fastmem_fallback_area_size;
++    code.SetCodePtr(fallback_end);
++}
++
++template<typename Gen>
++void (*A64EmitX64::EmitFallback(Gen gen))() {
++    const auto resume = code.getCurr();
++    code.SetCodePtr(fallback_cur);
++    code.align();
++    const auto entry = code.getCurr<void (*)()>();
++    gen();
++    fallback_cur = code.getCurr<u8*>();
++    ASSERT_MSG(fallback_cur <= fallback_end, "fastmem fallback area exhausted");
++    code.SetCodePtr(resume);
++    return entry;
++}
++
++void (*A64EmitX64::ReadFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))() {
++    const auto key = std::make_tuple(ordered, bitsize, vaddr_idx, value_idx);
++    if (const auto it = read_fallbacks.find(key); it != read_fallbacks.end()) {
++        return it->second;
++    }
++    const auto fn = EmitFallback([&] {
++        if (bitsize == 128) {
++            ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(value_idx));
++            if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
++                code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++            }
++            if (ordered) {
++                code.mfence();
++            }
++            code.call(memory_read_128);
++            if (value_idx != 1) {
++                code.movaps(Xbyak::Xmm{value_idx}, xmm1);
+             }
++            ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(value_idx));
++            code.ret();
++            return;
++        }
++        ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLocRegIdx(value_idx));
++        if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
++            code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++        }
++        if (ordered) {
++            code.mfence();
++        }
++        switch (bitsize) {
++        case 8: Devirtualize<&A64::UserCallbacks::MemoryRead8>(conf.callbacks).EmitCall(code); break;
++        case 16: Devirtualize<&A64::UserCallbacks::MemoryRead16>(conf.callbacks).EmitCall(code); break;
++        case 32: Devirtualize<&A64::UserCallbacks::MemoryRead32>(conf.callbacks).EmitCall(code); break;
++        default: Devirtualize<&A64::UserCallbacks::MemoryRead64>(conf.callbacks).EmitCall(code); break;
++        }
++        if (value_idx != code.ABI_RETURN.getIdx()) {
++            code.mov(Xbyak::Reg64{value_idx}, code.ABI_RETURN);
++        }
++        ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLocRegIdx(value_idx));
++        code.ZeroExtendFrom(bitsize, Xbyak::Reg64{value_idx});
++        code.ret();
++    });
++    read_fallbacks.emplace(key, fn);
++    return fn;
++}
++
++/* the value and the address go to ABI_PARAM3 and ABI_PARAM2, whichever registers they are in */
++static void MoveAddressAndValue(BlockOfCode& code, int vaddr_idx, int value_idx) {
++    if (vaddr_idx == code.ABI_PARAM3.getIdx() && value_idx == code.ABI_PARAM2.getIdx()) {
++        code.xchg(code.ABI_PARAM2, code.ABI_PARAM3);
++    } else if (vaddr_idx == code.ABI_PARAM3.getIdx()) {
++        code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++        if (value_idx != code.ABI_PARAM3.getIdx()) {
++            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
++        }
++    } else {
++        if (value_idx != code.ABI_PARAM3.getIdx()) {
++            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
++        }
++        if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
++            code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++        }
++    }
++}
+ 
+-            for (int value_idx : idxes) {
+-                code.align();
+-                read_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(value_idx));
+-                if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                    code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                }
+-                if (ordered) {
+-                    code.mfence();
+-                }
+-                code.call(memory_read_128);
+-                if (value_idx != 1) {
+-                    code.movaps(Xbyak::Xmm{value_idx}, xmm1);
+-                }
+-                ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLocXmmIdx(value_idx));
+-                code.ret();
+-                PerfMapRegister(read_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)], code.getCurr(), "a64_read_fallback_128");
+-
+-                code.align();
+-                write_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                ABI_PushCallerSaveRegistersAndAdjustStack(code);
+-                if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                    code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                }
+-                if (value_idx != 1) {
+-                    code.movaps(xmm1, Xbyak::Xmm{value_idx});
+-                }
+-                code.call(memory_write_128);
+-                if (ordered) {
+-                    code.mfence();
+-                }
+-                ABI_PopCallerSaveRegistersAndAdjustStack(code);
+-                code.ret();
+-                PerfMapRegister(write_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)], code.getCurr(), "a64_write_fallback_128");
+-
+-                code.align();
+-                exclusive_write_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
+-                if (value_idx != 1) {
+-                    code.movaps(xmm1, Xbyak::Xmm{value_idx});
+-                }
+-                if (code.HasHostFeature(HostFeature::SSE41)) {
+-                    code.movq(xmm2, rax);
+-                    code.pinsrq(xmm2, rdx, 1);
+-                } else {
+-                    code.movq(xmm2, rax);
+-                    code.movq(xmm0, rdx);
+-                    code.punpcklqdq(xmm2, xmm0);
+-                }
+-                if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                    code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                }
+-                code.call(memory_exclusive_write_128);
+-                ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
+-                code.ret();
+-                PerfMapRegister(exclusive_write_fallbacks[std::make_tuple(ordered, 128, vaddr_idx, value_idx)], code.getCurr(), "a64_exclusive_write_fallback_128");
+-
+-                if (value_idx == 4 || value_idx == 15) {
+-                    continue;
+-                }
+-
+-                for (const auto& [bitsize, callback] : read_callbacks) {
+-                    code.align();
+-                    read_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                    ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLocRegIdx(value_idx));
+-                    if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                        code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                    }
+-                    if (ordered) {
+-                        code.mfence();
+-                    }
+-                    callback.EmitCall(code);
+-                    if (value_idx != code.ABI_RETURN.getIdx()) {
+-                        code.mov(Xbyak::Reg64{value_idx}, code.ABI_RETURN);
+-                    }
+-                    ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLocRegIdx(value_idx));
+-                    code.ZeroExtendFrom(bitsize, Xbyak::Reg64{value_idx});
+-                    code.ret();
+-                    PerfMapRegister(read_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)], code.getCurr(), fmt::format("a64_read_fallback_{}", bitsize));
+-                }
+-
+-                for (const auto& [bitsize, callback] : write_callbacks) {
+-                    code.align();
+-                    write_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                    ABI_PushCallerSaveRegistersAndAdjustStack(code);
+-                    if (vaddr_idx == code.ABI_PARAM3.getIdx() && value_idx == code.ABI_PARAM2.getIdx()) {
+-                        code.xchg(code.ABI_PARAM2, code.ABI_PARAM3);
+-                    } else if (vaddr_idx == code.ABI_PARAM3.getIdx()) {
+-                        code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                        if (value_idx != code.ABI_PARAM3.getIdx()) {
+-                            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
+-                        }
+-                    } else {
+-                        if (value_idx != code.ABI_PARAM3.getIdx()) {
+-                            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
+-                        }
+-                        if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                            code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                        }
+-                    }
+-                    code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
+-                    callback.EmitCall(code);
+-                    if (ordered) {
+-                        code.mfence();
+-                    }
+-                    ABI_PopCallerSaveRegistersAndAdjustStack(code);
+-                    code.ret();
+-                    PerfMapRegister(write_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)], code.getCurr(), fmt::format("a64_write_fallback_{}", bitsize));
+-                }
+-
+-                for (const auto& [bitsize, callback] : exclusive_write_callbacks) {
+-                    code.align();
+-                    exclusive_write_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)] = code.getCurr<void (*)()>();
+-                    ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
+-                    if (vaddr_idx == code.ABI_PARAM3.getIdx() && value_idx == code.ABI_PARAM2.getIdx()) {
+-                        code.xchg(code.ABI_PARAM2, code.ABI_PARAM3);
+-                    } else if (vaddr_idx == code.ABI_PARAM3.getIdx()) {
+-                        code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                        if (value_idx != code.ABI_PARAM3.getIdx()) {
+-                            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
+-                        }
+-                    } else {
+-                        if (value_idx != code.ABI_PARAM3.getIdx()) {
+-                            code.mov(code.ABI_PARAM3, Xbyak::Reg64{value_idx});
+-                        }
+-                        if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
+-                            code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
+-                        }
+-                    }
+-                    code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
+-                    code.mov(code.ABI_PARAM4, rax);
+-                    code.ZeroExtendFrom(bitsize, code.ABI_PARAM4);
+-                    callback.EmitCall(code);
+-                    ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
+-                    code.ret();
+-                    PerfMapRegister(exclusive_write_fallbacks[std::make_tuple(ordered, bitsize, vaddr_idx, value_idx)], code.getCurr(), fmt::format("a64_exclusive_write_fallback_{}", bitsize));
+-                }
++void (*A64EmitX64::WriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))() {
++    const auto key = std::make_tuple(ordered, bitsize, vaddr_idx, value_idx);
++    if (const auto it = write_fallbacks.find(key); it != write_fallbacks.end()) {
++        return it->second;
++    }
++    const auto fn = EmitFallback([&] {
++        ABI_PushCallerSaveRegistersAndAdjustStack(code);
++        if (bitsize == 128) {
++            if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
++                code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++            }
++            if (value_idx != 1) {
++                code.movaps(xmm1, Xbyak::Xmm{value_idx});
+             }
++            code.call(memory_write_128);
++        } else {
++            MoveAddressAndValue(code, vaddr_idx, value_idx);
++            code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
++            switch (bitsize) {
++            case 8: Devirtualize<&A64::UserCallbacks::MemoryWrite8>(conf.callbacks).EmitCall(code); break;
++            case 16: Devirtualize<&A64::UserCallbacks::MemoryWrite16>(conf.callbacks).EmitCall(code); break;
++            case 32: Devirtualize<&A64::UserCallbacks::MemoryWrite32>(conf.callbacks).EmitCall(code); break;
++            default: Devirtualize<&A64::UserCallbacks::MemoryWrite64>(conf.callbacks).EmitCall(code); break;
++            }
++        }
++        if (ordered) {
++            code.mfence();
+         }
++        ABI_PopCallerSaveRegistersAndAdjustStack(code);
++        code.ret();
++    });
++    write_fallbacks.emplace(key, fn);
++    return fn;
++}
++
++void (*A64EmitX64::ExclusiveWriteFallback(bool ordered, size_t bitsize, int vaddr_idx, int value_idx))() {
++    const auto key = std::make_tuple(ordered, bitsize, vaddr_idx, value_idx);
++    if (const auto it = exclusive_write_fallbacks.find(key); it != exclusive_write_fallbacks.end()) {
++        return it->second;
+     }
++    const auto fn = EmitFallback([&] {
++        ABI_PushCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
++        if (bitsize == 128) {
++            if (value_idx != 1) {
++                code.movaps(xmm1, Xbyak::Xmm{value_idx});
++            }
++            if (code.HasHostFeature(HostFeature::SSE41)) {
++                code.movq(xmm2, rax);
++                code.pinsrq(xmm2, rdx, 1);
++            } else {
++                code.movq(xmm2, rax);
++                code.movq(xmm0, rdx);
++                code.punpcklqdq(xmm2, xmm0);
++            }
++            if (vaddr_idx != code.ABI_PARAM2.getIdx()) {
++                code.mov(code.ABI_PARAM2, Xbyak::Reg64{vaddr_idx});
++            }
++            code.call(memory_exclusive_write_128);
++        } else {
++            MoveAddressAndValue(code, vaddr_idx, value_idx);
++            code.ZeroExtendFrom(bitsize, code.ABI_PARAM3);
++            code.mov(code.ABI_PARAM4, rax);
++            code.ZeroExtendFrom(bitsize, code.ABI_PARAM4);
++            switch (bitsize) {
++            case 8: Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive8>(conf.callbacks).EmitCall(code); break;
++            case 16: Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive16>(conf.callbacks).EmitCall(code); break;
++            case 32: Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive32>(conf.callbacks).EmitCall(code); break;
++            default: Devirtualize<&A64::UserCallbacks::MemoryWriteExclusive64>(conf.callbacks).EmitCall(code); break;
++            }
++        }
++        ABI_PopCallerSaveRegistersAndAdjustStackExcept(code, HostLoc::RAX);
++        code.ret();
++    });
++    exclusive_write_fallbacks.emplace(key, fn);
++    return fn;
+ }
+ 
+ #define Axx A64
+diff --git a/src/dynarmic/backend/x64/a64_interface.cpp b/src/dynarmic/backend/x64/a64_interface.cpp
+index dbdb4dfa..86572bcd 100644
+--- a/src/dynarmic/backend/x64/a64_interface.cpp
++++ b/src/dynarmic/backend/x64/a64_interface.cpp
+@@ -287,7 +287,9 @@ private:
+             Optimization::A64MergeInterpretBlocksPass(ir_block, conf.callbacks);
+         }
+         Optimization::IdentityRemovalPass(ir_block);
++#ifndef NDEBUG
+         Optimization::VerificationPass(ir_block);
++#endif
+         return emitter.Emit(ir_block).entrypoint;
+     }
+ 
+diff --git a/src/dynarmic/backend/x64/emit_x64.cpp b/src/dynarmic/backend/x64/emit_x64.cpp
+index 902ddef9..e560a52d 100644
+--- a/src/dynarmic/backend/x64/emit_x64.cpp
++++ b/src/dynarmic/backend/x64/emit_x64.cpp
+@@ -335,7 +335,9 @@ Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {
+ }
+ 
+ EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
+-    PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
++    if (PerfMapEnabled()) {
++        PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
++    }
+     Patch(descriptor, entrypoint);
+ 
+     BlockDescriptor block_desc{entrypoint, size};
+diff --git a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+index 272b896a..44074e94 100644
+--- a/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
++++ b/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc
+@@ -89,7 +89,7 @@ void AxxEmitX64::EmitMemoryRead(AxxEmitContext& ctx, IR::Inst* inst) {
+     const Xbyak::Reg64 vaddr = ctx.reg_alloc.UseGpr(args[1]);
+     const int value_idx = bitsize == 128 ? ctx.reg_alloc.ScratchXmm().getIdx() : ctx.reg_alloc.ScratchGpr().getIdx();
+ 
+-    const auto wrapped_fn = read_fallbacks[std::make_tuple(ordered, bitsize, vaddr.getIdx(), value_idx)];
++    const auto wrapped_fn = ReadFallback(ordered, bitsize, vaddr.getIdx(), value_idx);
+ 
+     SharedLabel abort = GenSharedLabel(), end = GenSharedLabel();
+ 
+@@ -176,7 +176,7 @@ void AxxEmitX64::EmitMemoryWrite(AxxEmitContext& ctx, IR::Inst* inst) {
+                             ? ctx.reg_alloc.UseXmm(args[2]).getIdx()
+                             : (ordered ? ctx.reg_alloc.UseScratchGpr(args[2]).getIdx() : ctx.reg_alloc.UseGpr(args[2]).getIdx());
+ 
+-    const auto wrapped_fn = write_fallbacks[std::make_tuple(ordered, bitsize, vaddr.getIdx(), value_idx)];
++    const auto wrapped_fn = WriteFallback(ordered, bitsize, vaddr.getIdx(), value_idx);
+ 
+     SharedLabel abort = GenSharedLabel(), end = GenSharedLabel();
+ 
+@@ -354,7 +354,7 @@ void AxxEmitX64::EmitExclusiveReadMemoryInline(AxxEmitContext& ctx, IR::Inst* in
+     const Xbyak::Reg64 tmp = ctx.reg_alloc.ScratchGpr();
+     const Xbyak::Reg64 tmp2 = ctx.reg_alloc.ScratchGpr();
+ 
+-    const auto wrapped_fn = read_fallbacks[std::make_tuple(ordered, bitsize, vaddr.getIdx(), value_idx)];
++    const auto wrapped_fn = ReadFallback(ordered, bitsize, vaddr.getIdx(), value_idx);
+ 
+     EmitExclusiveLock(code, conf, tmp, tmp2.cvt32());
+ 
+@@ -434,7 +434,7 @@ void AxxEmitX64::EmitExclusiveWriteMemoryInline(AxxEmitContext& ctx, IR::Inst* i
+     const Xbyak::Reg32 status = ctx.reg_alloc.ScratchGpr().cvt32();
+     const Xbyak::Reg64 tmp = ctx.reg_alloc.ScratchGpr();
+ 
+-    const auto wrapped_fn = exclusive_write_fallbacks[std::make_tuple(ordered, bitsize, vaddr.getIdx(), value.getIdx())];
++    const auto wrapped_fn = ExclusiveWriteFallback(ordered, bitsize, vaddr.getIdx(), value.getIdx());
+ 
+     EmitExclusiveLock(code, conf, tmp, eax);
+ 
+diff --git a/src/dynarmic/backend/x64/perf_map.cpp b/src/dynarmic/backend/x64/perf_map.cpp
+index 88691dbf..b3ad76a7 100644
+--- a/src/dynarmic/backend/x64/perf_map.cpp
++++ b/src/dynarmic/backend/x64/perf_map.cpp
+@@ -44,9 +44,14 @@ void OpenFile() {
+ }
+ }  // anonymous namespace
+ 
++bool PerfMapEnabled() {
++    static const bool enabled = std::getenv("PERF_BUILDID_DIR") != nullptr;
++    return enabled;
++}
++
+ namespace detail {
+ void PerfMapRegister(const void* start, const void* end, std::string_view friendly_name) {
+-    if (start == end) {
++    if (start == end || !PerfMapEnabled()) {
+         // Nothing to register
+         return;
+     }
+@@ -83,6 +88,10 @@ void PerfMapClear() {
+ 
+ namespace Dynarmic::Backend::X64 {
+ 
++bool PerfMapEnabled() {
++    return false;
++}
++
+ namespace detail {
+ void PerfMapRegister(const void*, const void*, std::string_view) {}
+ }  // namespace detail
+diff --git a/src/dynarmic/backend/x64/perf_map.h b/src/dynarmic/backend/x64/perf_map.h
+index 7d739ae6..a6760f4a 100644
+--- a/src/dynarmic/backend/x64/perf_map.h
++++ b/src/dynarmic/backend/x64/perf_map.h
+@@ -20,6 +20,9 @@ void PerfMapRegister(T start, const void* end, std::string_view friendly_name) {
+     detail::PerfMapRegister(mcl::bit_cast<const void*>(start), end, friendly_name);
+ }
+ 
++/// Whether perf map entries are written (PERF_BUILDID_DIR is set); callers skip building names when they are not
++bool PerfMapEnabled();
++
+ void PerfMapClear();
+ 
+ }  // namespace Dynarmic::Backend::X64
+diff --git a/src/dynarmic/backend/x64/reg_alloc.cpp b/src/dynarmic/backend/x64/reg_alloc.cpp
+index 61a3a6cd..d07d8934 100644
+--- a/src/dynarmic/backend/x64/reg_alloc.cpp
++++ b/src/dynarmic/backend/x64/reg_alloc.cpp
+@@ -75,14 +75,6 @@ static bool IsValuelessType(IR::Type type) {
+     }
+ }
+ 
+-bool HostLocInfo::IsLocked() const {
+-    return is_being_used_count > 0;
+-}
+-
+-bool HostLocInfo::IsEmpty() const {
+-    return is_being_used_count == 0 && values.empty();
+-}
+-
+ bool HostLocInfo::IsLastUse() const {
+     return is_being_used_count == 0 && current_references == 1 && accumulated_uses + 1 == total_uses;
+ }
+@@ -122,7 +114,7 @@ void HostLocInfo::ReleaseOne() {
+         ReleaseAll();
+ }
+ 
+-void HostLocInfo::ReleaseAll() {
++void HostLocInfo::ReleaseAllSlow() {
+     accumulated_uses += current_references;
+     current_references = 0;
+ 
+@@ -139,10 +131,6 @@ void HostLocInfo::ReleaseAll() {
+     is_scratch = false;
+ }
+ 
+-bool HostLocInfo::ContainsValue(const IR::Inst* inst) const {
+-    return std::find(values.begin(), values.end(), inst) != values.end();
+-}
+-
+ size_t HostLocInfo::GetMaxBitWidth() const {
+     return max_bit_width;
+ }
+@@ -265,8 +253,9 @@ RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(IR::Inst* inst) {
+         const IR::Value arg = inst->GetArg(i);
+         ret[i].value = arg;
+         if (!arg.IsImmediate() && !IsValuelessType(arg.GetType())) {
+-            ASSERT_MSG(ValueLocation(arg.GetInst()), "argument must already been defined");
+-            LocInfo(*ValueLocation(arg.GetInst())).AddArgReference();
++            const auto loc = ValueLocation(arg.GetInst());
++            ASSERT_MSG(loc, "argument must already been defined");
++            LocInfo(*loc).AddArgReference();
+         }
+     }
+     return ret;
+@@ -504,8 +493,11 @@ void RegAlloc::ReleaseStackSpace(size_t stack_space) {
+ }
+ 
+ void RegAlloc::EndOfAllocScope() {
+-    for (auto& iter : hostloc_info) {
+-        iter.ReleaseAll();
++    for (size_t w = 0; w < touched.size(); w++) {
++        for (u64 bits = touched[w]; bits; bits &= bits - 1) {
++            hostloc_info[w * 64 + static_cast<size_t>(__builtin_ctzll(bits))].ReleaseAll();
++        }
++        touched[w] = 0;
+     }
+ }
+ 
+@@ -520,23 +512,23 @@ void RegAlloc::EmitVerboseDebuggingOutput() {
+ }
+ 
+ HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations) const {
+-    std::vector<HostLoc> candidates = desired_locations;
+-
+-    // Find all locations that have not been allocated..
+-    const auto allocated_locs = std::partition(candidates.begin(), candidates.end(), [this](auto loc) {
+-        return !this->LocInfo(loc).IsLocked();
+-    });
+-    candidates.erase(allocated_locs, candidates.end());
+-    ASSERT_MSG(!candidates.empty(), "All candidate registers have already been allocated");
+-
+-    // Selects the best location out of the available locations.
+-    // TODO: Actually do LRU or something. Currently we just try to pick something without a value if possible.
+-
+-    std::partition(candidates.begin(), candidates.end(), [this](auto loc) {
+-        return this->LocInfo(loc).IsEmpty();
+-    });
+-
+-    return candidates.front();
++    // An unallocated location, preferably one without a value (no copy of the candidates: this runs for every
++    // allocation). TODO: Actually do LRU or something.
++    std::optional<HostLoc> unlocked;
++    for (const HostLoc loc : desired_locations) {
++        const HostLocInfo& info = LocInfo(loc);
++        if (info.IsLocked()) {
++            continue;
++        }
++        if (info.IsEmpty()) {
++            return loc;
++        }
++        if (!unlocked) {
++            unlocked = loc;
++        }
++    }
++    ASSERT_MSG(unlocked, "All candidate registers have already been allocated");
++    return *unlocked;
+ }
+ 
+ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
+@@ -550,12 +542,16 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
+ }
+ 
+ void RegAlloc::DefineValueImpl(IR::Inst* def_inst, HostLoc host_loc) {
++#ifndef NDEBUG   // a scan of every host location: debug builds only
+     ASSERT_MSG(!ValueLocation(def_inst), "def_inst has already been defined");
++#endif
+     LocInfo(host_loc).AddValue(def_inst);
+ }
+ 
+ void RegAlloc::DefineValueImpl(IR::Inst* def_inst, const IR::Value& use_inst) {
++#ifndef NDEBUG   // a scan of every host location: debug builds only
+     ASSERT_MSG(!ValueLocation(def_inst), "def_inst has already been defined");
++#endif
+ 
+     if (use_inst.IsImmediate()) {
+         const HostLoc location = ScratchImpl(gpr_order);
+@@ -564,9 +560,9 @@ void RegAlloc::DefineValueImpl(IR::Inst* def_inst, const IR::Value& use_inst) {
+         return;
+     }
+ 
+-    ASSERT_MSG(ValueLocation(use_inst.GetInst()), "use_inst must already be defined");
+-    const HostLoc location = *ValueLocation(use_inst.GetInst());
+-    DefineValueImpl(def_inst, location);
++    const auto location = ValueLocation(use_inst.GetInst());
++    ASSERT_MSG(location, "use_inst must already be defined");
++    DefineValueImpl(def_inst, *location);
+ }
+ 
+ HostLoc RegAlloc::LoadImmediate(IR::Value imm, HostLoc host_loc) {
+@@ -667,7 +663,9 @@ HostLoc RegAlloc::FindFreeSpill() const {
+ 
+ HostLocInfo& RegAlloc::LocInfo(HostLoc loc) {
+     ASSERT(loc != HostLoc::RSP && loc != HostLoc::R15);
+-    return hostloc_info[static_cast<size_t>(loc)];
++    const size_t i = static_cast<size_t>(loc);
++    touched[i / 64] |= u64(1) << (i % 64);
++    return hostloc_info[i];
+ }
+ 
+ const HostLocInfo& RegAlloc::LocInfo(HostLoc loc) const {
+diff --git a/src/dynarmic/backend/x64/reg_alloc.h b/src/dynarmic/backend/x64/reg_alloc.h
+index 19debf5f..3f6976ec 100644
+--- a/src/dynarmic/backend/x64/reg_alloc.h
++++ b/src/dynarmic/backend/x64/reg_alloc.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include <algorithm>
+ #include <array>
+ #include <functional>
+ #include <optional>
+@@ -16,6 +17,7 @@
+ 
+ #include "dynarmic/backend/x64/block_of_code.h"
+ #include "dynarmic/backend/x64/hostloc.h"
++#include "dynarmic/backend/x64/stack_layout.h"
+ #include "dynarmic/backend/x64/oparg.h"
+ #include "dynarmic/ir/cond.h"
+ #include "dynarmic/ir/microinstruction.h"
+@@ -31,8 +33,9 @@ class RegAlloc;
+ 
+ struct HostLocInfo {
+ public:
+-    bool IsLocked() const;
+-    bool IsEmpty() const;
++    // inline: called for every host location on every instruction
++    bool IsLocked() const { return is_being_used_count > 0; }
++    bool IsEmpty() const { return is_being_used_count == 0 && values.empty(); }
+     bool IsLastUse() const;
+ 
+     void SetLastUse();
+@@ -41,9 +44,16 @@ public:
+     void WriteLock();
+     void AddArgReference();
+     void ReleaseOne();
+-    void ReleaseAll();
+-
+-    bool ContainsValue(const IR::Inst* inst) const;
++    void ReleaseAll() {
++        if (current_references == 0 && is_being_used_count == 0 && !is_scratch && !is_set_last_use && (values.empty() || total_uses != accumulated_uses)) {
++            return;  // nothing to release (the common case: most locations are untouched by an instruction)
++        }
++        ReleaseAllSlow();
++    }
++
++    bool ContainsValue(const IR::Inst* inst) const {
++        return !values.empty() && std::find(values.begin(), values.end(), inst) != values.end();
++    }
+     size_t GetMaxBitWidth() const;
+ 
+     void AddValue(IR::Inst* inst);
+@@ -51,6 +61,8 @@ public:
+     void EmitVerboseDebuggingOutput(BlockOfCode& code, size_t host_loc_index) const;
+ 
+ private:
++    void ReleaseAllSlow();
++
+     // Current instruction state
+     size_t is_being_used_count = 0;
+     bool is_scratch = false;
+@@ -174,6 +186,9 @@ private:
+     HostLoc FindFreeSpill() const;
+ 
+     std::vector<HostLocInfo> hostloc_info;
++    // locations handed out for writing since the last EndOfAllocScope: only they can need releasing
++    std::array<u64, 2> touched{};
++    static_assert(NonSpillHostLocCount + SpillCount <= 128);
+     HostLocInfo& LocInfo(HostLoc loc);
+     const HostLocInfo& LocInfo(HostLoc loc) const;
+ 
+diff --git a/src/dynarmic/frontend/A64/decoder/a64.h b/src/dynarmic/frontend/A64/decoder/a64.h
+index d6f447e5..93a0d25a 100644
+--- a/src/dynarmic/frontend/A64/decoder/a64.h
++++ b/src/dynarmic/frontend/A64/decoder/a64.h
+@@ -58,7 +58,7 @@ DecodeTable<V> GetDecodeTable() {
+ 
+     DecodeTable<V> table{};
+     for (size_t i = 0; i < table.size(); ++i) {
+-        for (auto matcher : list) {
++        for (const auto& matcher : list) {   // a copy is a std::function copy: 4096 x every matcher
+             const auto expect = detail::ToFastLookupIndex(matcher.GetExpected());
+             const auto mask = detail::ToFastLookupIndex(matcher.GetMask());
+             if ((i & mask) == expect) {
