@@ -1406,7 +1406,7 @@ typedef NS_ENUM(NSUInteger, NSSaveOperationType) { NSSaveOperation = 0, NSSaveAs
 @interface NSLayoutConstraint : NSObject
 + (instancetype)constraintWithItem:(nullable id)a attribute:(NSLayoutAttribute)aa relatedBy:(NSLayoutRelation)r toItem:(nullable id)b attribute:(NSLayoutAttribute)ba
     multiplier:(CGFloat)m constant:(CGFloat)c;
-+ (NSArray<NSLayoutConstraint *> *)constraintsWithVisualFormat:(NSString *)f options:(NSLayoutFormatOptions)o metrics:(NSDictionary *)m views:(NSDictionary *)v;
++ (NSArray<NSLayoutConstraint *> *)constraintsWithVisualFormat:(NSString *)f options:(NSLayoutFormatOptions)o metrics:(nullable NSDictionary *)m views:(NSDictionary *)v;
 + (void)activateConstraints:(NSArray<NSLayoutConstraint *> *)c;
 + (void)deactivateConstraints:(NSArray<NSLayoutConstraint *> *)c;
 @property(readonly, assign) id firstItem, secondItem;

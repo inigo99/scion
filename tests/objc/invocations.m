@@ -4,7 +4,7 @@
 int printf(const char *, ...);
 static int fails;
 #define CHECK(...) do { if (__VA_ARGS__) printf("ok   %s\n", #__VA_ARGS__); else { printf("FAIL %s (line %d)\n", #__VA_ARGS__, __LINE__); fails++; } } while (0)
-@interface Calc : NSObject @property double last; @property (copy) NSString *s; @end
+@interface Calc : NSObject @property double last; @property (nonatomic, copy) NSString *s; @end
 @implementation Calc
 - (long)sum:(long)a b:(long)b c:(long)c d:(long)d e:(long)e f:(long)f g:(long)g h:(long)h { return a+b+c+d+e+f+g+h; }
 - (double)mix:(int)a x:(double)x y:(float)y { return a + x + y; }

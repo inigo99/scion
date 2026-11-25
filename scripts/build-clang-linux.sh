@@ -6,7 +6,7 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 L=${LLVM20:-${DEPS:-$ROOT/deps}/llvm20}
 cmake -S "$L/clang" -B "$L/build-linux" -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm \
-  -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF -DCLANG_BUILD_TOOLS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_FLAGS=-w -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF -DCLANG_BUILD_TOOLS=OFF \
   -DLLVM_INCLUDE_TESTS=OFF -DCLANG_ENABLE_ARCMT=OFF -DCLANG_ENABLE_STATIC_ANALYZER=OFF >/dev/null
 cmake --build "$L/build-linux" --target clangCodeGen clangFrontend
 echo "OK -> $L/build-linux"

@@ -13,14 +13,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install packages
         run: |
           sudo apt-get update && sudo apt-get install -y $PACKAGES
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
       - name: Cache LLVM 20 for MinGW
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/llvm20
           key: llvm20-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-llvm-mingw.sh', 'patches/clang-msl.patch', 'patches/mingw.cmake') }}
@@ -28,7 +28,7 @@ jobs:
       - name: Build LLVM 20 for MinGW (hours, once)
         run: '[ -d deps/llvm20/build-win/lib ] && ls deps/llvm20/build-win/lib/libclang*.a >/dev/null 2>&1 || scripts/build-llvm-mingw.sh'
       - run: src/build_metal.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: scion-metal
           path: |
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install packages
         run: |
           sudo apt-get update && sudo apt-get install -y $PACKAGES
@@ -64,7 +64,7 @@ jobs:
           src/build_swift_concurrency.sh
           src/build_swiftui.sh
           mkdir -p swift-lib && ls bin/lib | grep -vxFf /tmp/core.txt | sed 's|^|bin/lib/|' | xargs cp -t swift-lib
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: scion-swift
           path: swift-lib/

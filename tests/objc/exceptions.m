@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
         __block BOOL caught = NO;
         dispatch_semaphore_t s = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_global_queue(0, 0), ^{
-            @try { [@{} objectForKey:nil]; [NSException raise:@"Thread" format:@"x"]; } @catch (NSException *e) { caught = [e.name isEqualToString:@"Thread"]; }
+            @try { [NSException raise:@"Thread" format:@"x"]; } @catch (NSException *e) { caught = [e.name isEqualToString:@"Thread"]; }
             dispatch_semaphore_signal(s);
         });
         dispatch_semaphore_wait(s, DISPATCH_TIME_FOREVER);
