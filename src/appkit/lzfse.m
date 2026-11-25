@@ -29,17 +29,20 @@ static uint64_t lsb(uint64_t x, int n) { return n >= 64 ? x : n <= 0 ? 0 : x & (
 /* the payloads are read backwards, from their end */
 static int in_init(BitIn *in, int nbits, const uint8_t **p, const uint8_t *start) {
     if (nbits) { if (*p - 8 < start) return -1; *p -= 8; in->accum = ld64(*p); in->nbits = nbits + 64; }
-    else { if (*p - 7 < start) return -1; *p -= 7; in->accum = ld64(*p) & 0xffffffffffffffull; in->nbits = 56; }
+    else { if (*p - 7 < start) return -1; *p -= 7; in->accum = 0; memcpy(&in->accum, *p, 7); in->nbits = 56; }   /* 7 bytes: no more */
     if (in->nbits < 56 || in->nbits >= 64 || (in->accum >> in->nbits)) return -1;
     return 0;
 }
-/* may read bytes before the payload (the header): they fill bits that are never pulled; start is the block's start */
+/* may read bytes before the payload (the header): they fill bits that are never pulled; start is the block's start.
+ * Only the n/8 bytes being added are read: the stream may end right after them. */
 static int in_flush(BitIn *in, const uint8_t **p, const uint8_t *start) {
     int n = (63 - in->nbits) & -8;
     const uint8_t *q = *p - (n >> 3);
     if (q < start) return -1;
     *p = q;
-    in->accum = (in->accum << n) | lsb(ld64(q), n);
+    uint64_t v = 0;
+    memcpy(&v, q, (size_t)(n >> 3));
+    in->accum = (in->accum << n) | v;
     in->nbits += n;
     return 0;
 }
@@ -110,7 +113,8 @@ static size_t block_v2(const uint8_t *src, const uint8_t *end, uint8_t *dst, uin
     uint32_t hsize = field(v2, 0, 32);
     int ls = (int)field(v2, 32, 10), ms = (int)field(v2, 42, 10), ds = (int)field(v2, 52, 10);
     const uint8_t *h = src - 4;   /* the header counts from the magic */
-    if (hsize < 32 || h + hsize > end || n_lit > 0x100000 || (size_t)(dst_end - dst) < n_raw) return 0;
+    if (hsize < 32 || hsize > (size_t)(end - h) || n_lit > 0x100000 || (size_t)(dst_end - dst) < n_raw) return 0;
+    if (ls >= L_STATES || ms >= M_STATES || ds >= D_STATES) return 0;   /* the initial states index the tables */
     /* frequency tables: L, M, D, literals, variable-length coded */
     uint16_t freq[L_SYMS + M_SYMS + D_SYMS + LIT_SYMS];
     const uint8_t *fp = h + 32, *fe = h + hsize;
@@ -127,8 +131,8 @@ static size_t block_v2(const uint8_t *src, const uint8_t *end, uint8_t *dst, uin
         init_val(D_STATES, D_SYMS, freq + L_SYMS + M_SYMS, d_bits, d_base, d_t) ||
         init_lit(LIT_STATES, LIT_SYMS, freq + L_SYMS + M_SYMS + D_SYMS, lit_t)) return 0;
     /* literals */
+    if ((size_t)n_lit_bytes + n_lmd_bytes > (size_t)(end - fe)) return 0;
     const uint8_t *lp = fe, *lend = fe + n_lit_bytes;
-    if (lend + n_lmd_bytes > end) return 0;
     uint8_t *lits = malloc(n_lit + 64);
     if (!lits) return 0;
     BitIn in; const uint8_t *p = lend;
