@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Networking: BSD sockets (TCP, UDP, IPv4 and IPv6), `getaddrinfo` and `getnameinfo`, `poll`, `select`, and kqueue
+  read and write filters on both hosts (`src/net.cpp`: Winsock on Windows, the kernel's sockets on Linux), with a test.
+  `fcntl(F_SETFL, O_NONBLOCK)` and `FIONBIO` work.
 - The LZFSE decoder (asset catalogs) no longer reads out of bounds on damaged data: initial FSE states are checked
   and the bit reader reads only the bytes it uses (found by the fuzzer, which made CI on main fail).
 - arm64 guests start and warm up about twice as fast: dynarmic compiles guest code with half the CPU time

@@ -46,6 +46,12 @@ bool host_map_segment(void *dst, uint64_t len, const std::string &path, uint64_t
 bool host_mem_query(uint64_t a, uint64_t *lo, uint64_t *hi, int *prot);
 int host_pid();
 HCABI A hc_ui(A op, A a, A b, A c, A d, A e); /* ui.cpp */
+/* net.cpp: sockets and kqueue for both hosts */
+HCABI A hc_net(A op, A a, A b, A c, A d, A e);
+HCABI A hc_kqueue(A, A, A, A, A, A);
+HCABI A hc_kevent(A kq, A changes, A nchanges, A events, A nevents, A timeout_ns);
+void net_fd_closed(int fd);   /* every close: a kqueue, or registrations of the descriptor, go */
+A net_sock_io(int fd, uintptr_t s, void *buf, size_t n, bool write);   /* Windows: read/write on a socket descriptor */
 extern DWORD g_tls_self;
 extern bool g_guest_arm;
 

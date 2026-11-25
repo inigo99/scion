@@ -32,11 +32,12 @@ for a in x86_64 arm64; do
   $LD -arch $a -platform_version macos 11.0 11.0 -no_fixup_chains -o $O/hello_$a $W/hello_$a.o $L/libSystem.B.dylib
   $LD -arch $a -platform_version macos 11.0 11.0 -fixup_chains -o $O/hello_chained_$a $W/hello_$a.o $L/libSystem.B.dylib
 done
-# C: signals, Mach, GCD, run-time code, vm_remap, dispatch sources, audio
+# C: signals, Mach, GCD, run-time code, vm_remap, sockets, dispatch sources, audio
 prog mach_signals c/mach_signals.c
 prog gcd c/gcd.c
 prog jit c/jit.c
 prog remap c/remap.c
+prog net c/net.c
 prog sources gcd/sources.c
 prog audio audio/audio.c "-Wno-four-char-constants" "$L/AudioToolbox.dylib"
 # a dylib found through @rpath, with a thread-local variable in the executable

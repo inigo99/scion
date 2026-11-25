@@ -156,11 +156,12 @@ enum { F_DUPFD = 0, F_GETFD = 1, F_SETFD = 2, F_GETFL = 3, F_SETFL = 4, F_DUPFD_
 int fcntl(int fd, int cmd, ...) {
     switch (cmd) {
     case F_DUPFD: case F_DUPFD_CLOEXEC: return dup(fd);
-    case F_GETFD: case F_SETFD: case F_SETFL: return 0;
+    case F_GETFD: case F_SETFD: return 0;
+    case F_SETFL: { va_list ap; va_start(ap, cmd); int fl = va_arg(ap, int); va_end(ap); return ret(H(net, NET_FLAGS, fd, fl)) < 0 ? -1 : 0; }
     case 7: case 8: case 9:                   /* F_GETLK / F_SETLK / F_SETLKW: no advisory locks (ponytail) */
     case 44: case 45: case 48: case 73: case 74: return 0;   /* F_RDADVISE, F_RDAHEAD, F_NOCACHE, F_SETNOSIGPIPE, F_GETNOSIGPIPE: hints */
     case 51: case 85: return fsync(fd);       /* F_FULLFSYNC, F_BARRIERFSYNC */
-    case F_GETFL: return D_O_RDWR;
+    case F_GETFL: return (int)ret(H(net, NET_FLAGS, fd, -1));
     case 50: { /* F_GETPATH */ va_list ap; va_start(ap, cmd); char *buf = va_arg(ap, char *); va_end(ap); return (int)ret(H(realpath, 0, buf, fd)); }
     }
     return fail(D_EINVAL);
@@ -169,6 +170,8 @@ int fcntl(int fd, int cmd, ...) {
 int ioctl(int fd, unsigned long req, ...) {
     va_list ap; va_start(ap, req); void *p = va_arg(ap, void *); va_end(ap);
     if (req == TIOCGETA) { if (!H(isatty, fd)) return fail(D_ENOTTY); memset(p, 0, 72); return 0; }
+    if (req == 0x8004667eul) { int64_t r = ret(H(net, NET_FLAGS, fd, *(int *)p ? D_O_NONBLOCK : 0)); return r < 0 ? -1 : 0; }   /* FIONBIO */
+    if (req == 0x4004667ful) { int64_t r = ret(H(net, NET_NREAD, fd)); if (r < 0) return -1; *(int *)p = (int)r; return 0; }  /* FIONREAD */
     return fail(D_ENOTTY);
 }
 
@@ -427,14 +430,7 @@ int kevent(int kq, const struct dkevent *ch, int nch, struct dkevent *ev, int ne
     return (int)ret(H(kevent, kq, ch, nch, ev, nev, ts ? ts->tv_sec * 1000000000 + ts->tv_nsec : -1));
 }
 
-/* ---------- not supported yet: networking, exec ---------- */
-int socket(int d, int t, int p) { return fail(D_EAFNOSUPPORT); }
-#define NOSOCK(name) int name() { return fail(D_ENOTSOCK); }
-NOSOCK(accept) NOSOCK(bind) NOSOCK(connect) NOSOCK(listen) NOSOCK(shutdown) NOSOCK(getpeername)
-NOSOCK(getsockname) NOSOCK(getsockopt) NOSOCK(setsockopt)
-int getaddrinfo(const char *n, const char *s, const void *h, void **r) { return 8; /* EAI_NONAME */ }
-void freeaddrinfo(void *a) {}
-const char *gai_strerror(int e) { return "name resolution not supported by scion yet"; }
+/* ---------- not supported yet: exec ---------- */
 int execve(const char *p, char *const a[], char *const e[]) { return fail(D_ENOSYS); }
 int sendfile(int fd, int s, off_t o, off_t *len, void *h, int f) { return fail(D_ENOSYS); }
 
@@ -665,11 +661,6 @@ char *realpath(const char *p, char *out) {
 char *realpath_x(const char *p, char *out) __asm__("_realpath$DARWIN_EXTSN");
 char *realpath_x(const char *p, char *out) { return realpath(p, out); }
 int pipe(int fds[2]) { return (int)ret(H(pipe, fds)); }
-int poll(void *fds, unsigned n, int timeout) { /* ponytail: everything is always ready */
-    struct pfd { int fd; short ev, rev; } *p = fds;
-    for (unsigned i = 0; i < n; i++) p[i].rev = p[i].ev & 5;
-    return (int)n;
-}
 #define ENOTSUP_FN(name) int name() { return fail(45); }
 ENOTSUP_FN(fcopyfile) ENOTSUP_FN(fclonefileat)
 /* extended attributes (host: per-file store); position and options are ignored */
@@ -782,7 +773,7 @@ int pause(void) { for (;;) H(sleep, 1000000000); }
 
 /* ---------- processes: not yet ---------- */
 #define NOSPAWN(name) int name() { return fail(D_ENOSYS); }
-NOSPAWN(fork) NOSPAWN(execvp) NOSPAWN(waitpid) NOSPAWN(posix_spawnp) NOSPAWN(posix_spawn) NOSPAWN(socketpair) NOSPAWN(recv) NOSPAWN(send)
+NOSPAWN(fork) NOSPAWN(execvp) NOSPAWN(waitpid) NOSPAWN(posix_spawnp) NOSPAWN(posix_spawn)
 void *sem_open(const char *name, int flags, ...) { fail(D_ENOSYS); return (void *)-1; } /* SEM_FAILED: no named semaphores */
 int posix_spawn_file_actions_init(void *a) { return 0; }
 int posix_spawn_file_actions_destroy(void *a) { return 0; }
@@ -1278,3 +1269,216 @@ int memset_s(void *s, size_t smax, int c, size_t n) { if (!s) return 22; memset(
 /* without Foundation, the main run loop is the main dispatch queue (Swift's async main runs there) */
 void dispatch_main(void);
 void CFRunLoopRun(void) { dispatch_main(); }
+
+/* ---------- sockets and name resolution (the host translates Darwin's values: net.cpp) ---------- */
+typedef uint32_t socklen_t;
+int socket(int d, int t, int p) { return (int)ret(H(net, NET_SOCKET, d, t, p)); }
+int socketpair(int d, int t, int p, int sv[2]) { return (int)ret(H(net, NET_SOCKETPAIR, d, t, p, sv)); }
+int connect(int s, const void *a, socklen_t n) { return (int)ret(H(net, NET_CONNECT, s, a, n)); }
+int bind(int s, const void *a, socklen_t n) { return (int)ret(H(net, NET_BIND, s, a, n)); }
+int listen(int s, int backlog) { return (int)ret(H(net, NET_LISTEN, s, backlog)); }
+int accept(int s, void *a, socklen_t *n) { return (int)ret(H(net, NET_ACCEPT, s, a, n)); }
+int shutdown(int s, int how) { return (int)ret(H(net, NET_SHUTDOWN, s, how)); }
+int getsockopt(int s, int l, int o, void *v, socklen_t *n) { return (int)ret(H(net, NET_GETSOCKOPT, s, l, o, v, n)); }
+int setsockopt(int s, int l, int o, const void *v, socklen_t n) { return (int)ret(H(net, NET_SETSOCKOPT, s, l, o, v, n)); }
+int getsockname(int s, void *a, socklen_t *n) { return (int)ret(H(net, NET_SOCKNAME, s, a, n, 0)); }
+int getpeername(int s, void *a, socklen_t *n) { return (int)ret(H(net, NET_SOCKNAME, s, a, n, 1)); }
+ssize_t sendto(int s, const void *b, size_t n, int f, const void *a, socklen_t al) {
+    struct dnetio io = {(uint64_t)b, n, f, al, (uint64_t)a};
+    return ret(H(net, NET_SEND, s, &io));
+}
+ssize_t recvfrom(int s, void *b, size_t n, int f, void *a, socklen_t *al) {
+    struct dnetio io = {(uint64_t)b, n, f, a && al ? *al : 0, a && al ? (uint64_t)a : 0};
+    ssize_t r = ret(H(net, NET_RECV, s, &io));
+    if (r >= 0 && a && al) *al = io.addrlen;
+    return r;
+}
+ssize_t send(int s, const void *b, size_t n, int f) { return sendto(s, b, n, f, 0, 0); }
+ssize_t recv(int s, void *b, size_t n, int f) { return recvfrom(s, b, n, f, 0, 0); }
+struct iovec { void *base; size_t len; };
+struct msghdr { void *name; socklen_t namelen; struct iovec *iov; int iovlen; void *control; socklen_t controllen; int flags; };
+/* gathered into one buffer (ponytail: no control messages, so no descriptor passing) */
+ssize_t sendmsg(int s, const struct msghdr *m, int f) {
+    size_t n = 0; for (int i = 0; i < m->iovlen; i++) n += m->iov[i].len;
+    char *b = malloc(n ? n : 1), *p = b; if (!b) return fail(D_ENOMEM);
+    for (int i = 0; i < m->iovlen; i++) { memcpy(p, m->iov[i].base, m->iov[i].len); p += m->iov[i].len; }
+    ssize_t r = sendto(s, b, n, f, m->name, m->name ? m->namelen : 0);
+    free(b); return r;
+}
+ssize_t recvmsg(int s, struct msghdr *m, int f) {
+    size_t n = 0; for (int i = 0; i < m->iovlen; i++) n += m->iov[i].len;
+    char *b = malloc(n ? n : 1); if (!b) return fail(D_ENOMEM);
+    socklen_t al = m->name ? m->namelen : 0;
+    ssize_t r = recvfrom(s, b, n, f, m->name, m->name ? &al : 0);
+    if (r >= 0) {
+        size_t left = (size_t)r; char *p = b;
+        for (int i = 0; i < m->iovlen && left; i++) { size_t k = m->iov[i].len < left ? m->iov[i].len : left; memcpy(m->iov[i].base, p, k); p += k; left -= k; }
+        if (m->name) m->namelen = al;
+        m->controllen = 0; m->flags = 0;
+    }
+    free(b); return r;
+}
+/* the $NOCANCEL and $UNIX2003 names some binaries import */
+int accept_nc(int s, void *a, socklen_t *n) __asm__("_accept$NOCANCEL");
+int accept_nc(int s, void *a, socklen_t *n) { return accept(s, a, n); }
+int connect_nc(int s, const void *a, socklen_t n) __asm__("_connect$NOCANCEL");
+int connect_nc(int s, const void *a, socklen_t n) { return connect(s, a, n); }
+ssize_t sendto_nc(int s, const void *b, size_t n, int f, const void *a, socklen_t al) __asm__("_sendto$NOCANCEL");
+ssize_t sendto_nc(int s, const void *b, size_t n, int f, const void *a, socklen_t al) { return sendto(s, b, n, f, a, al); }
+ssize_t recvfrom_nc(int s, void *b, size_t n, int f, void *a, socklen_t *al) __asm__("_recvfrom$NOCANCEL");
+ssize_t recvfrom_nc(int s, void *b, size_t n, int f, void *a, socklen_t *al) { return recvfrom(s, b, n, f, a, al); }
+ssize_t sendmsg_nc(int s, const struct msghdr *m, int f) __asm__("_sendmsg$NOCANCEL");
+ssize_t sendmsg_nc(int s, const struct msghdr *m, int f) { return sendmsg(s, m, f); }
+ssize_t recvmsg_nc(int s, struct msghdr *m, int f) __asm__("_recvmsg$NOCANCEL");
+ssize_t recvmsg_nc(int s, struct msghdr *m, int f) { return recvmsg(s, m, f); }
+
+int poll(struct dpollfd *fds, unsigned n, int timeout) {
+    return (int)ret(H(net, NET_POLL, fds, n, timeout < 0 ? -1 : (int64_t)timeout * 1000000));
+}
+int poll_nc(struct dpollfd *fds, unsigned n, int timeout) __asm__("_poll$NOCANCEL");
+int poll_nc(struct dpollfd *fds, unsigned n, int timeout) { return poll(fds, n, timeout); }
+/* select on poll: fd_set is 1024 bits */
+typedef struct { int32_t bits[32]; } fd_set_;
+static int fdisset(const fd_set_ *s, int fd) { return s && (s->bits[fd / 32] >> (fd % 32)) & 1; }
+int select(int nfds, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) {
+    if (nfds < 0 || nfds > 1024) return fail(D_EINVAL);
+    struct dpollfd p[1024]; int n = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        short ev = (fdisset(r, fd) ? 1 : 0) | (fdisset(w, fd) ? 4 : 0) | (fdisset(x, fd) ? 2 : 0);
+        if (ev) { p[n].fd = fd; p[n].events = ev; p[n].revents = 0; n++; }
+    }
+    int64_t t = tv ? tv->tv_sec * 1000000000 + (int64_t)tv->tv_usec * 1000 : -1;
+    int64_t got = ret(H(net, NET_POLL, p, n, t));
+    if (got < 0) return -1;
+    if (r) memset(r, 0, (size_t)(nfds + 7) / 8);
+    if (w) memset(w, 0, (size_t)(nfds + 7) / 8);
+    if (x) memset(x, 0, (size_t)(nfds + 7) / 8);
+    int c = 0;
+    for (int i = 0; i < n; i++) {
+        int fd = p[i].fd, rv = p[i].revents;
+        if (rv & 0x20) return fail(D_EBADF);
+        if (r && (p[i].events & 1) && (rv & (1 | 0x10 | 8))) { r->bits[fd / 32] |= 1 << (fd % 32); c++; }
+        if (w && (p[i].events & 4) && (rv & (4 | 0x10 | 8))) { w->bits[fd / 32] |= 1 << (fd % 32); c++; }
+        if (x && (p[i].events & 2) && (rv & 2)) { x->bits[fd / 32] |= 1 << (fd % 32); c++; }
+    }
+    return c;
+}
+int select_1050(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) __asm__("_select$1050");
+int select_1050(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) { return select(n, r, w, x, tv); }
+int select_x(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) __asm__("_select$DARWIN_EXTSN");
+int select_x(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) { return select(n, r, w, x, tv); }
+int select_xnc(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) __asm__("_select$DARWIN_EXTSN$NOCANCEL");
+int select_xnc(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, struct timeval *tv) { return select(n, r, w, x, tv); }
+int pselect(int n, fd_set_ *r, fd_set_ *w, fd_set_ *x, const struct timespec *ts, const void *mask) {
+    struct timeval tv; if (ts) { tv.tv_sec = ts->tv_sec; tv.tv_usec = (int32_t)(ts->tv_nsec / 1000); }
+    return select(n, r, w, x, ts ? &tv : 0);
+}
+
+/* getaddrinfo: the host resolves; the list is built here, one allocation per entry (freeaddrinfo frees each) */
+struct addrinfo { int flags, family, socktype, protocol; socklen_t addrlen; char *canonname; void *addr; struct addrinfo *next; };
+void freeaddrinfo(struct addrinfo *a);
+int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+    if (!node && !service) return 8;   /* EAI_NONAME */
+    struct dnetai found[64]; char canon[256] = {0};
+    struct dnethints h = {0x600 /* AI_DEFAULT */, 0, 0, 0, (uint64_t)canon, sizeof canon};
+    if (hints) { h.flags = hints->flags; h.family = hints->family; h.socktype = hints->socktype; h.protocol = hints->protocol; }
+    int64_t n = H(net, NET_RESOLVE, node, service, &h, found, 64);
+    if (n < 0) return n <= -1000 ? (int)(-n - 1000) : 11;   /* EAI_x, or EAI_SYSTEM */
+    struct addrinfo *head = 0, **tail = &head;
+    for (int64_t i = 0; i < n; i++) {
+        struct addrinfo *a = malloc(sizeof *a + 28);
+        if (!a) { freeaddrinfo(head); return 6; }   /* EAI_MEMORY */
+        memset(a, 0, sizeof *a);
+        a->flags = h.flags; a->family = found[i].family; a->socktype = found[i].socktype; a->protocol = found[i].protocol;
+        a->addrlen = found[i].addrlen; a->addr = a + 1; memcpy(a->addr, found[i].addr, 28);
+        if (i == 0 && (h.flags & 2) && canon[0]) { a->canonname = malloc(strlen(canon) + 1); if (a->canonname) strcpy(a->canonname, canon); }
+        *tail = a; tail = &a->next;
+    }
+    *res = head;
+    return 0;
+}
+void freeaddrinfo(struct addrinfo *a) { while (a) { struct addrinfo *n = a->next; free(a->canonname); free(a); a = n; } }
+const char *gai_strerror(int e) {
+    switch (e) {
+    case 2: return "Temporary failure in name resolution";
+    case 3: return "Invalid value for ai_flags";
+    case 4: return "Non-recoverable failure in name resolution";
+    case 5: return "ai_family not supported";
+    case 6: return "Memory allocation failure";
+    case 8: return "nodename nor servname provided, or not known";
+    case 9: return "servname not supported for ai_socktype";
+    case 10: return "ai_socktype not supported";
+    case 11: return "System error";
+    }
+    return "Unknown error";
+}
+int getnameinfo(const void *sa, socklen_t salen, char *host, socklen_t hostlen, char *serv, socklen_t servlen, int flags) {
+    struct dnetni a = {(uint64_t)sa, salen, flags, (uint64_t)host, host ? hostlen : 0, (uint64_t)serv, serv ? servlen : 0};
+    return (int)H(net, NET_NAMEINFO, &a);
+}
+
+/* textual addresses */
+static int hexval(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static int pton4(const char *s, unsigned char *out) {
+    for (int i = 0; i < 4; i++) {
+        int v = 0, d = 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s++ - '0'); if (++d > 3 || v > 255) return 0; }
+        if (!d || (i < 3 && *s++ != '.')) return 0;
+        out[i] = (unsigned char)v;
+    }
+    return *s == 0;
+}
+static int pton6(const char *s, unsigned char *out) {
+    unsigned char b[16] = {0}; int n = 0, gap = -1;
+    if (s[0] == ':' && s[1] == ':') { gap = 0; s += 2; }
+    while (*s && n < 16) {
+        const char *start = s; int v = 0, d = 0, h;
+        while ((h = hexval(*s)) >= 0) { v = v * 16 + h; s++; if (++d > 4) return 0; }
+        if (*s == '.') { if (n > 12 || !pton4(start, b + n)) return 0; n += 4; s = start + strlen(start); break; }
+        if (!d) return 0;
+        b[n++] = (unsigned char)(v >> 8); b[n++] = (unsigned char)v;
+        if (*s == ':') { s++; if (*s == ':') { if (gap >= 0) return 0; gap = n; s++; } else if (!*s) return 0; }
+        else if (*s) return 0;
+    }
+    if (*s || (gap < 0 && n != 16)) return 0;
+    memset(out, 0, 16);
+    if (gap < 0) memcpy(out, b, 16);
+    else { memcpy(out, b, (size_t)gap); memcpy(out + 16 - (n - gap), b + gap, (size_t)(n - gap)); }
+    return 1;
+}
+int inet_pton(int af, const char *s, void *dst) {
+    if (af == 2) return pton4(s, dst);
+    if (af == 30) return pton6(s, dst);
+    return fail(D_EAFNOSUPPORT);
+}
+const char *inet_ntop(int af, const void *src, char *dst, socklen_t size) {
+    char t[64]; const unsigned char *a = src;
+    if (af == 2) snprintf(t, sizeof t, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+    else if (af == 30) {
+        int best = -1, bestlen = 0;   /* the longest run of zero groups becomes "::" */
+        for (int i = 0; i < 8; i++) {
+            int j = i; while (j < 8 && !a[2 * j] && !a[2 * j + 1]) j++;
+            if (j - i > bestlen && j - i > 1) { best = i; bestlen = j - i; }
+            if (j > i) i = j;
+        }
+        char *p = t;
+        if (best == 0 && bestlen == 5 && a[10] == 0xff && a[11] == 0xff) { snprintf(t, sizeof t, "::ffff:%u.%u.%u.%u", a[12], a[13], a[14], a[15]); goto out; }
+        for (int i = 0; i < 8; i++) {
+            if (i == best) { *p++ = ':'; if (i == 0) *p++ = ':'; i += bestlen - 1; continue; }
+            p += snprintf(p, 8, "%x", a[2 * i] << 8 | a[2 * i + 1]);
+            if (i < 7) *p++ = ':';
+        }
+        *p = 0;
+    } else { fail(D_EAFNOSUPPORT); return 0; }
+out:
+    if (strlen(t) + 1 > size) { fail(28); return 0; }   /* ENOSPC */
+    strcpy(dst, t);
+    return dst;
+}
+uint32_t inet_addr(const char *s) { uint32_t a; return pton4(s, (unsigned char *)&a) ? a : 0xffffffffu; }
+int inet_aton(const char *s, uint32_t *a) { return pton4(s, (unsigned char *)a); }
+char *inet_ntoa(uint32_t a) { static char b[16]; inet_ntop(2, &a, b, sizeof b); return b; }
+const unsigned char in6addr_any[16] = {0};
+const unsigned char in6addr_loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+/* FD_SET and friends check the descriptor first */
+int __darwin_check_fd_set_overflow(int fd, const void *set, int unlimited) { return fd >= 0 && (unlimited || fd < 1024); }
