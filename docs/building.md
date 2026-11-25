@@ -57,13 +57,14 @@ src/build_metal.sh             # -> bin/scion-metal.dll, bin/scion-msl.dll
 ```
 
 For the native Linux host, `scion-metal.so` builds in minutes against the system's LLVM 20 and Vulkan headers (no
-LLVM build of your own). The MSL compiler (`scion-msl.so`, a patched Clang) is not built for Linux yet, so Metal apps
-that compile shaders from source at run time still need Wine there.
+LLVM build of your own). The MSL compiler, `scion-msl.so`, links the patched Clang libraries, built against that same
+LLVM (about 20 minutes on two cores):
 
 ```sh
-sudo apt install llvm-20-dev libvulkan-dev
-scripts/fetch-deps.sh           # Indium
-src/build_metal.sh --linux      # -> bin/scion-metal.so
+sudo apt install llvm-20-dev libvulkan-dev libzstd-dev
+scripts/fetch-deps.sh --metal   # Indium, and the LLVM/Clang 20.1.2 sources with patches/clang-msl.patch
+scripts/build-clang-linux.sh    # the patched Clang libraries -> deps/llvm20/build-linux
+src/build_metal.sh --linux      # -> bin/scion-metal.so, bin/scion-msl.so
 ```
 
 ## 5. Swift (optional)
