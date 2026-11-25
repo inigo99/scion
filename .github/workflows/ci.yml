@@ -150,7 +150,7 @@ jobs:
         with:
           name: scion-build
       - run: tar xf build.tar
-      - name: Fuzz (1 minute per reader; longer runs: tests/fuzz/run.sh SECONDS)
+      - name: Fuzz (1 minute per reader)
         run: tests/fuzz/run.sh 60
       - name: Keep the findings
         if: failure()
