@@ -18,20 +18,16 @@ furthest.
 | Swift | The Swift runtime and overlays; SwiftFormat (built by Apple) runs; Hex Fiend and Itsycal run. |
 | Concurrency and SwiftUI | Swift Concurrency; Scion's own Combine and SwiftUI with the ABI of Apple's, enough for Reminders MenuBar. |
 | Open source | Renamed Scion, MIT-licensed, English documentation, a reproducible build and test suite. |
+| CI and releases | Every pull request is built and tested on Wine, the Linux host and Windows, with the file readers fuzzed; `v*` tags publish releases. |
+| Linux | A native Linux host (no Wine): command-line programs, AppKit and SwiftUI apps and Metal, x86_64 and arm64. |
+| Fast arm64 | dynarmic compiles twice as fast; threads share translated code, and it is kept on disk, so an arm64 app starts about twice as fast from its second run. |
 
 ## Next
 
 These are the areas where work has the most effect. Each is self-contained enough for one contributor to own.
 
-**Make it easy to work on**
-- CI that builds every layer (core, Metal host, Swift) and runs the suite on each pull request, and publishes releases.
-- A cache for translated arm64 code, so arm64 apps start fast on the second run.
-
-**Linux**
-- A native Linux host (no Wine), `src/host_linux.cpp` and `src/ui_linux.cpp`: command-line programs and AppKit/SwiftUI
-  apps and Metal run, x86_64 and arm64, with windows, input, controllers and audio on SDL2 and Metal on Vulkan
-  (`scion-metal.so`, `scion-msl.so`), `scion install` as freedesktop.org entries, a release tarball. Next: a menu
-  bar, status items in the tray (StatusNotifierItem), HiDPI, a Flatpak or AppImage.
+**Linux** (`src/host_linux.cpp`, `src/ui_linux.cpp`)
+- A menu bar, status items in the tray (StatusNotifierItem), HiDPI, a Flatpak or AppImage.
 
 **Run more apps**
 - Networking: BSD sockets on Winsock, then `URLSession` (most apps need it, even if only for update checks).

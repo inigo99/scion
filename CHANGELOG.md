@@ -11,7 +11,8 @@
 - arm64 translated code is kept on disk for the next run of the same program (`%LOCALAPPDATA%\scion\jit`,
   `~/.cache/scion/jit`, 512 MB at most, safe to delete): from the second run Biome, esbuild and SwiftFormat start
   45-55 % faster with 50-60 % less CPU, and small programs use 40 % less; the first run spends a little more to save
-  it. `SCION_JIT_CACHE=nodisk` keeps it in memory only.
+  it. `SCION_JIT_CACHE=nodisk` keeps it in memory only. The files are mapped rather than read, and processes of the
+  same program that run at the same time add up what they save instead of overwriting it.
 - Windows: dylibs linked at address 0 load at the same address on every run instead of a random one.
 
 ## 0.2.0 (2026-11-25)
