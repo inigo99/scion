@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-25)
 
 - **Native Linux host (preview)**, no Wine: `scion` for Linux runs command-line programs, AppKit and SwiftUI apps and
   Metal, x86_64 and arm64, with windows, input, controllers and audio through SDL2 and Metal on Vulkan
@@ -11,6 +11,7 @@
   (`+[NSURL fileURLWithPathComponents:]` raised).
 - The core build is free of compiler warnings; `src/foundation/swift.m` is split into `calendar.m` and `url.m`.
 - CI: a Windows test job, a manual heavy build (Metal host and Swift) and a release workflow on `v*` tags.
+- CI: actions on Node 24; test and LLVM builds without warnings.
 
 ## 0.1.0 (2026-11-24)
 
