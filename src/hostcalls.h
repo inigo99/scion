@@ -159,9 +159,10 @@ struct dhttpreq {
     uint64_t method, url, headers;  /* C strings; headers: "Name: value\r\n" lines */
     uint64_t body, body_len;
     int64_t timeout_ms;             /* no progress for that long: NSURLErrorTimedOut */
-    int32_t status, pad;            /* out (SEND): the status, the headers ("Name: value\r\n" lines, cut at the */
+    int32_t status, flags;          /* out (SEND): the status, the headers ("Name: value\r\n" lines, cut at the */
     uint64_t resp_headers, resp_headers_cap, final_url, final_url_cap;   /* capacity), the URL after redirects */
-};
+};                                  /* flags (in, NEW): NET_HTTP_* below */
+enum { NET_HTTP_NO_REDIRECT = 1 };  /* a redirect is the response (Foundation follows it, for cookies and its delegate) */
 
 /* Darwin ABI values used by both sides. */
 enum {

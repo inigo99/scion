@@ -35,6 +35,7 @@ struct Http : std::enable_shared_from_this<Http> {
     std::string method, url, headers, body;
     int64_t timeout_ms = 60000;
     std::atomic<bool> cancelled{false};
+    bool no_redirect = false;
     std::string got, resp_headers;   /* body received and not read yet (from `off`), the final response's headers */
     size_t off = 0;
     bool headers_done = false, done = false;
@@ -214,6 +215,9 @@ static A http_send(Http *h, dhttpreq *q) {
     WinHttpSetTimeouts(r, t, t, t, t);
     DWORD dec = WINHTTP_DECOMPRESSION_FLAG_ALL;   /* Windows 8.1 and newer; without it bodies come as sent */
     WinHttpSetOption(r, WINHTTP_OPTION_DECOMPRESSION, &dec, sizeof dec);
+    DWORD nocookies = WINHTTP_DISABLE_COOKIES;   /* Foundation keeps the cookies */
+    WinHttpSetOption(r, WINHTTP_OPTION_DISABLE_FEATURE, &nocookies, sizeof nocookies);
+    if (h->no_redirect) { DWORD never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER; WinHttpSetOption(r, WINHTTP_OPTION_REDIRECT_POLICY, &never, sizeof never); }
     std::thread(work, h->shared_from_this(), r).detach();
     std::unique_lock<std::mutex> l(h->m);
     if (!h->cv.wait_for(l, std::chrono::milliseconds(h->timeout_ms), [h] { return h->headers_done || h->done || h->cancelled; }))
@@ -271,7 +275,7 @@ static size_t on_header(char *p, size_t s, size_t n, void *u) {
         std::string lower = h->resp_headers;
         for (char &c : lower) c = (char)tolower((unsigned char)c);
         bool redirect = code >= 300 && code < 400 && code != 304 && (lower.find("\nlocation:") != std::string::npos || lower.compare(0, 9, "location:") == 0);
-        if (code >= 200 && !redirect) h->headers_done = true;   /* the final response's */
+        if (code >= 200 && (!redirect || h->no_redirect)) h->headers_done = true;   /* the final response's */
     } else {
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
         h->resp_headers += line + "\r\n";
@@ -320,7 +324,7 @@ static A http_send(Http *h, dhttpreq *q) {
     curl_easy_setopt(c, CURLOPT_URL, h->url.c_str());
     curl_easy_setopt(c, CURLOPT_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, h->no_redirect ? 0L : 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 16L);
     curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");   /* every encoding libcurl decodes */
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
@@ -392,6 +396,7 @@ A http_op(A op, A a, A b, A c) {
         if (q->headers) h->headers = GP<char>(q->headers);
         if (q->body && q->body_len) h->body.assign(GP<char>(q->body), (size_t)q->body_len);
         if (q->timeout_ms > 0) h->timeout_ms = q->timeout_ms;
+        h->no_redirect = (q->flags & NET_HTTP_NO_REDIRECT) != 0;
         std::lock_guard<std::mutex> l(g_m);
         g_http[g_next] = h;
         return g_next++;

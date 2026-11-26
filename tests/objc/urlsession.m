@@ -1,6 +1,6 @@
 /* URLSession, NSURLConnection and NSData/NSString URL loading against an HTTP server on the loopback interface (in a
- * thread of this program): completion handlers, redirects, uploads, downloads, a delegate, cancel, timeouts and
- * connection errors. Prints URLSESSION OK. */
+ * thread of this program): completion handlers, redirects, uploads, downloads, a delegate, cancel, timeouts,
+ * connection errors, cookies, HTTP authentication and the redirect delegate. Prints URLSESSION OK. */
 #import <Foundation/Foundation.h>
 #include <arpa/inet.h>
 #include <dispatch/dispatch.h>
@@ -13,7 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
+#define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: %s ", __LINE__, #c); printf("" __VA_ARGS__); printf("\n"); exit(1); } } while (0)
 enum { BIG = 200000 };
 
 static void reply(int c, const char *status, const char *extra, const void *body, size_t n) {
@@ -42,10 +42,10 @@ static void *serve(void *arg) {
     else if (!strcmp(path, "/missing")) reply(c, "404 Not Found", "Content-Type: text/html\r\n", "<p>no</p>", 9);
     else if (!strcmp(path, "/echo")) {
         /* the body back, with the method and the headers the client sent */
-        const char *ua = strcasestr(req, "\r\nUser-Agent:"), *x = strcasestr(req, "\r\nX-Custom:");
-        char extra[600];
-        snprintf(extra, sizeof extra, "X-Method: %s\r\nX-Has-UA: %d\r\nX-Custom-Seen: %.*s\r\n", method, ua != NULL,
-                 x ? (int)strcspn(x + 11, "\r") : 0, x ? x + 11 : "");
+        const char *ua = strcasestr(req, "\r\nUser-Agent:"), *x = strcasestr(req, "\r\nX-Custom:"), *ck = strcasestr(req, "\r\nCookie:");
+        char extra[900];
+        snprintf(extra, sizeof extra, "X-Method: %s\r\nX-Has-UA: %d\r\nX-Custom-Seen: %.*s\r\nX-Cookie-Seen: %.*s\r\n", method, ua != NULL,
+                 x ? (int)strcspn(x + 11, "\r") : 0, x ? x + 11 : "", ck ? (int)strcspn(ck + 9, "\r") : 0, ck ? ck + 9 : "");
         reply(c, "200 OK", extra, body, have);
     } else if (!strcmp(path, "/big")) {
         char *b = malloc(BIG);
@@ -53,6 +53,13 @@ static void *serve(void *arg) {
         reply(c, "200 OK", "Content-Type: application/octet-stream\r\n", b, BIG);
         free(b);
     } else if (!strcmp(path, "/slow")) { sleep(4); reply(c, "200 OK", "", "late", 4); }
+    else if (!strcmp(path, "/setcookie"))
+        reply(c, "200 OK", "Set-Cookie: session=abc123; Path=/\r\nSet-Cookie: theme=dark; Path=/; Expires=Wed, 21 Oct 2099 07:28:00 GMT\r\n", "ok", 2);
+    else if (!strcmp(path, "/login")) reply(c, "302 Found", "Set-Cookie: auth=yes; Path=/; HttpOnly\r\nLocation: /echo\r\n", "", 0);
+    else if (!strcmp(path, "/auth")) {
+        if (strstr(req, "\r\nAuthorization: Basic dXNlcjpzZWNyZXQ=\r\n")) reply(c, "200 OK", "", "welcome", 7);   /* user:secret */
+        else reply(c, "401 Unauthorized", "WWW-Authenticate: Basic realm=\"scion\"\r\n", "no", 2);
+    }
     else reply(c, "400 Bad Request", "", "", 0);
     free(body);
     close(c);
@@ -77,6 +84,34 @@ static int listener(int *port) {
     CHECK(bind(s, (struct sockaddr *)&a, sizeof a) == 0 && getsockname(s, (struct sockaddr *)&a, &l) == 0);
     *port = ntohs(a.sin_port);
     return s;
+}
+
+static NSString *text(NSData *d) { return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]; }
+/* answers authentication challenges with user:secret (once), and stops redirects when asked */
+@interface Gate : NSObject <NSURLSessionTaskDelegate>
+@property int challenges; @property BOOL stopRedirects; @property NSString *realm;
+@end
+@implementation Gate
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didReceiveChallenge:(NSURLAuthenticationChallenge *)c
+    completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))h {
+    self.challenges++; self.realm = c.protectionSpace.realm;
+    if (c.previousFailureCount) { h(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil); return; }
+    h(NSURLSessionAuthChallengeUseCredential, [NSURLCredential credentialWithUser:@"user" password:@"secret" persistence:NSURLCredentialPersistenceNone]);
+}
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t willPerformHTTPRedirection:(NSHTTPURLResponse *)r newRequest:(NSURLRequest *)req
+    completionHandler:(void (^)(NSURLRequest *))h { h(self.stopRedirects ? nil : req); }
+@end
+/* a data task on a session, waited for */
+static NSData *fetch_on(NSURLSession *ses, NSURLRequest *r, NSHTTPURLResponse **resp, NSError **err) {
+    __block NSData *d; __block NSURLResponse *rs; __block NSError *e;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [[ses dataTaskWithRequest:r completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        d = data; rs = response; e = error; dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (resp) *resp = (NSHTTPURLResponse *)rs;
+    if (err) *err = e;
+    return d;
 }
 
 @interface Collector : NSObject <NSURLSessionDataDelegate>
@@ -192,6 +227,48 @@ int main(void) {
         CHECK(e.code == NSURLErrorCannotConnectToHost && !r);
         fetch([NSURLRequest requestWithURL:[NSURL URLWithString:@"gopher://127.0.0.1/"]], &r, &e);
         CHECK(e.code == NSURLErrorUnsupportedURL);
+
+        /* cookies: kept from responses (also from a redirect), sent back, not shared with an ephemeral session */
+        NSHTTPCookieStorage *jar = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+        for (NSHTTPCookie *k in [jar cookies]) [jar deleteCookie:k];
+        fetch([NSURLRequest requestWithURL:U(@"/setcookie")], &r, &e);
+        NSArray *kept = [jar cookiesForURL:U(@"/")];
+        CHECK(!e && kept.count == 2, "cookies kept: %lu", (unsigned long)kept.count);
+        NSHTTPCookie *theme = nil;
+        for (NSHTTPCookie *k in kept) if ([k.name isEqualToString:@"theme"]) theme = k;
+        CHECK(theme && [theme.value isEqualToString:@"dark"] && !theme.sessionOnly && [theme.expiresDate timeIntervalSince1970] > 4000000000.0, "lasting cookie");
+        fetch([NSURLRequest requestWithURL:U(@"/echo")], &r, &e);
+        NSString *seen = [r valueForHTTPHeaderField:@"X-Cookie-Seen"];
+        CHECK([seen containsString:@"session=abc123"] && [seen containsString:@"theme=dark"], "cookies sent: %s", seen.UTF8String);
+        NSMutableURLRequest *login = [NSMutableURLRequest requestWithURL:U(@"/login")];
+        login.HTTPMethod = @"POST"; login.HTTPBody = [@"user=x" dataUsingEncoding:NSUTF8StringEncoding];
+        fetch(login, &r, &e);
+        seen = [r valueForHTTPHeaderField:@"X-Cookie-Seen"];
+        CHECK(!e && [r.URL.path isEqualToString:@"/echo"] && [[r valueForHTTPHeaderField:@"X-Method"] isEqualToString:@"GET"] && [seen containsString:@"auth=yes"],
+              "POST, 302 with a cookie, GET: %s %s", [[r valueForHTTPHeaderField:@"X-Method"] UTF8String], seen.UTF8String);
+        NSURLSession *eph = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]];
+        fetch_on(eph, [NSURLRequest requestWithURL:U(@"/echo")], &r, &e);
+        CHECK([[r valueForHTTPHeaderField:@"X-Cookie-Seen"] length] == 0, "an ephemeral session has its own cookies");
+        NSMutableURLRequest *nocookies = [NSMutableURLRequest requestWithURL:U(@"/echo")]; [nocookies setHTTPShouldHandleCookies:NO];
+        fetch(nocookies, &r, &e);
+        CHECK([[r valueForHTTPHeaderField:@"X-Cookie-Seen"] length] == 0, "HTTPShouldHandleCookies NO");
+
+        /* authentication: the delegate answers a 401; without one the 401 is the response */
+        Gate *gate = [Gate new];
+        NSURLSession *gs = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration] delegate:gate delegateQueue:nil];
+        d = fetch_on(gs, [NSURLRequest requestWithURL:U(@"/auth")], &r, &e);
+        CHECK(!e && r.statusCode == 200 && [text(d) isEqualToString:@"welcome"] && gate.challenges == 1 && [gate.realm isEqualToString:@"scion"],
+              "challenge answered: %ld, %d challenges", (long)r.statusCode, gate.challenges);
+        d = fetch([NSURLRequest requestWithURL:U(@"/auth")], &r, &e);
+        CHECK(!e && r.statusCode == 401, "no credential: 401");
+        NSURLProtectionSpace *space = [[NSURLProtectionSpace alloc] initWithHost:@"127.0.0.1" port:port protocol:@"http" realm:@"scion" authenticationMethod:NSURLAuthenticationMethodHTTPBasic];
+        [[NSURLCredentialStorage sharedCredentialStorage] setDefaultCredential:[NSURLCredential credentialWithUser:@"user" password:@"secret" persistence:NSURLCredentialPersistenceForSession] forProtectionSpace:space];
+        d = fetch([NSURLRequest requestWithURL:U(@"/auth")], &r, &e);
+        CHECK(!e && r.statusCode == 200, "the stored default credential: %ld", (long)r.statusCode);
+        /* the redirect delegate can stop a redirect: the 302 is the response */
+        gate.stopRedirects = YES;
+        fetch_on(gs, [NSURLRequest requestWithURL:U(@"/redirect")], &r, &e);
+        CHECK(!e && r.statusCode == 302 && [[r valueForHTTPHeaderField:@"Location"] isEqualToString:@"/hello"], "redirect stopped: %ld", (long)r.statusCode);
 
         /* the synchronous ways */
         CHECK([[NSString stringWithContentsOfURL:U(@"/hello") encoding:NSUTF8StringEncoding error:NULL] isEqualToString:@"hello"]);
