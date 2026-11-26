@@ -37,8 +37,9 @@ These are the areas where work has the most effect. Each is self-contained enoug
   undo and rich-text editing commands in `NSTextView`. CoreText layout and styled text are there.
 - CoreAnimation layers beyond Metal presentation; CoreImage basics.
 - AVFoundation playback; audio input.
-- More of SwiftUI: animations and transitions, custom `Layout`s, toolbars, more modifiers. Navigation and grids are
-  there.
+- More of SwiftUI: custom `Layout`s, toolbars, more modifiers; the macOS 14 animation API (`CustomAnimation`,
+  `Transition`, `PhaseAnimator`, `KeyframeAnimator`) and animatable shapes. Navigation, grids, animations and
+  transitions are there.
 
 **Graphics**
 - Metal ray tracing (`VK_KHR_ray_tracing_pipeline`), mesh shaders (`VK_EXT_mesh_shader`), `simdgroup_matrix` on

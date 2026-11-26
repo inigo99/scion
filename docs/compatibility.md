@@ -59,7 +59,9 @@ If you get another app running, please add it here (and, if it can be fetched fr
   CoreGraphics/Foundation overlays, Combine, and a SwiftUI that covers common views, stacks, lists, state and
   bindings, presentations, `MenuBarExtra` and `Settings`, navigation (`NavigationStack` with paths and
   `navigationDestination`, `NavigationLink`, `NavigationSplitView`, `NavigationView`, titles as the window's title) and
-  grids (`Grid`, `GridRow`, `LazyVGrid`, `LazyHGrid`, lazy stacks). Scion answers availability checks as macOS 14.6.
+  grids (`Grid`, `GridRow`, `LazyVGrid`, `LazyHGrid`, lazy stacks), animations (`withAnimation`, `animation(_:value:)`,
+  curves, springs, delays and repeats; frames, opacity, rotation and scale move between states) and transitions
+  (opacity, move, slide, scale, offset, push, asymmetric, combined). Scion answers availability checks as macOS 14.6.
 - **Input and sound:** keyboard, mouse, XInput controllers with rumble (GameController, CoreHaptics), raw input
   (`GCKeyboard`, `GCMouse`), audio output (AudioUnit, AudioQueue).
 

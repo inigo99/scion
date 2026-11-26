@@ -38,6 +38,11 @@ protocol _MWModifier {
 }
 
 func _mwResolve<V: View>(_ view: V, _ c: _MWContext) -> [_MWNode] {
+    let nodes = _mwResolveNodes(view, c)
+    for n in nodes where n.id == nil { n.id = c.path }   // (the innermost view's path: resolution goes outwards)
+    return nodes
+}
+private func _mwResolveNodes<V: View>(_ view: V, _ c: _MWContext) -> [_MWNode] {
     if _mwTraceResolve { fputs("[resolve] \(c.path) \(V.self)\n".prefix(300) + "\n", stderr) }
     if let r = view as? _MWResolvable { return r._mwNodes(c) }
     if let r = view as? any NSViewRepresentable { return _mwRepresent(r, c) }
@@ -198,7 +203,24 @@ class _MWNode {
     var isHidden = false
     var traits: [String: Any] = [:]  // tabItem, listRowInsets...
     var alignment = Alignment.center
+    /// the path of the view that made the node: an animation matches the nodes of two trees by it
+    var id: String?
+    /// a transition in progress (Animation.swift)
+    var fx: _MWFxState?
+    /// an animated node's own values (opacity, rotation...) as it was made, while an animation changes them
+    var animTarget: [CGFloat]?
     init(_ children: [_MWNode] = []) { self.children = children }
+    /// draws the node, with its transition if it has one
+    final func render(_ g: CGContext) {
+        guard let f = fx else { draw(g); return }
+        guard f.alpha > 0.001 else { return }
+        let ax = frame.minX + f.anchor.x * frame.width, ay = frame.minY + f.anchor.y * frame.height
+        CGContextSaveGState(g)
+        if f.alpha < 0.999 { CGContextSetAlpha(g, f.alpha) }
+        CGContextTranslateCTM(g, ax + f.dx, ay + f.dy); CGContextScaleCTM(g, max(f.sx, 0.001), max(f.sy, 0.001)); CGContextTranslateCTM(g, -ax, -ay)
+        draw(g)
+        CGContextRestoreGState(g)
+    }
 
     func size(_ p: _MWProposal) -> CGSize {
         var w: CGFloat = 0, h: CGFloat = 0
@@ -211,7 +233,7 @@ class _MWNode {
     }
     func draw(_ g: CGContext) {
         guard !isHidden else { return }
-        for ch in children { ch.draw(g) }
+        for ch in children { ch.render(g) }
     }
     /// the node under `p` that handles mouse events, deepest first
     func hit(_ p: CGPoint) -> _MWNode? {
@@ -502,6 +524,12 @@ final class _MWHostView: NSView {
     private var tracking: _MWNode?
     var onSizeChange: ((CGSize) -> Void)?
     private var lastIdeal = CGSize.zero
+    /// the animation of the next update (a change made in withAnimation, or through a binding with an animation)
+    private var pendingAnimation: Animation?
+    /// while an update resolves: its animation (animation(_:value:) and transaction modifiers change it)
+    var updateAnimation: Animation?
+    private(set) var animator: _MWAnimator?
+    private var timer: Timer?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -511,6 +539,7 @@ final class _MWHostView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     func setNeedsUpdate() {
+        if let a = _mwCurrentAnimation() { pendingAnimation = a }
         if pending { return }
         pending = true
         DispatchQueue.main.async { [weak self] in self?.update() }
@@ -519,10 +548,20 @@ final class _MWHostView: NSView {
         pending = false
         guard let r = resolveRoot else { return }
         usedEmbedded = []
+        updateAnimation = pendingAnimation; pendingAnimation = nil
         let c = _MWContext(host: self, env: environment, path: "")
         let nodes = r(c)
+        let old = root
         root = nodes.count == 1 ? nodes[0] : _MWStackNode(.vertical, spacing: nil, cross: .center, nodes)
         for (k, v) in embedded where !usedEmbedded.contains(k) { v.removeFromSuperview(); embedded[k] = nil }
+        let anim = updateAnimation
+        updateAnimation = nil
+        if let a = anim, let old = old, let new = root {   // from what shows now to the new tree
+            animator = _MWAnimator(a.timing, old: old, new: new)
+            if timer == nil {
+                timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+            }
+        }
         layoutNodes()
         needsDisplay = true
         let ideal = idealSize
@@ -546,17 +585,36 @@ final class _MWHostView: NSView {
     }
     var idealSize: CGSize { root?.size(.ideal) ?? .zero }
     func sizeThatFits(_ s: CGSize) -> CGSize { root?.size(_MWProposal(s)) ?? .zero }
-    func layoutNodes() {
+    private func placeNodes() {
         guard let root = root else { return }
         let s = root.size(_MWProposal(bounds.size))
         root.place(_mwAlign(CGSize(width: min(s.width, bounds.width), height: min(s.height, bounds.height)), in: bounds, .center))
+    }
+    /// lays the tree out (then puts it where a running animation has it now)
+    func layoutNodes() {
+        placeNodes()
+        if let a = animator, let root = root { a.capture(root); _ = applyAnimation() }
+    }
+    /// moves the nodes to where the animation has them now; at its end drops it
+    private func applyAnimation() -> Bool {
+        guard let a = animator, let root = root else { return false }
+        if a.apply(root, now: _mwNow()) { return true }
+        animator = nil
+        timer?.invalidate(); timer = nil
+        needsDisplay = true
+        return false
+    }
+    private func tick() {
+        if !applyAnimation() { timer?.invalidate(); timer = nil }
+        needsDisplay = true
     }
     override var intrinsicContentSize: NSSize { idealSize }
     override var fittingSize: NSSize { idealSize }
     override func setFrameSize(_ s: NSSize) { super.setFrameSize(s); layoutNodes(); needsDisplay = true }
     override func draw(_ dirty: NSRect) {
         guard let g = NSGraphicsContext.current?.cgContext else { return }
-        root?.draw(g)
+        root?.render(g)
+        for gh in animator?.ghosts ?? [] { gh.node.render(g) }
     }
     private func point(_ e: NSEvent) -> CGPoint { convert(e.locationInWindow, from: nil) }
     override func mouseDown(with e: NSEvent) {
@@ -585,6 +643,10 @@ final class _MWHostView: NSView {
 /// the test report: SCION_SWIFTUI_DUMP=1 prints each host's tree after its first layout
 func _mwDump(_ n: _MWNode, _ depth: Int = 0) -> String {
     var s = String(repeating: "  ", count: depth) + "\(type(of: n)) \(Int(n.frame.minX)),\(Int(n.frame.minY)) \(Int(n.frame.width))x\(Int(n.frame.height))"
+    func f(_ v: CGFloat) -> String { String(format: "%.2f", Double(v)) }
+    if let a = n as? _MWAlphaNode { s += " alpha=" + f(CGFloat(a.alpha)) }
+    if let t = n as? _MWTransformNode { s += " rot=" + f(t.angle * 180 / .pi) + " scale=" + f(t.sx) }
+    if let x = n.fx { s += " fx=" + f(x.alpha) + "," + f(x.dx) + "," + f(x.dy) + "," + f(x.sx) }
     if let t = n as? _MWTextNode { s += " \"\(t.string.string)\"" }
     s += "\n"
     for c in n.children { s += _mwDump(c, depth + 1) }
@@ -597,7 +659,9 @@ func _mwDump(_ n: _MWNode, _ depth: Int = 0) -> String {
 @_spi(ScionTest) public func _mwTestDump(_ v: NSView) -> String {
     guard let h = _mwFindHost(v), let r = h.root else { return "" }
     h.layoutNodes()
-    return _mwDump(r)
+    var s = _mwDump(r)
+    for g in h.animator?.ghosts ?? [] { s += "ghost\n" + _mwDump(g.node, 1) }   // (views going away)
+    return s
 }
 /// clicks the control whose text is `text` (the deepest clickable node around it)
 @_spi(ScionTest) public func _mwTestTap(_ v: NSView, _ text: String, index: Int = 0) -> Bool {

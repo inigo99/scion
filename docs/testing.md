@@ -29,7 +29,7 @@ for arm64. A test whose program is missing is reported as skipped, so the option
 | Objective-C and Foundation | `objc/runtime.m` (no Foundation), `objc/exceptions.m`, `objc/foundation.m`, `objc/foundation2.m`, `objc/regex.m` (cases checked against Python's `re`), `objc/invocations.m` |
 | Metal | `metal/compute.m`, `triangle.m`, `cube.m`, `texture.m` (Apple-compiled sample shaders from Indium's test folder), `ng.m` (modern AIR made by `metal/air/mkmetallib.py`), `msl.m` (MSL compiled at run time), `window.m` (`CAMetalLayer`), `metalfx.m` |
 | AppKit and input | `appkit/appkit.m`, `dialogs.m`, `drawing.m`, `autolayout.m`, `objc/autolayout.m`, `objc/table_views.m`, `objc/status_item.m`, `gamepad/gamepad.m`, `gamepad/keyboard.m`, `audio/audio.c` |
-| Swift | `swift/*.swift`: the language, Concurrency, Combine, SwiftUI (`swiftui.swift`; `navigation.swift`: navigation, grids), the Darwin/Dispatch/Foundation overlays, property lists and bundles (`Sample.app`). `swift/abi.sh` checks that SwiftUI exports Apple's mangled names for the APIs listed in `swift/swiftui-abi.txt`. |
+| Swift | `swift/*.swift`: the language, Concurrency, Combine, SwiftUI (`swiftui.swift`; `navigation.swift`: navigation, grids; `animation.swift`: animations and transitions on a stopped clock), the Darwin/Dispatch/Foundation overlays, property lists and bundles (`Sample.app`). `swift/abi.sh` checks that SwiftUI exports Apple's mangled names for the APIs listed in `swift/swiftui-abi.txt`. |
 | Desktop integration | `scion install` / `scion uninstall` of a small app bundle (Start menu on Windows, freedesktop.org on Linux) |
 | Real programs | class-dump (built from source), and the third-party apps below |
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- SwiftUI animations: `withAnimation` (and its completion), `Transaction`, `withTransaction`, `transaction(_:)`,
+  `animation(_:value:)`, `Binding.animation(_:)`; linear, eased and bezier curves, springs (`spring`, `smooth`,
+  `snappy`, `bouncy`, `interpolatingSpring`), delay, speed and repeats. Frames, opacity, `rotationEffect` and
+  `scaleEffect` (now drawn) move between the old and the new state; views that appear or go away do it with their
+  transition (`opacity`, `move`, `slide`, `scale`, `offset`, `push`, `asymmetric`, `combined`).
+
 - CI: `.github/workflows/swift.yml` builds Combine and SwiftUI with Swift 6.1.3 and runs the Swift tests on the native
   host and under Wine when Swift code changes; the Swift runtime and overlays are cached between runs.
 - SwiftUI navigation: `NavigationStack` (its own path, a `NavigationPath` or a bound collection), `NavigationLink`
