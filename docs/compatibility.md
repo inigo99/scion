@@ -33,6 +33,11 @@ If you get another app running, please add it here (and, if it can be fetched fr
   (data, upload and download tasks, completion handlers or a delegate), `NSURLConnection` and `NSData`/`NSString`
   URL loading, on the host's HTTP stack (WinHTTP on Windows, libcurl on Linux): its proxies, certificates, redirects
   and compression.
+- **Child processes:** `posix_spawn` (file actions, working directory, environment), `waitpid`, `kill`, `system`,
+  `popen` and `NSTask` / Swift's `Process` (pipes, termination handler, readability handlers). A macOS program runs in
+  a new scion; anything else runs natively: on Linux any program, on Windows an `.exe`, where `/usr/bin/<name>` and
+  the like find `<name>.exe` on the `PATH` and `/bin/sh -c` falls back to `cmd.exe` when there is no `sh.exe`.
+  `exec*` run the new program as a child and end with its status.
 - **Foundation:** most of the everyday API: strings (Unicode), collections, run loops and timers, notifications,
   operation queues, JSON, property lists, keyed archiving, regular expressions, dates and calendars (Gregorian; time
   zones with fixed offsets), URLs and file management, user defaults, bundles and localized strings, KVO,
@@ -57,7 +62,8 @@ These are the big gaps. Each is a good project for a contributor (see [roadmap.m
 - **Networking above sockets:** no `CFNetwork` or `Network.framework`; `URLSession` has no cookie storage, URL
   cache, authentication challenges, WebSocket or background sessions, and no Swift `async` methods; GCD read/write
   sources on sockets do not fire.
-- **Child processes:** no `fork`, `posix_spawn` or `NSTask`; `system()` fails.
+- **Child processes:** no `fork`. On Windows a child gets descriptors 0-2 only, `kill` ends it without running its
+  handlers, and processes cannot be stopped (`SIGSTOP`).
 - **Text and fonts:** no CoreText; text is drawn with Windows fonts through Scion's own simple layout. No rich text
   editing, input methods or spell checking.
 - **Graphics:** no OpenGL, no CoreAnimation beyond what Metal presentation needs, no CoreImage.

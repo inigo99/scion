@@ -32,7 +32,7 @@ These are the areas where work has the most effect. Each is self-contained enoug
 **Run more apps**
 - Networking: cookies, authentication challenges and WebSockets in `URLSession`; `Network.framework`; GCD sources on
   sockets. Sockets and HTTP(S) `URLSession` are there.
-- Child processes: `posix_spawn` and `NSTask` on `CreateProcess`.
+- Child processes: `fork` where it can be had (Linux); signals delivered to children's handlers on Windows.
 - Text: CoreText on DirectWrite, rich text in `NSTextView`, input methods.
 - CoreAnimation layers beyond Metal presentation; CoreImage basics.
 - AVFoundation playback; audio input.

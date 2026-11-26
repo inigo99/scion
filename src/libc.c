@@ -487,8 +487,46 @@ FILE *freopen(const char *path, const char *mode, FILE *fp) {
     fp->eof = fp->err = 0; fp->ungot = -1;
     return fp;
 }
-/* there is no shell: system(NULL) says so and a command exits as "not found" */
-int system(const char *cmd) { return cmd ? 127 << 8 : 0; }
+/* ===================================================================== system, popen: /bin/sh -c (proc.cpp maps it on Windows) */
+int posix_spawn(int *, const char *, void *const *, void *const *, char *const[], char *const[]);
+int posix_spawn_file_actions_init(void **); int posix_spawn_file_actions_destroy(void **);
+int posix_spawn_file_actions_adddup2(void **, int, int); int posix_spawn_file_actions_addclose(void **, int);
+int waitpid(int, int *, int); int pipe(int[2]);
+static int sh(const char *cmd, void **fa, int *pid) {
+    char *argv[] = {"sh", "-c", (char *)cmd, 0};
+    return posix_spawn(pid, "/bin/sh", fa, 0, argv, 0);
+}
+int system(const char *cmd) {
+    int pid, st = 0;
+    if (!cmd) return 1;   /* a shell is there */
+    if (sh(cmd, 0, &pid)) return 127 << 8;
+    while (waitpid(pid, &st, 0) < 0 && *__error() == 4 /* EINTR */) {}
+    return st;
+}
+/* the FILE of each popen, with its child */
+static struct { FILE *f; int pid; } g_popen[64];
+FILE *popen(const char *cmd, const char *mode) {
+    int fds[2], pid, w = mode[0] == 'w';
+    if ((mode[0] != 'r' && !w) || pipe(fds)) { *__error() = 22; return 0; }
+    void *fa; posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fds[w ? 0 : 1], w ? 0 : 1);
+    posix_spawn_file_actions_addclose(&fa, fds[w ? 1 : 0]);
+    int e = sh(cmd, &fa, &pid);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fds[w ? 0 : 1]);
+    if (e) { close(fds[w ? 1 : 0]); *__error() = e; return 0; }
+    FILE *f = fdopen(fds[w ? 1 : 0], mode);
+    for (int i = 0; i < 64; i++) if (!g_popen[i].f) { g_popen[i].f = f; g_popen[i].pid = pid; break; }   /* ponytail: 64 at a time */
+    return f;
+}
+int pclose(FILE *f) {
+    int pid = -1, st = 0;
+    for (int i = 0; i < 64; i++) if (g_popen[i].f == f) { pid = g_popen[i].pid; g_popen[i].f = 0; break; }
+    fclose(f);
+    if (pid < 0) { *__error() = 10 /* ECHILD */; return -1; }
+    while (waitpid(pid, &st, 0) < 0) if (*__error() != 4) return -1;
+    return st;
+}
 int fseek(FILE *fp, long off, int wh) {
     fp->eof = 0; fp->ungot = -1;
     if (fp->rd || fp->wr) return fp->sk && fp->sk(fp->cookie, off, wh) >= 0 ? 0 : -1;

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Child processes: `posix_spawn` and `posix_spawnp` (file actions, working directory, environment), `waitpid`,
+  `kill`, `system`, `popen`, and `NSTask` / Swift's `Process` with pipes, termination handlers and readability
+  handlers (`src/proc.cpp`, on both hosts). A macOS program runs in a new scion, other programs natively; `exec*` run
+  the new program as a child. With tests in C and Objective-C.
 - Networking: BSD sockets (TCP, UDP, IPv4 and IPv6), `getaddrinfo` and `getnameinfo`, `poll`, `select`, and kqueue
   read and write filters on both hosts (`src/net.cpp`: Winsock on Windows, the kernel's sockets on Linux), with a test.
   `fcntl(F_SETFL, O_NONBLOCK)` and `FIONBIO` work.

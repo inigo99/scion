@@ -50,6 +50,8 @@ HCABI A hc_ui(A op, A a, A b, A c, A d, A e); /* ui.cpp */
 HCABI A hc_net(A op, A a, A b, A c, A d, A e);
 /* http.cpp: HTTP(S) for URLSession (NET_HTTP_*) */
 A http_op(A op, A a, A b, A c);
+/* proc.cpp: child processes (PROC_*) */
+HCABI A hc_proc(A op, A a, A b, A c, A d, A e);
 HCABI A hc_kqueue(A, A, A, A, A, A);
 HCABI A hc_kevent(A kq, A changes, A nchanges, A events, A nevents, A timeout_ns);
 void net_fd_closed(int fd);   /* every close: a kqueue, or registrations of the descriptor, go */
