@@ -1,12 +1,14 @@
 // The AppKit overlay (libswiftAppKit): the Swift-only AppKit API that compiled apps import. ponytail: only what apps
 // have asked for (NSApplicationMain, NSEvent.SpecialKey, NSSound.beep); Apple's overlay has much more.
 @_exported import AppKit
+import Darwin
 
-@_silgen_name("NSApplicationMain")
-private func _NSApplicationMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
-
+/// (the C function of the same name, found at run time: a @_silgen_name declaration of it crashes Swift 6.1's IRGen,
+/// which also sees the C declaration)
 public func NSApplicationMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32 {
-    _NSApplicationMain(argc, argv)
+    typealias Main = @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
+    let f = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "NSApplicationMain")!   // RTLD_DEFAULT
+    return unsafeBitCast(f, to: Main.self)(argc, argv)
 }
 
 extension NSSound {

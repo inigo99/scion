@@ -289,3 +289,60 @@ extension CGAffineTransform : Codable {
   }
 }
 
+
+//===----------------------------------------------------------------------===//
+// The geometry members of the newer CoreGraphics overlay (Apple's SDK has them as @_alwaysEmitIntoClient wrappers of
+// the C functions, so apps inline them and nothing needs exporting)
+//===----------------------------------------------------------------------===//
+
+extension CGPoint {
+  @_alwaysEmitIntoClient public func applying(_ t: CGAffineTransform) -> CGPoint { CGPointApplyAffineTransform(self, t) }
+  @_alwaysEmitIntoClient public func equalTo(_ point2: CGPoint) -> Bool { CGPointEqualToPoint(self, point2) }
+}
+extension CGSize {
+  @_alwaysEmitIntoClient public func applying(_ t: CGAffineTransform) -> CGSize { CGSizeApplyAffineTransform(self, t) }
+  @_alwaysEmitIntoClient public func equalTo(_ size2: CGSize) -> Bool { CGSizeEqualToSize(self, size2) }
+}
+extension CGRect {
+  @_transparent public func __divided(slice: UnsafeMutablePointer<CGRect>, remainder: UnsafeMutablePointer<CGRect>, atDistance: CGFloat, from: CGRectEdge) {
+    CGRectDivide(self, slice, remainder, atDistance, from)
+  }
+  @_alwaysEmitIntoClient public static var null: CGRect { CGRectNull }
+  @_alwaysEmitIntoClient public static var infinite: CGRect { CGRectInfinite }
+  @_alwaysEmitIntoClient public var minX: CGFloat { CGRectGetMinX(self) }
+  @_alwaysEmitIntoClient public var midX: CGFloat { CGRectGetMidX(self) }
+  @_alwaysEmitIntoClient public var maxX: CGFloat { CGRectGetMaxX(self) }
+  @_alwaysEmitIntoClient public var minY: CGFloat { CGRectGetMinY(self) }
+  @_alwaysEmitIntoClient public var midY: CGFloat { CGRectGetMidY(self) }
+  @_alwaysEmitIntoClient public var maxY: CGFloat { CGRectGetMaxY(self) }
+  @_alwaysEmitIntoClient public var width: CGFloat { CGRectGetWidth(self) }
+  @_alwaysEmitIntoClient public var height: CGFloat { CGRectGetHeight(self) }
+  @_alwaysEmitIntoClient public func equalTo(_ rect2: CGRect) -> Bool { CGRectEqualToRect(self, rect2) }
+  @_alwaysEmitIntoClient public var standardized: CGRect { CGRectStandardize(self) }
+  @_alwaysEmitIntoClient public var isEmpty: Bool { CGRectIsEmpty(self) }
+  @_alwaysEmitIntoClient public var isNull: Bool { CGRectIsNull(self) }
+  @_alwaysEmitIntoClient public var isInfinite: Bool { CGRectEqualToRect(self, CGRectInfinite) }
+  @_alwaysEmitIntoClient public func insetBy(dx: CGFloat, dy: CGFloat) -> CGRect { CGRectInset(self, dx, dy) }
+  @_alwaysEmitIntoClient public var integral: CGRect { CGRectIntegral(self) }
+  @_alwaysEmitIntoClient public func union(_ r2: CGRect) -> CGRect { CGRectUnion(self, r2) }
+  @_alwaysEmitIntoClient public func intersection(_ r2: CGRect) -> CGRect { CGRectIntersection(self, r2) }
+  @_alwaysEmitIntoClient public func offsetBy(dx: CGFloat, dy: CGFloat) -> CGRect { CGRectOffset(self, dx, dy) }
+  @_alwaysEmitIntoClient public func contains(_ point: CGPoint) -> Bool { CGRectContainsPoint(self, point) }
+  @_alwaysEmitIntoClient public func contains(_ rect2: CGRect) -> Bool { CGRectContainsRect(self, rect2) }
+  @_alwaysEmitIntoClient public func intersects(_ rect2: CGRect) -> Bool { CGRectIntersectsRect(self, rect2) }
+  @_alwaysEmitIntoClient public func applying(_ t: CGAffineTransform) -> CGRect { CGRectApplyAffineTransform(self, t) }
+}
+extension CGAffineTransform {
+  @_alwaysEmitIntoClient public init(_ a: CGFloat, _ b: CGFloat, _ c: CGFloat, _ d: CGFloat, _ tx: CGFloat, _ ty: CGFloat) {
+    self = CGAffineTransformMake(a, b, c, d, tx, ty)
+  }
+  @_alwaysEmitIntoClient public init(translationX tx: CGFloat, y ty: CGFloat) { self = CGAffineTransformMakeTranslation(tx, ty) }
+  @_alwaysEmitIntoClient public init(scaleX sx: CGFloat, y sy: CGFloat) { self = CGAffineTransformMakeScale(sx, sy) }
+  @_alwaysEmitIntoClient public init(rotationAngle angle: CGFloat) { self = CGAffineTransformMakeRotation(angle) }
+  @_alwaysEmitIntoClient public var isIdentity: Bool { CGAffineTransformIsIdentity(self) }
+  @_alwaysEmitIntoClient public func translatedBy(x tx: CGFloat, y ty: CGFloat) -> CGAffineTransform { CGAffineTransformTranslate(self, tx, ty) }
+  @_alwaysEmitIntoClient public func scaledBy(x sx: CGFloat, y sy: CGFloat) -> CGAffineTransform { CGAffineTransformScale(self, sx, sy) }
+  @_alwaysEmitIntoClient public func rotated(by angle: CGFloat) -> CGAffineTransform { CGAffineTransformRotate(self, angle) }
+  @_alwaysEmitIntoClient public func inverted() -> CGAffineTransform { CGAffineTransformInvert(self) }
+  @_alwaysEmitIntoClient public func concatenating(_ t2: CGAffineTransform) -> CGAffineTransform { CGAffineTransformConcat(self, t2) }
+}

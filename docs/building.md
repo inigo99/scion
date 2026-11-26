@@ -97,7 +97,9 @@ Intermediate files go to `out/swift-build`.
 > **Note.** The Metal-host and Swift scripts were moved to this layout when the project was published and have not yet
 > been run end to end on a clean machine with it. The same goes for the workflows that run them on GitHub
 > (`.github/workflows/heavy.yml`, by hand, and `release.yml`, on a `v*` tag): they are experimental. If a step fails,
-> please open an issue with the log.
+> please open an issue with the log. `.github/workflows/swift.yml` runs steps 1 and 2 of this section on every change to
+> Swift code, keeps the runtime and overlays in GitHub's cache and rebuilds only Combine and SwiftUI on top of them; its
+> artifact (`scion-swift-test`) has the built `SwiftUI.dylib`, `Combine.dylib` and the Swift test programs.
 
 ## Release layout
 

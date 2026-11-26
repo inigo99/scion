@@ -790,11 +790,13 @@ extension List {
 }
 extension List: _MWResolvable {
     func _mwNodes(_ c: _MWContext) -> [_MWNode] {
-        let rows = _mwResolve(content, c.child("rows")).map { n -> _MWNode in
+        var e = c.env; e._mwInList = true   // (navigation links draw as rows)
+        let rows = _mwResolve(content, c.child("rows").with(env: e)).map { n -> _MWNode in
             let insets = (n.traits["ListRowInsetsTraitKey"] as? EdgeInsets?) ?? nil
             let f = _MWFrameNode(_MWPaddingNode(insets ?? EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8), n), alignment: .leading)
             f.maxW = .infinity
             f.tag = n.tag
+            if n.traits["selected"] as? Bool == true { f.traits["selected"] = true }   // a link whose destination shows
             return f
         }
         let stack = _MWStackNode(.vertical, spacing: 0, cross: Alignment(horizontal: .leading, vertical: .center), rows)

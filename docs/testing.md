@@ -29,7 +29,7 @@ for arm64. A test whose program is missing is reported as skipped, so the option
 | Objective-C and Foundation | `objc/runtime.m` (no Foundation), `objc/exceptions.m`, `objc/foundation.m`, `objc/foundation2.m`, `objc/regex.m` (cases checked against Python's `re`), `objc/invocations.m` |
 | Metal | `metal/compute.m`, `triangle.m`, `cube.m`, `texture.m` (Apple-compiled sample shaders from Indium's test folder), `ng.m` (modern AIR made by `metal/air/mkmetallib.py`), `msl.m` (MSL compiled at run time), `window.m` (`CAMetalLayer`), `metalfx.m` |
 | AppKit and input | `appkit/appkit.m`, `dialogs.m`, `drawing.m`, `autolayout.m`, `objc/autolayout.m`, `objc/table_views.m`, `objc/status_item.m`, `gamepad/gamepad.m`, `gamepad/keyboard.m`, `audio/audio.c` |
-| Swift | `swift/*.swift`: the language, Concurrency, Combine, SwiftUI, the Darwin/Dispatch/Foundation overlays, property lists and bundles (`Sample.app`) |
+| Swift | `swift/*.swift`: the language, Concurrency, Combine, SwiftUI (`swiftui.swift`; `navigation.swift`: navigation, grids), the Darwin/Dispatch/Foundation overlays, property lists and bundles (`Sample.app`). `swift/abi.sh` checks that SwiftUI exports Apple's mangled names for the APIs listed in `swift/swiftui-abi.txt`. |
 | Desktop integration | `scion install` / `scion uninstall` of a small app bundle (Start menu on Windows, freedesktop.org on Linux) |
 | Real programs | class-dump (built from source), and the third-party apps below |
 
@@ -42,7 +42,7 @@ icons after a few seconds and quit. That is how the third-party apps are checked
 | Part | Needs | Notes |
 |---|---|---|
 | Go test | `go` | cross-compiled for `GOOS=darwin` |
-| Swift tests | `SWIFT_TC` and Scion's Swift build (`out/swift`) | see [building.md](building.md) |
+| Swift tests | `SWIFT_TC` and Scion's Swift build (`out/swift`) | see [building.md](building.md). On GitHub, `.github/workflows/swift.yml` builds Combine and SwiftUI and runs these tests (native host and Wine) whenever Swift code changes, with the Swift runtime and overlays cached between runs. |
 | class-dump | `git` and network | GPLv2, cloned and built in a temporary folder by `tests/apps/class-dump.sh`; not part of Scion |
 | Metal sample shaders | `deps/indium` (`scripts/fetch-deps.sh`) | Apple's sample `.metallib` files from Indium's tests, copied at build time |
 | Third-party apps | `tests/apps/fetch.sh` (curl, tar, unzip; 7z for Hex Fiend's `.dmg`) | esbuild 0.28.2, Biome 2.6.2, SwiftFormat 0.64.5, Itsycal 0.15.15, Reminders MenuBar 2.2.0, Hex Fiend 2.18.1, downloaded from their official releases into `out/tests/apps`. None of them is redistributed by Scion. |
