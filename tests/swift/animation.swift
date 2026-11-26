@@ -56,6 +56,12 @@ enum Test {
     static func line(_ tree: String, _ text: String) -> String? {
         tree.split(separator: "\n").first(where: { $0.hasSuffix("\"\(text)\"") }).map(String.init)
     }
+    /// the lines of the tree with `key`, and the ones after them, on one line
+    static func show(_ tree: String, _ key: String) -> String {
+        let ls = tree.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let i = ls.firstIndex(where: { $0.contains(key) }) else { return "no \(key) in \(ls.count) lines: " + ls.suffix(8).joined(separator: " | ") }
+        return ls[i..<min(ls.count, i + 3)].joined(separator: " | ")
+    }
     static func x(_ tree: String, _ text: String) -> Int { frame(tree, text)?[0] ?? -9999 }
     /// a change made in `animation` (nil: none), at a new point of the stopped clock
     static func animate(_ a: Animation?, _ change: () -> Void) {
@@ -96,12 +102,12 @@ enum Test {
 
         // a view goes away, then comes back: it moves out to the leading edge (and in), the view after it slides
         animate(.linear(duration: 1)) { m.show = false }
+        let half = at(0.5)   // (before the end: an animation that is over is gone)
         t = at(1.01)
         let fixed1 = x(t, "Fixed")
         ok(fixed1 < fixed0 && !t.contains("\"Here\""), "removed: gone at the end (Fixed \(fixed0) -> \(fixed1))")
-        t = at(0.5)
-        ok(t.contains("ghost") && (line(t, "Here")?.contains("fx=1.00,-") ?? false), "removed: moving out at half time (\(line(t, "Here") ?? "none"))")
-        ok(near(x(t, "Fixed"), (fixed0 + fixed1) / 2), "removed: the next view halfway (\(x(t, "Fixed")))")
+        ok(half.contains("ghost") && (line(half, "Here")?.contains("fx=1.00,-") ?? false), "removed: moving out at half time (\(line(half, "Here") ?? "none"))")
+        ok(near(x(half, "Fixed"), (fixed0 + fixed1) / 2), "removed: the next view halfway (\(x(half, "Fixed")))")
         animate(.linear(duration: 1)) { m.show = true }
         t = at(0.5)
         ok(!t.contains("ghost") && (line(t, "Here")?.contains("fx=1.00,-") ?? false), "inserted: moving in at half time (\(line(t, "Here") ?? "none"))")
@@ -110,13 +116,15 @@ enum Test {
 
         // opacity, rotation and scale
         animate(.linear(duration: 1)) { m.faded = true }
-        ok(at(0.5).contains("alpha=0.60"), "opacity halfway")
-        ok(at(1.01).contains("alpha=0.20"), "opacity at the end")
+        t = at(0.5)
+        ok(t.contains("alpha=0.60"), "opacity halfway (\(show(t, "alpha")))")
+        t = at(1.01)
+        ok(t.contains("alpha=0.20"), "opacity at the end (\(show(t, "alpha")))")
         animate(.linear(duration: 1)) { m.turned = true }
         t = at(0.5)
-        ok(t.contains("rot=45.00") && t.contains("scale=1.50"), "rotation and scale halfway")
+        ok(t.contains("rot=45.00") && t.contains("scale=1.50"), "rotation and scale halfway (\(show(t, "rot=")))")
         t = at(1.01)
-        ok(t.contains("rot=90.00") && t.contains("scale=2.00"), "rotation and scale at the end")
+        ok(t.contains("rot=90.00") && t.contains("scale=2.00"), "rotation and scale at the end (\(show(t, "rot=")))")
 
         // animation(_:value:): a change made without withAnimation
         animate(nil) { m.count = 1 }
