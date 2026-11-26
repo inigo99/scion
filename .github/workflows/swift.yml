@@ -91,6 +91,9 @@ jobs:
       - name: Build SwiftUI
         run: ONLY=SwiftUI src/build_swiftui.sh
 
+      - name: Check SwiftUI's symbols against Apple's (tests/swift/swiftui-abi.txt)
+        run: tests/swift/abi.sh
+
       - name: Build the tests
         run: tests/build.sh
 

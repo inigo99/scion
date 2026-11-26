@@ -71,8 +71,33 @@ extension VStack: _MWResolvable {
 extension ZStack: _MWResolvable {
     func _mwNodes(_ c: _MWContext) -> [_MWNode] { [_MWZStackNode(_tree.root.alignment, _mwResolve(_tree.content, c.child("z")))] }
 }
-public typealias LazyHStack<Content: View> = HStack<Content>
-public typealias LazyVStack<Content: View> = VStack<Content>
+/// ponytail: lazy stacks build all their views (like HStack and VStack)
+public struct LazyVStack<Content>: View where Content: View {
+    let alignment: HorizontalAlignment, spacing: CGFloat?, content: Content
+    public init(alignment: HorizontalAlignment = .center, spacing: CGFloat? = nil, pinnedViews: PinnedScrollableViews = .init(), @ViewBuilder content: () -> Content) {
+        self.alignment = alignment; self.spacing = spacing; self.content = content()
+    }
+    public typealias Body = Never
+    public var body: Never { _primitive("LazyVStack") }
+}
+public struct LazyHStack<Content>: View where Content: View {
+    let alignment: VerticalAlignment, spacing: CGFloat?, content: Content
+    public init(alignment: VerticalAlignment = .center, spacing: CGFloat? = nil, pinnedViews: PinnedScrollableViews = .init(), @ViewBuilder content: () -> Content) {
+        self.alignment = alignment; self.spacing = spacing; self.content = content()
+    }
+    public typealias Body = Never
+    public var body: Never { _primitive("LazyHStack") }
+}
+extension LazyVStack: _MWResolvable {
+    func _mwNodes(_ c: _MWContext) -> [_MWNode] {
+        [_MWStackNode(.vertical, spacing: spacing, cross: Alignment(horizontal: alignment, vertical: .center), _mwResolve(content, c.child("v")))]
+    }
+}
+extension LazyHStack: _MWResolvable {
+    func _mwNodes(_ c: _MWContext) -> [_MWNode] {
+        [_MWStackNode(.horizontal, spacing: spacing, cross: Alignment(horizontal: .center, vertical: alignment), _mwResolve(content, c.child("h")))]
+    }
+}
 
 @frozen public struct Spacer: View {
     public var minLength: CGFloat?
@@ -287,6 +312,206 @@ extension LazyVGrid: _MWResolvable {
         }
         return [_MWStackNode(.vertical, spacing: spacing, cross: Alignment(horizontal: alignment, vertical: .center), rows)]
     }
+}
+
+public struct LazyHGrid<Content>: View where Content: View {
+    let rows: [GridItem], alignment: VerticalAlignment, spacing: CGFloat?, content: Content
+    public init(rows: [GridItem], alignment: VerticalAlignment = .center, spacing: CGFloat? = nil, pinnedViews: PinnedScrollableViews = .init(), @ViewBuilder content: () -> Content) {
+        self.rows = rows; self.alignment = alignment; self.spacing = spacing; self.content = content()
+    }
+    public typealias Body = Never
+    public var body: Never { _primitive("LazyHGrid") }
+}
+extension LazyHGrid: _MWResolvable {
+    /// columns of `rows.count` views, top to bottom (ponytail: adaptive rows count as one flexible row)
+    func _mwNodes(_ c: _MWContext) -> [_MWNode] {
+        let items = _mwResolve(content, c.child("g")), n = max(1, rows.count)
+        var columns: [_MWNode] = []
+        var i = 0
+        while i < items.count {
+            let column = Array(items[i..<min(i + n, items.count)]).enumerated().map { (k, node) -> _MWNode in
+                let f = _MWFrameNode(node, alignment: rows[k].alignment ?? .center)
+                if case .fixed(let h) = rows[k].size { f.fixedH = h } else { f.maxH = .infinity }
+                return f
+            }
+            columns.append(_MWStackNode(.vertical, spacing: rows.first?.spacing, cross: .center, column))
+            i += n
+        }
+        return [_MWStackNode(.horizontal, spacing: spacing, cross: Alignment(horizontal: .center, vertical: alignment), columns)]
+    }
+}
+
+// MARK: - Grid
+
+@frozen public struct GridLayout: _VariadicView_UnaryViewRoot {
+    public var alignment: Alignment
+    public var horizontalSpacing: CGFloat?
+    public var verticalSpacing: CGFloat?
+    @inlinable public init(alignment: Alignment = .center, horizontalSpacing: CGFloat? = nil, verticalSpacing: CGFloat? = nil) {
+        self.alignment = alignment
+        self.horizontalSpacing = horizontalSpacing
+        self.verticalSpacing = verticalSpacing
+    }
+    public typealias Body = Never
+    public struct Cache {}
+}
+@frozen public struct Grid<Content> where Content: View {
+    @usableFromInline internal var _tree: _VariadicView.Tree<GridLayout, Content>
+    @inlinable public init(alignment: Alignment = .center, horizontalSpacing: CGFloat? = nil, verticalSpacing: CGFloat? = nil, @ViewBuilder content: () -> Content) {
+        let root = GridLayout(alignment: alignment, horizontalSpacing: horizontalSpacing, verticalSpacing: verticalSpacing)
+        _tree = .init(root: root, content: content())
+    }
+    public typealias Body = Never
+}
+extension Grid: View { public var body: Never { _primitive("Grid") } }
+@frozen public struct GridRow<Content> where Content: View {
+    @usableFromInline internal var alignment: VerticalAlignment?
+    @usableFromInline internal var content: Content
+    @inlinable public init(alignment: VerticalAlignment? = nil, @ViewBuilder content: () -> Content) {
+        self.alignment = alignment
+        self.content = content()
+    }
+    public typealias Body = Never
+}
+extension GridRow: View { public var body: Never { _primitive("GridRow") } }
+extension GridRow: _MWResolvable {
+    func _mwNodes(_ c: _MWContext) -> [_MWNode] { [_MWGridRowNode(_mwResolve(content, c.child("r")), alignment: alignment)] }
+}
+extension Grid: _MWResolvable {
+    func _mwNodes(_ c: _MWContext) -> [_MWNode] {
+        let r = _tree.root
+        return [_MWGridNode(_mwResolve(_tree.content, c.child("grid")), alignment: r.alignment, hs: r.horizontalSpacing ?? 8, vs: r.verticalSpacing ?? 8)]
+    }
+}
+/// a GridRow: its cells (outside a Grid, a row of them)
+final class _MWGridRowNode: _MWNode {
+    let cells: [_MWNode], rowAlignment: VerticalAlignment?
+    init(_ cells: [_MWNode], alignment: VerticalAlignment?) {
+        self.cells = cells; rowAlignment = alignment
+        super.init([_MWStackNode(.horizontal, spacing: nil, cross: Alignment(horizontal: .center, vertical: alignment ?? .center), cells)])
+    }
+}
+/// columns as wide as their widest cell (flexible cells share what is left), rows as tall as their tallest cell; a view
+/// that is not a GridRow spans every column and does not set their widths (ponytail: cell anchors are not used)
+final class _MWGridNode: _MWNode {
+    struct Row { let cells: [_MWNode]; let spans: [Int]; let alignment: VerticalAlignment?; let full: Bool }
+    let rows: [Row], gridAlignment: Alignment, hs: CGFloat, vs: CGFloat, columns: Int
+    init(_ items: [_MWNode], alignment: Alignment, hs: CGFloat, vs: CGFloat) {
+        let rs = items.map { n -> Row in
+            if let r = n as? _MWGridRowNode { return Row(cells: r.cells, spans: r.cells.map { max(1, $0.traits["gridSpan"] as? Int ?? 1) }, alignment: r.rowAlignment, full: false) }
+            return Row(cells: [n], spans: [1], alignment: nil, full: true)
+        }
+        rows = rs
+        gridAlignment = alignment; self.hs = hs; self.vs = vs
+        columns = max(1, rs.filter { !$0.full }.map { $0.spans.reduce(0, +) }.max() ?? 1)
+        super.init(rs.flatMap { $0.cells })
+    }
+    private func widths(_ p: _MWProposal) -> [CGFloat] {
+        var w = [CGFloat](repeating: 0, count: columns), flex = [Bool](repeating: false, count: columns)
+        for r in rows where !r.full {
+            var col = 0
+            for (cell, span) in zip(r.cells, r.spans) {
+                if span == 1, col < columns, !(cell.traits["gridUnsized"] as? Axis.Set ?? []).contains(.horizontal) {
+                    let ideal = cell.size(.ideal).width
+                    w[col] = max(w[col], ideal)
+                    if cell.size(_MWProposal(width: .infinity, height: nil)).width > ideal + 0.5 { flex[col] = true }
+                }
+                col += span
+            }
+        }
+        if let pw = p.width, pw.isFinite {
+            let left = pw - w.reduce(0, +) - hs * CGFloat(columns - 1), n = flex.filter { $0 }.count
+            if left > 0 && n > 0 { for i in 0..<columns where flex[i] { w[i] += left / CGFloat(n) } }
+        }
+        return w
+    }
+    private func span(_ w: [CGFloat], _ from: Int, _ n: Int) -> CGFloat {
+        let to = min(columns, from + n)
+        return from < to ? w[from..<to].reduce(0, +) + hs * CGFloat(to - from - 1) : 0
+    }
+    private func heights(_ w: [CGFloat]) -> [CGFloat] {
+        rows.map { r in
+            if r.full { return (r.cells[0].traits["gridUnsized"] as? Axis.Set ?? []).contains(.vertical) ? 0 : r.cells[0].size(_MWProposal(width: span(w, 0, columns), height: nil)).height }
+            var col = 0, h: CGFloat = 0
+            for (cell, s) in zip(r.cells, r.spans) { h = max(h, cell.size(_MWProposal(width: span(w, col, s), height: nil)).height); col += s }
+            return h
+        }
+    }
+    override func size(_ p: _MWProposal) -> CGSize {
+        let w = widths(p), h = heights(w)
+        return CGSize(width: span(w, 0, columns), height: h.reduce(0, +) + vs * CGFloat(max(0, rows.count - 1)))
+    }
+    override func place(_ r: CGRect) {
+        frame = r
+        let w = widths(_MWProposal(r.size)), h = heights(w)
+        var colAlign = [HorizontalAlignment](repeating: gridAlignment.horizontal, count: columns)
+        for row in rows where !row.full {
+            var col = 0
+            for (cell, s) in zip(row.cells, row.spans) { if let a = cell.traits["gridColumnAlignment"] as? HorizontalAlignment, col < columns { colAlign[col] = a }; col += s }
+        }
+        var y = r.minY
+        for (i, row) in rows.enumerated() {
+            if row.full {
+                let box = CGRect(x: r.minX, y: y, width: span(w, 0, columns), height: h[i])
+                row.cells[0].place(_mwAlign(row.cells[0].size(_MWProposal(box.size)), in: box, gridAlignment))
+            } else {
+                var x = r.minX, col = 0
+                for (cell, s) in zip(row.cells, row.spans) {
+                    let box = CGRect(x: x, y: y, width: span(w, col, s), height: h[i])
+                    let a = Alignment(horizontal: col < columns ? colAlign[col] : gridAlignment.horizontal, vertical: row.alignment ?? gridAlignment.vertical)
+                    let sz = cell.size(_MWProposal(box.size))
+                    cell.place(_mwAlign(CGSize(width: min(sz.width, box.width), height: min(sz.height, box.height)), in: box, a))
+                    x += box.width + hs; col += s
+                }
+            }
+            y += h[i] + vs
+        }
+    }
+}
+@frozen public struct _GridCellSizeModifier: ViewModifier {
+    @usableFromInline internal var count: Int
+    @usableFromInline internal var axis: Axis
+    @inlinable internal init(count: Int, axis: Axis) { self.count = count; self.axis = axis }
+    public typealias Body = Never
+}
+@frozen public struct _GridAnchorModifier: ViewModifier {
+    @usableFromInline internal var anchor: UnitPoint
+    @inlinable internal init(anchor: UnitPoint) { self.anchor = anchor }
+    public typealias Body = Never
+}
+@frozen public struct _GridAlignmentModifier: ViewModifier {
+    @usableFromInline internal var alignment: AlignmentKey
+    @inlinable internal init(alignment: AlignmentKey) { self.alignment = alignment }
+    public typealias Body = Never
+}
+@frozen public struct _GridUnsizedAxesModifier: ViewModifier {
+    @usableFromInline internal var axes: Axis.Set
+    @inlinable internal init(axes: Axis.Set) { self.axes = axes }
+    public typealias Body = Never
+}
+extension _GridCellSizeModifier: _MWModifier {
+    func _mwModify(_ c: _MWContext, _ content: @escaping (_MWContext) -> [_MWNode]) -> [_MWNode] {
+        content(c).map { if axis == .horizontal { $0.traits["gridSpan"] = count }; return $0 }
+    }
+}
+extension _GridAnchorModifier: _MWModifier {
+    func _mwModify(_ c: _MWContext, _ content: @escaping (_MWContext) -> [_MWNode]) -> [_MWNode] { content(c) }
+}
+extension _GridAlignmentModifier: _MWModifier {
+    func _mwModify(_ c: _MWContext, _ content: @escaping (_MWContext) -> [_MWNode]) -> [_MWNode] {
+        content(c).map { $0.traits["gridColumnAlignment"] = HorizontalAlignment(alignment.id); return $0 }
+    }
+}
+extension _GridUnsizedAxesModifier: _MWModifier {
+    func _mwModify(_ c: _MWContext, _ content: @escaping (_MWContext) -> [_MWNode]) -> [_MWNode] {
+        content(c).map { $0.traits["gridUnsized"] = axes; return $0 }
+    }
+}
+extension View {
+    @inlinable public func gridCellColumns(_ count: Int) -> some View { modifier(_GridCellSizeModifier(count: count, axis: .horizontal)) }
+    @inlinable public func gridCellAnchor(_ anchor: UnitPoint) -> some View { modifier(_GridAnchorModifier(anchor: anchor)) }
+    @inlinable public func gridColumnAlignment(_ guide: HorizontalAlignment) -> some View { modifier(_GridAlignmentModifier(alignment: guide.key)) }
+    @inlinable public func gridCellUnsizedAxes(_ axes: Axis.Set) -> some View { modifier(_GridUnsizedAxesModifier(axes: axes)) }
 }
 
 // MARK: - layout modifiers

@@ -4,6 +4,13 @@
 
 - CI: `.github/workflows/swift.yml` builds Combine and SwiftUI with Swift 6.1.3 and runs the Swift tests on the native
   host and under Wine when Swift code changes; the Swift runtime and overlays are cached between runs.
+- SwiftUI navigation: `NavigationStack` (its own path, a `NavigationPath` or a bound collection), `NavigationLink`
+  (destinations, values, `isActive`, `tag`/`selection`), `navigationDestination(for:)`, `(isPresented:)` and
+  `(item:)`, a back button (⌘[), `NavigationSplitView` with two or three columns and column widths, `NavigationView`
+  as columns or a stack, their styles, and `navigationTitle` as the window's title.
+- SwiftUI grids: `Grid` and `GridRow` (column widths, spans, column alignment, unsized cells), `LazyHGrid`, and
+  `LazyVStack`/`LazyHStack` as their own types (they were aliases of `VStack`/`HStack`, a different ABI).
+- `tests/swift/abi.sh` checks SwiftUI's exported symbols against Apple's names for the listed APIs.
 - CoreText and rich text: `NSAttributedString` keeps runs of attributes (it had one set for the whole string), with
   `CFAttributedString` on it. CoreText lays out lines, runs, typesetters, framesetters and frames with paragraph
   styles (alignment, indents, spacing, line heights, wrapping, truncation); attributed strings and `NSTextView` draw

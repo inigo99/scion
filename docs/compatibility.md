@@ -56,7 +56,9 @@ If you get another app running, please add it here (and, if it can be fetched fr
   `CAMetalLayer`, parts of Metal 4 (`MTL4*`), MetalFX upscalers; shaders from `.metallib` files and from MSL source.
 - **Swift:** the runtime and standard library (6.1), Concurrency, the Darwin/ObjectiveC/Dispatch/CoreFoundation/
   CoreGraphics/Foundation overlays, Combine, and a SwiftUI that covers common views, stacks, lists, state and
-  bindings, presentations, `MenuBarExtra` and `Settings`. Scion answers availability checks as macOS 14.6.
+  bindings, presentations, `MenuBarExtra` and `Settings`, navigation (`NavigationStack` with paths and
+  `navigationDestination`, `NavigationLink`, `NavigationSplitView`, `NavigationView`, titles as the window's title) and
+  grids (`Grid`, `GridRow`, `LazyVGrid`, `LazyHGrid`, lazy stacks). Scion answers availability checks as macOS 14.6.
 - **Input and sound:** keyboard, mouse, XInput controllers with rumble (GameController, CoreHaptics), raw input
   (`GCKeyboard`, `GCMouse`), audio output (AudioUnit, AudioQueue).
 

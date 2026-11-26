@@ -528,6 +528,7 @@ final class _MWHostView: NSView {
         let ideal = idealSize
         if _mwDumpUpdates, let r = root { print("-- update \(ideal)\n" + _mwDump(r), terminator: "") }
         if ideal != lastIdeal { lastIdeal = ideal; invalidateIntrinsicContentSize(); onSizeChange?(ideal) }
+        _mwApplyTitle(self)
     }
     /// an AppKit view kept across updates at `key`
     func embeddedView<V: NSView>(_ key: String, make: () -> V) -> V {
