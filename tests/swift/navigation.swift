@@ -86,8 +86,15 @@ struct Content: View {
 }
 
 enum Test {
-    static var failures = 0
-    static func ok(_ c: Bool, _ what: String) { if !c { print("FAIL: \(what)"); failures += 1 } }
+    static var failures: [String] = []
+    static var view: NSView?
+    /// a failure, with the texts the window shows (the test runner keeps only the end of the output)
+    static func ok(_ c: Bool, _ what: String) {
+        guard !c else { return }
+        let texts = view.map { _mwTestDump($0).split(separator: "\n").compactMap { l in l.firstIndex(of: "\"").map { String(l[$0...]) } } } ?? []
+        print("FAIL: \(what) [shows \(texts.prefix(12).joined(separator: " "))]")
+        failures.append(what)
+    }
     static func pause(_ s: Double = 0.2) { RunLoop.main.run(until: Date().addingTimeInterval(s)) }
     /// the frame of the text node showing `text` in the dump: x, y, width, height
     static func frame(_ tree: String, _ text: String) -> [Int]? {
@@ -100,6 +107,7 @@ enum Test {
     static func run() {
         guard let w = NSApplication.shared.windows.first, let v = w.contentView else { print("FAIL: no window"); exit(1) }
         let model = Model.shared
+        view = v
         var tree = _mwTestDump(v)
         if ProcessInfo.processInfo.environment["SCION_SWIFTUI_DUMP"] != nil { print(tree) }
         ok(tree.contains("\"Home\""), "stack root")
@@ -158,9 +166,9 @@ enum Test {
         } else { ok(false, "LazyHGrid cells") }
 
         if let e = getenv("SWIFTUI_WAIT"), let s = Double(String(cString: e)) { pause(s) }   // for screenshots
-        print(failures == 0 ? "NAVIGATION OK" : "NAVIGATION: \(failures) FAILURES")
+        print(failures.isEmpty ? "NAVIGATION OK" : "NAVIGATION: \(failures.count) FAILURES: \(failures.joined(separator: "; "))")
         fflush(stdout)
-        exit(failures == 0 ? 0 : 1)
+        exit(failures.isEmpty ? 0 : 1)
     }
 }
 
