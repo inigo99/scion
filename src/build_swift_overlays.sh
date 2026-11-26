@@ -76,7 +76,10 @@ done
 # Foundation: a copy of the 5.4 overlay with scion's changes (patches/swift-foundation-overlay.patch), and only the
 # files for the APIs scion's Foundation has (ponytail: no Combine, KVO publishers, URLSession, NSItemProvider, ...)
 F=$B/foundation; rm -rf $F; cp -r $D/Foundation $F
-[ -s $MW/patches/swift-foundation-overlay.patch ] && (cd $F && patch -s -p1 < $MW/patches/swift-foundation-overlay.patch)
+# (scripts/fetch-deps.sh has usually applied the patch to the sources already)
+if [ -s $MW/patches/swift-foundation-overlay.patch ] && ! (cd $F && patch -s -f -p1 -R --dry-run < $MW/patches/swift-foundation-overlay.patch >/dev/null 2>&1); then
+  (cd $F && patch -s -p1 < $MW/patches/swift-foundation-overlay.patch)
+fi
 FOUNDATION_SOURCES="Foundation.swift Boxing.swift ReferenceConvertible.swift CheckClass.swift NSError.swift Data.swift
   DataProtocol.swift ContiguousBytes.swift Collections+DataProtocol.swift Pointers+DataProtocol.swift NSData+DataProtocol.swift
   DispatchData+DataProtocol.swift NSString.swift String.swift NSStringAPI.swift NSStringEncodings.swift NSRange.swift
