@@ -1606,12 +1606,6 @@ static BOOL p_eval(_MWPredNode *n, id obj, NSDictionary *vars) {
     return [t launchAndReturnError:e] ? t : nil;
 }
 @end
-@implementation NSFileHandle (MWHandlers)   /* ponytail: readability handlers are kept, not called (no fd watching) */
-- (void)setReadabilityHandler:(void (^)(NSFileHandle *))h { objc_setAssociatedObject(self, "mw_rh", h, OBJC_ASSOCIATION_COPY); }
-- (void (^)(NSFileHandle *))readabilityHandler { return objc_getAssociatedObject(self, "mw_rh"); }
-- (void)setWriteabilityHandler:(void (^)(NSFileHandle *))h {}
-- (void (^)(NSFileHandle *))writeabilityHandler { return nil; }
-@end
 @implementation NSSet (MWPerform)
 - (void)makeObjectsPerformSelector:(SEL)s { for (id o in [[self copy] autorelease]) ((id (*)(id, SEL))objc_msgSend)(o, s); }
 - (void)makeObjectsPerformSelector:(SEL)s withObject:(id)a { for (id o in [[self copy] autorelease]) ((id (*)(id, SEL, id))objc_msgSend)(o, s, a); }

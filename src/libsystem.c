@@ -291,7 +291,10 @@ static int raise_self(int sig) {
     ((void (*)(int, void *, void *))a.handler)(sig, &si, &uc);
     return 0;
 }
-int kill(int pid, int sig) { return pid == 0 || pid == getpid() ? raise_self(sig) : fail(D_EPERM); }
+int kill(int pid, int sig) {
+    if (pid == 0 || pid == getpid()) return raise_self(sig);
+    return pid < 0 ? fail(D_EPERM) : (int)ret(H(proc, PROC_KILL, pid, sig));   /* (process groups: no) */
+}
 int raise(int sig) { return raise_self(sig); }
 
 /* ---------- pthreads ---------- */
@@ -431,8 +434,21 @@ int kevent(int kq, const struct dkevent *ch, int nch, struct dkevent *ev, int ne
     return (int)ret(H(kevent, kq, ch, nch, ev, nev, ts ? ts->tv_sec * 1000000000 + ts->tv_nsec : -1));
 }
 
-/* ---------- not supported yet: exec ---------- */
-int execve(const char *p, char *const a[], char *const e[]) { return fail(D_ENOSYS); }
+/* ---------- exec: the new program runs as a child, and this process ends with its status ---------- */
+int posix_spawn(int *pid, const char *path, void *const *fa, void *const *attr, char *const argv[], char *const envp[]);
+int posix_spawnp(int *pid, const char *path, void *const *fa, void *const *attr, char *const argv[], char *const envp[]);
+int waitpid(int pid, int *st, int options);
+static int exec_child(int r, int pid) {
+    if (r) return fail(r);
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && *__error() == D_EINTR) {}
+    _exit((st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff);   /* ponytail: a child's signal becomes 128 + signal */
+    return -1;
+}
+int execve(const char *p, char *const a[], char *const e[]) { int pid; return exec_child(posix_spawn(&pid, p, 0, 0, a, e), pid); }
+int execv(const char *p, char *const a[]) { int pid; return exec_child(posix_spawn(&pid, p, 0, 0, a, 0), pid); }
+int execvp(const char *p, char *const a[]) { int pid; return exec_child(posix_spawnp(&pid, p, 0, 0, a, 0), pid); }
+int execvP(const char *p, const char *search, char *const a[]) { return execvp(p, a); }
 int sendfile(int fd, int s, off_t o, off_t *len, void *h, int f) { return fail(D_ENOSYS); }
 
 /* ---------- Mach ---------- */
@@ -772,18 +788,85 @@ int sigaddset(uint32_t *s, int n) { *s |= 1u << (n - 1); return 0; }
 void *signal(int sig, void *h) { return 0; }
 int pause(void) { for (;;) H(sleep, 1000000000); }
 
-/* ---------- processes: not yet ---------- */
-#define NOSPAWN(name) int name() { return fail(D_ENOSYS); }
-NOSPAWN(fork) NOSPAWN(execvp) NOSPAWN(waitpid) NOSPAWN(posix_spawnp) NOSPAWN(posix_spawn)
+/* ---------- processes: posix_spawn, wait, on HC_proc (proc.cpp) ---------- */
+int fork(void) { return fail(D_ENOSYS); }   /* (no way to copy a process on Windows; programs that fork fail as they would there) */
+int vfork(void) { return fail(D_ENOSYS); }
 void *sem_open(const char *name, int flags, ...) { fail(D_ENOSYS); return (void *)-1; } /* SEM_FAILED: no named semaphores */
-int posix_spawn_file_actions_init(void *a) { return 0; }
-int posix_spawn_file_actions_destroy(void *a) { return 0; }
-int posix_spawn_file_actions_adddup2(void *a, int f, int t) { return 0; }
-int posix_spawnattr_init(void *a) { return 0; }
-int posix_spawnattr_destroy(void *a) { return 0; }
-int posix_spawnattr_setflags(void *a, short f) { return 0; }
-int posix_spawnattr_setpgroup(void *a, int g) { return 0; }
-int posix_spawnattr_setsigdefault(void *a, const void *s) { return 0; }
+/* posix_spawn_file_actions_t and posix_spawnattr_t are pointers to these */
+struct spawn_actions { int n, cap; struct dspawn_action *v; };
+struct spawn_attr { short flags; int pgroup; uint32_t sigmask, sigdefault; };
+enum { SPAWN_SETEXEC = 0x40, SPAWN_CLOEXEC_DEFAULT = 0x4000 };
+char *strdup(const char *); void *realloc(void *, size_t); void *calloc(size_t, size_t);
+int posix_spawn_file_actions_init(void **a) { *a = calloc(1, sizeof(struct spawn_actions)); return *a ? 0 : D_ENOMEM; }
+int posix_spawn_file_actions_destroy(void **a) {
+    struct spawn_actions *s = *a;
+    if (s) { for (int i = 0; i < s->n; i++) free((void *)s->v[i].path); free(s->v); free(s); }
+    *a = 0;
+    return 0;
+}
+static int add_action(void **a, int op, int fd, int newfd, const char *path, int oflag, int mode) {
+    struct spawn_actions *s = *a;
+    if (!s) return D_EINVAL;
+    if (fd < 0 || newfd < 0) return D_EBADF;
+    if (s->n == s->cap) {
+        struct dspawn_action *v = realloc(s->v, (size_t)(s->cap = s->cap ? 2 * s->cap : 8) * sizeof *v);
+        if (!v) return D_ENOMEM;
+        s->v = v;
+    }
+    struct dspawn_action *x = &s->v[s->n++];
+    memset(x, 0, sizeof *x);
+    x->op = op; x->fd = fd; x->newfd = newfd; x->oflag = oflag; x->mode = mode; x->path = (uint64_t)(path ? strdup(path) : 0);
+    return 0;
+}
+int posix_spawn_file_actions_addclose(void **a, int fd) { return add_action(a, D_SPAWN_CLOSE, fd, 0, 0, 0, 0); }
+int posix_spawn_file_actions_adddup2(void **a, int fd, int to) { return add_action(a, D_SPAWN_DUP2, fd, to, 0, 0, 0); }
+int posix_spawn_file_actions_addopen(void **a, int fd, const char *p, int fl, int mode) { return add_action(a, D_SPAWN_OPEN, fd, 0, p, fl, mode); }
+int posix_spawn_file_actions_addinherit_np(void **a, int fd) { return add_action(a, D_SPAWN_INHERIT, fd, 0, 0, 0, 0); }
+int posix_spawn_file_actions_addchdir_np(void **a, const char *p) { return add_action(a, D_SPAWN_CHDIR, 0, 0, p, 0, 0); }
+int posix_spawn_file_actions_addfchdir_np(void **a, int fd) {
+    char p[1024];
+    int fcntl(int, int, ...);
+    return fcntl(fd, 50 /* F_GETPATH */, p) ? D_EBADF : posix_spawn_file_actions_addchdir_np(a, p);
+}
+int posix_spawnattr_init(void **a) { *a = calloc(1, sizeof(struct spawn_attr)); return *a ? 0 : D_ENOMEM; }
+int posix_spawnattr_destroy(void **a) { free(*a); *a = 0; return 0; }
+int posix_spawnattr_setflags(void **a, short f) { ((struct spawn_attr *)*a)->flags = f; return 0; }
+int posix_spawnattr_getflags(void *const *a, short *f) { *f = ((struct spawn_attr *)*a)->flags; return 0; }
+int posix_spawnattr_setpgroup(void **a, int g) { ((struct spawn_attr *)*a)->pgroup = g; return 0; }
+int posix_spawnattr_getpgroup(void *const *a, int *g) { *g = ((struct spawn_attr *)*a)->pgroup; return 0; }
+int posix_spawnattr_setsigmask(void **a, const uint32_t *s) { ((struct spawn_attr *)*a)->sigmask = *s; return 0; }
+int posix_spawnattr_getsigmask(void *const *a, uint32_t *s) { *s = ((struct spawn_attr *)*a)->sigmask; return 0; }
+int posix_spawnattr_setsigdefault(void **a, const uint32_t *s) { ((struct spawn_attr *)*a)->sigdefault = *s; return 0; }
+int posix_spawnattr_getsigdefault(void *const *a, uint32_t *s) { *s = ((struct spawn_attr *)*a)->sigdefault; return 0; }
+/* accepted and without effect: CPU preferences, QoS, process policies */
+int posix_spawnattr_setbinpref_np(void **a, size_t n, int *pref, size_t *ocount) { if (ocount) *ocount = n; return 0; }
+int posix_spawnattr_set_qos_class_np(void **a, unsigned q) { return 0; }
+int posix_spawnattr_setprocesstype_np(void **a, int t) { return 0; }
+int posix_spawnattr_setarchpref_np(void **a, size_t n, int *pref, int *sub, size_t *ocount) { if (ocount) *ocount = n; return 0; }
+
+static int spawn(int *pid, const char *path, void *const *fa, void *const *attr, char *const argv[], char *const envp[], int search) {
+    struct spawn_actions *acts = fa ? *fa : 0;
+    struct spawn_attr *at = attr ? *attr : 0;
+    struct dspawn s = {(uint64_t)path, (uint64_t)argv, (uint64_t)(envp ? envp : environ), (uint64_t)(acts ? acts->v : 0),
+                       acts ? acts->n : 0, search, at && (at->flags & SPAWN_CLOEXEC_DEFAULT), 0};
+    int64_t r = H(proc, PROC_SPAWN, &s);
+    if (r < 0) return (int)-r;
+    if (at && (at->flags & SPAWN_SETEXEC)) return exec_child(0, (int)r);   /* the new program in place of this one */
+    if (pid) *pid = (int)r;
+    return 0;
+}
+int posix_spawn(int *pid, const char *path, void *const *fa, void *const *attr, char *const argv[], char *const envp[]) {
+    return spawn(pid, path, fa, attr, argv, envp, 0);
+}
+int posix_spawnp(int *pid, const char *path, void *const *fa, void *const *attr, char *const argv[], char *const envp[]) {
+    return spawn(pid, path, fa, attr, argv, envp, 1);
+}
+int waitpid(int pid, int *st, int options) { return (int)ret(H(proc, PROC_WAIT, pid, st, options)); }
+int waitpid_nc(int pid, int *st, int options) __asm__("_waitpid$NOCANCEL");
+int waitpid_nc(int pid, int *st, int options) { return waitpid(pid, st, options); }
+int wait(int *st) { return waitpid(-1, st, 0); }
+int wait4(int pid, int *st, int options, void *ru) { if (ru) memset(ru, 0, 144); return waitpid(pid, st, options); }   /* (no resource usage) */
+int wait3(int *st, int options, void *ru) { return wait4(-1, st, options, ru); }
 
 /* ---------- dyld introspection ---------- */
 /* ---------- dyld: image table (filled by the loader), dlopen/dlsym/dladdr, unwind sections ---------- */

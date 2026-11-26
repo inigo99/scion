@@ -67,7 +67,7 @@ static A chk(long r) { return r < 0 ? derr() : r; }
 static int dfd(A dirfd) { return dirfd == D_AT_FDCWD ? AT_FDCWD : (int)dirfd; }
 
 /* ======================================================================= files */
-static A guest_open_flags(A fl) {
+A host_open_flags(A fl) {
     int f = (int)(fl & 3);
     if (fl & D_O_NONBLOCK) f |= O_NONBLOCK;
     if (fl & D_O_APPEND) f |= O_APPEND;
@@ -84,7 +84,7 @@ HC hc_read(A fd, A buf, A n, A, A, A) { return chk(read((int)fd, (void *)G(buf),
 HC hc_pread(A fd, A buf, A n, A off, A, A) { return chk(pread((int)fd, (void *)G(buf), (size_t)n, off)); }
 HC hc_open(A dirfd, A path, A flags, A mode, A, A) {
     TRACE("open %s\n", (const char *)path);
-    return chk(openat(dfd(dirfd), (const char *)path, (int)guest_open_flags(flags), (mode_t)mode));
+    return chk(openat(dfd(dirfd), (const char *)path, (int)host_open_flags(flags), (mode_t)mode));
 }
 /* readdir state of directory descriptors */
 struct DirBuf { std::vector<char> buf; size_t pos = 0, len = 0; };

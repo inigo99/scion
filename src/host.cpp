@@ -176,6 +176,12 @@ uintptr_t host_fd_socket(int fd) {
     return fd >= 0 && fd < (int)g_fds.size() && g_fds[fd].kind == FD_SOCK ? g_fds[fd].sock : ~(uintptr_t)0;
 }
 int host_fd_add_socket(uintptr_t s, std::shared_ptr<void> owner) { Fd f; f.kind = FD_SOCK; f.sock = s; f.sock_owner = std::move(owner); return fd_alloc(std::move(f)); }
+HANDLE host_fd_handle(int fd) {   /* proc.cpp: what a child gets for descriptor fd */
+    std::lock_guard<std::mutex> l(g_fdmu);
+    if (fd < 0 || fd >= (int)g_fds.size()) return INVALID_HANDLE_VALUE;
+    Fd &f = g_fds[fd];
+    return f.kind == FD_FILE ? f.h : f.kind == FD_SOCK ? (HANDLE)f.sock : INVALID_HANDLE_VALUE;
+}
 int host_fd_add_kqueue() { Fd f; f.kind = FD_KQ; return fd_alloc(std::move(f)); }
 
 static int64_t filetime_ns(FILETIME ft) { return (int64_t)((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ull) * 100; }
@@ -1238,12 +1244,16 @@ int wmain(int wargc, wchar_t **wargv) {
     if (!main->entry) die("no entry point");
 
     Startup s; s.main = main; s.argc = wargc - 1;
-    s.argv.push_back(win_to_darwin(mainpath));
-    for (int i = 2; i < wargc; i++) s.argv.push_back(conv_arg(narrow(wargv[i])));
+    /* started by a guest's posix_spawn (proc.cpp): the program by its Windows path and then by its Darwin path, and
+     * the arguments as the guest gave them */
+    bool raw = getenv("SCION_RAW_ARGS") && wargc >= 3;
+    s.argv.push_back(raw ? narrow(wargv[2]) : win_to_darwin(mainpath));
+    for (int i = raw ? 3 : 2; i < wargc; i++) s.argv.push_back(raw ? narrow(wargv[i]) : conv_arg(narrow(wargv[i])));
+    s.argc = (int)s.argv.size();
     wchar_t *env = GetEnvironmentStringsW();
     for (wchar_t *e = env; *e; e += wcslen(e) + 1) {
         std::string kv = narrow(e);
-        if (kv[0] == '=') continue;
+        if (kv[0] == '=' || kv.rfind("SCION_RAW_ARGS=", 0) == 0) continue;
         std::string k = kv.substr(0, kv.find('='));
         if (k == "USERPROFILE") s.envp.push_back("HOME=" + win_to_darwin(kv.substr(k.size() + 1)));
         if (k == "TEMP") s.envp.push_back("TMPDIR=" + win_to_darwin(kv.substr(k.size() + 1)));

@@ -173,8 +173,9 @@ static BOOL scan_signed(NSScanner *s, long long *v) {
 - (NSString *)description { return [NSString stringWithFormat:@"<__NSConcreteUUID %p> %@", self, [self UUIDString]]; }
 @end
 
-/* ================================================================ NSFileHandle (blocking; ponytail: no async notifications) */
-@implementation NSFileHandle { int _fd; BOOL _close; }
+/* ================================================================ NSFileHandle (blocking; a readability handler is
+ * called from a thread that reads ahead; ponytail: no notifications) */
+@implementation NSFileHandle { int _fd; BOOL _close, _eof, _watching; NSMutableData *_pending; id _rh; }
 static NSFileHandle *std_handle(int fd) { static NSFileHandle *h[3]; if (!h[fd]) h[fd] = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:NO]; return h[fd]; }
 + (NSFileHandle *)fileHandleWithStandardInput { return std_handle(0); }
 + (NSFileHandle *)fileHandleWithStandardOutput { return std_handle(1); }
@@ -183,8 +184,36 @@ static NSFileHandle *std_handle(int fd) { static NSFileHandle *h[3]; if (!h[fd])
 + (instancetype)fileHandleForWritingAtPath:(NSString *)p { int fd = open([p fileSystemRepresentation], 1); return fd < 0 ? nil : [[[self alloc] initWithFileDescriptor:fd closeOnDealloc:YES] autorelease]; }
 - (instancetype)initWithFileDescriptor:(int)fd closeOnDealloc:(BOOL)c { _fd = fd; _close = c; return self; }
 - (instancetype)initWithFileDescriptor:(int)fd { return [self initWithFileDescriptor:fd closeOnDealloc:NO]; }
-- (void)dealloc { if (_close && _fd >= 0) close(_fd); [super dealloc]; }
+- (void)dealloc { if (_close && _fd >= 0) close(_fd); [_pending release]; [_rh release]; [super dealloc]; }
 - (int)fileDescriptor { return _fd; }
+/* the handler runs on a thread of its own each time data (or the end) arrives; -availableData hands that data out */
+- (void)setReadabilityHandler:(void (^)(NSFileHandle *))h {
+    BOOL start = NO;
+    @synchronized(self) {
+        id old = _rh; _rh = [h copy]; [old release];
+        if (h && !_watching && _fd >= 0) start = _watching = YES;
+    }
+    if (start) [NSThread detachNewThreadSelector:@selector(_watch) toTarget:self withObject:nil];
+}
+- (void (^)(NSFileHandle *))readabilityHandler { @synchronized(self) { return [[_rh retain] autorelease]; } }
+- (void)setWriteabilityHandler:(void (^)(NSFileHandle *))h {}   /* ponytail: writes do not wait here */
+- (void (^)(NSFileHandle *))writeabilityHandler { return nil; }
+- (void)_watch {
+    char *buf = malloc(65536);
+    for (BOOL more = YES; more;) {
+        long r = read(_fd, buf, 65536);
+        void (^h)(NSFileHandle *);
+        @synchronized(self) {
+            if (r > 0) { if (!_pending) _pending = [[NSMutableData alloc] init]; [_pending appendBytes:buf length:(NSUInteger)r]; }
+            else _eof = YES;
+            h = [_rh copy];
+            more = r > 0 && h;
+            if (!more) _watching = NO;
+        }
+        if (h) { void *pool = objc_autoreleasePoolPush(); h(self); objc_autoreleasePoolPop(pool); [h release]; }
+    }
+    free(buf);
+}
 - (void)writeData:(NSData *)d {
     const char *b = [d bytes]; NSUInteger n = [d length];
     while (n) { long w = write(_fd, b, n); if (w <= 0) mw_raise("NSFileHandleOperationException", "writeData: failed"); b += w; n -= (NSUInteger)w; }
@@ -195,7 +224,11 @@ static NSFileHandle *std_handle(int fd) { static NSFileHandle *h[3]; if (!h[fd])
     [d setLength:got]; return d;
 }
 - (NSData *)readDataToEndOfFile { NSMutableData *d = [NSMutableData data]; NSData *c; while ([(c = [self readDataOfLength:65536]) length]) [d appendData:c]; return d; }
-- (NSData *)availableData { NSMutableData *d = [NSMutableData dataWithLength:65536]; long r = read(_fd, [d mutableBytes], 65536); [d setLength:r > 0 ? (NSUInteger)r : 0]; return d; }
+- (NSData *)availableData {
+    @synchronized(self) {
+        if ([_pending length] || _eof) { NSData *d = _pending ? [_pending autorelease] : [NSData data]; _pending = nil; return d; }
+    }
+    NSMutableData *d = [NSMutableData dataWithLength:65536]; long r = read(_fd, [d mutableBytes], 65536); [d setLength:r > 0 ? (NSUInteger)r : 0]; return d; }
 - (unsigned long long)seekToEndOfFile { return (unsigned long long)lseek(_fd, 0, 2); }
 - (void)seekToFileOffset:(unsigned long long)o { lseek(_fd, (long)o, 0); }
 - (unsigned long long)offsetInFile { return (unsigned long long)lseek(_fd, 0, 1); }
@@ -347,9 +380,17 @@ NSRect NSRectFromString(NSString *s) { double v[4] = {0}; geo_nums(s, v, 4); ret
 - (NSMutableString *)mutableString { return _s; }
 @end
 
-/* ================================================================ NSTask
- * ponytail: scion has no process creation (posix_spawn fails with ENOSYS): launching reports that error */
-@implementation NSTask
+/* ================================================================ NSTask, on posix_spawn: a thread per task waits for it to
+ * end, then sets its status and calls the termination handler (and posts NSTaskDidTerminateNotification) there */
+int posix_spawn(int *, const char *, void *const *, void *const *, char *const[], char *const[]);
+int posix_spawn_file_actions_init(void **); int posix_spawn_file_actions_destroy(void **);
+int posix_spawn_file_actions_adddup2(void **, int, int); int posix_spawn_file_actions_addchdir_np(void **, const char *);
+int posix_spawnattr_init(void **); int posix_spawnattr_destroy(void **); int posix_spawnattr_setflags(void **, short);
+int waitpid(int, int *, int); int kill(int, int); int usleep(unsigned);
+NSNotificationName const NSTaskDidTerminateNotification = @"NSTaskDidTerminateNotification";
+@implementation NSTask {
+    int _pid, _status; NSTaskTerminationReason _reason; BOOL _launched; volatile BOOL _running;
+}
 @synthesize executableURL, launchPath, arguments, environment, currentDirectoryURL, currentDirectoryPath, standardInput, standardOutput,
     standardError, terminationHandler;
 - (void)dealloc {
@@ -357,16 +398,81 @@ NSRect NSRectFromString(NSString *s) { double v[4] = {0}; geo_nums(s, v, 4); ret
     [currentDirectoryPath release]; [standardInput release]; [standardOutput release]; [standardError release]; [terminationHandler release];
     [super dealloc];
 }
-- (int)processIdentifier { return 0; }
-- (int)terminationStatus { return 0; }
-- (NSTaskTerminationReason)terminationReason { return NSTaskTerminationReasonExit; }
-- (BOOL)isRunning { return NO; }
-- (BOOL)launchAndReturnError:(NSError **)error {
-    if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:78 /* ENOSYS */
-        userInfo:@{NSLocalizedDescriptionKey: @"scion cannot launch processes (NSTask)"}];
-    return NO;
+- (int)processIdentifier { return _pid; }
+- (int)terminationStatus {
+    if (!_launched || _running) mw_raise("NSInvalidArgumentException", "task not launched or still running");
+    return _status;
 }
-- (void)launch { [NSException raise:NSInvalidArgumentException format:@"scion cannot launch processes (NSTask)"]; }
-- (void)waitUntilExit { }
-- (void)terminate { }
+- (NSTaskTerminationReason)terminationReason { return _reason; }
+- (BOOL)isRunning { return __atomic_load_n(&_running, __ATOMIC_ACQUIRE); }
+static int task_fd(id io, BOOL input) {   /* the descriptor a standardInput/Output/Error stands for, -1: this process's */
+    if ([io isKindOfClass:[NSPipe class]]) return [(input ? [io fileHandleForReading] : [io fileHandleForWriting]) fileDescriptor];
+    if ([io isKindOfClass:[NSFileHandle class]]) return [io fileDescriptor];
+    return -1;
+}
+- (BOOL)launchAndReturnError:(NSError **)error {
+    if (_launched) mw_raise("NSInvalidArgumentException", "task already launched");
+    NSString *path = executableURL ? [executableURL path] : launchPath;
+    if (!path) mw_raise("NSInvalidArgumentException", "must provide launch path");
+    NSUInteger n = [arguments count];
+    char **argv = calloc(n + 2, sizeof *argv);
+    argv[0] = (char *)[path fileSystemRepresentation];
+    for (NSUInteger i = 0; i < n; i++) argv[i + 1] = (char *)[[[arguments objectAtIndex:i] description] UTF8String];
+    char **envp = 0;
+    if (environment) {
+        envp = calloc([environment count] + 1, sizeof *envp);
+        NSUInteger k = 0;
+        for (NSString *key in environment) envp[k++] = (char *)[[NSString stringWithFormat:@"%@=%@", key, [environment objectForKey:key]] UTF8String];
+    }
+    void *fa, *at;
+    posix_spawn_file_actions_init(&fa);
+    id io[3] = {standardInput, standardOutput, standardError};
+    for (int i = 0; i < 3; i++) { int fd = task_fd(io[i], i == 0); if (fd >= 0) posix_spawn_file_actions_adddup2(&fa, fd, i); }
+    NSString *cwd = currentDirectoryURL ? [currentDirectoryURL path] : currentDirectoryPath;
+    if (cwd) posix_spawn_file_actions_addchdir_np(&fa, [cwd fileSystemRepresentation]);
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, 0x4000 /* POSIX_SPAWN_CLOEXEC_DEFAULT, as Foundation */);
+    int r = posix_spawn(&_pid, argv[0], &fa, &at, argv, envp);
+    posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
+    free(argv); free(envp);
+    if (r) {
+        if (error) *error = r == 2 ? [NSError errorWithDomain:NSCocoaErrorDomain code:4 /* NSFileNoSuchFileError */ userInfo:@{NSFilePathErrorKey: path}]
+                                   : mw_posix_error(r, path);
+        return NO;
+    }
+    /* the child's ends of pipes close here, so reading the other end sees the end when the child is done */
+    if ([standardInput isKindOfClass:[NSPipe class]]) [[standardInput fileHandleForReading] closeFile];
+    if ([standardOutput isKindOfClass:[NSPipe class]]) [[standardOutput fileHandleForWriting] closeFile];
+    if ([standardError isKindOfClass:[NSPipe class]]) [[standardError fileHandleForWriting] closeFile];
+    _launched = YES; _running = YES;
+    [NSThread detachNewThreadSelector:@selector(_reap) toTarget:self withObject:nil];   /* (the thread keeps the task) */
+    return YES;
+}
+- (void)_reap {
+    int st = 0;
+    while (waitpid(_pid, &st, 0) < 0 && errno == 4 /* EINTR */) {}
+    if (st & 0x7f) { _reason = NSTaskTerminationReasonUncaughtSignal; _status = st & 0x7f; }
+    else { _reason = NSTaskTerminationReasonExit; _status = (st >> 8) & 0xff; }
+    __atomic_store_n(&_running, NO, __ATOMIC_RELEASE);
+    void *pool = objc_autoreleasePoolPush();
+    void (^h)(NSTask *) = [[terminationHandler retain] autorelease];
+    if (h) h(self);
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSTaskDidTerminateNotification object:self];
+    objc_autoreleasePoolPop(pool);
+}
+- (void)launch {
+    NSError *e = nil;
+    if (![self launchAndReturnError:&e]) mw_raise("NSInvalidArgumentException", "launch path not accessible");
+}
+/* the main thread's run loop keeps running meanwhile, as in Foundation */
+- (void)waitUntilExit {
+    while ([self isRunning]) {
+        if ([NSThread isMainThread]) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        else usleep(1000);
+    }
+}
+- (void)terminate { if ([self isRunning]) kill(_pid, 15); }
+- (void)interrupt { if ([self isRunning]) kill(_pid, 2); }
+- (BOOL)suspend { return [self isRunning] && kill(_pid, 17) == 0; }
+- (BOOL)resume { return [self isRunning] && kill(_pid, 19) == 0; }
 @end

@@ -13,6 +13,7 @@ dispatch sources {arch}            | SOURCES OK           | - | sources_{arch}
 code generated at run time {arch}  | JIT OK               | - | jit_{arch}
 vm_remap without copying {arch}    | REMAP OK             | - | remap_{arch}
 sockets, kqueue, DNS {arch}        | NET OK               | - | net_{arch}
+child processes {arch}             | SPAWN OK             | - | spawn_{arch}
 Go: signals, preemption {arch}     | goroutines: 2999997 2999997 | - | signals_{arch}
 # C++ and Objective-C
 C++ {arch}                         | CXX OK               | - | cxx_{arch}
@@ -23,6 +24,7 @@ uncaught exception {arch}          | uncaught exception 'NSRangeException' | - |
 Foundation {arch}                  | FOUNDATION OK        | - | foundation_{arch}
 Foundation 2 {arch}                | FOUNDATION2 OK       | - | foundation2_{arch}
 URLSession, HTTP {arch}            | URLSESSION OK        | - | urlsession_{arch}
+NSTask {arch}                      | TASK OK              | - | task_{arch}
 NSRegularExpression {arch}         | REGEX OK             | - | regex_{arch}
 NSInvocation, NSUndoManager {arch} | INVOCATIONS OK       | - | invocations_{arch}
 class-dump (arm64)                 | - (void)throwAt:(int)arg1; | - | class-dump_arm64 exceptions_arm64

@@ -58,7 +58,8 @@
     X(metal)      /* op, a, b, c, d, e -> see metal/mtlbridge.h (forwarded to scion-metal.dll) */ \
     X(ui)         /* op, a, b, c, d, e -> see uibridge.h (windows, events, menus, controllers, sound) */ \
     X(xattr)      /* op (0 get, 1 set, 2 remove, 3 list), fd (path == 0) , path, name, buf, size -> bytes / -errno */ \
-    X(net)        /* op, a, b, c, d, e -> sockets, name resolution, poll: see NET_* (net.cpp) */
+    X(net)        /* op, a, b, c, d, e -> sockets, name resolution, poll: see NET_* (net.cpp) */ \
+    X(proc)       /* op, a, b, c -> child processes: see PROC_* (proc.cpp) */
 
 enum {
 #define HC_ENUM(n) HC_##n,
@@ -181,3 +182,16 @@ enum {
     D_EPIPE = 32, D_EINPROGRESS = 36, D_EALREADY = 37, D_ENOPROTOOPT = 42, D_EOPNOTSUPP = 45, D_ECONNRESET = 54,
     D_ENOTCONN = 57, D_ECONNREFUSED = 61, D_S_IFSOCK = 0140000,
 };
+
+/* HC_proc operations. Signal numbers, wait statuses and errnos are Darwin's. */
+enum {
+    PROC_SPAWN, /* struct dspawn * -> pid */
+    PROC_WAIT,  /* pid (-1 any child), int *status, options (D_WNOHANG) -> pid, 0 (WNOHANG, none ended) */
+    PROC_KILL,  /* pid, sig (0: does it exist) */
+};
+/* posix_spawn: a Mach-O program runs in a new scion, anything else natively (Windows: an .exe, found on PATH for
+ * /bin, /usr/bin... paths). File actions run in order; Windows hands the child its descriptors 0-2 only. */
+struct dspawn_action { int32_t op, fd, newfd, oflag, mode, pad; uint64_t path; };
+enum { D_SPAWN_CLOSE, D_SPAWN_DUP2, D_SPAWN_OPEN, D_SPAWN_CHDIR, D_SPAWN_INHERIT };
+struct dspawn { uint64_t path, argv, envp, actions; int32_t nactions, search, close_others, pad; };
+enum { D_WNOHANG = 1, D_ECHILD = 10, D_ESRCH = 3 };

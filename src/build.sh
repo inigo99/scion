@@ -59,11 +59,11 @@ for a in x86_64 arm64; do
 done
 # the hosts: scion.exe (MinGW), scionw.exe and, with dynarmic for Linux and SDL2/FreeType/fontconfig/libpng/libjpeg/libcurl, scion
 DI="-I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include"
-for f in host dyld arm64 ui install net http; do job x86_64-w64-mingw32-g++-posix -std=c++20 -O2 $W -municode $DI -c $f.cpp -o $T/win_$f.o; done
+for f in host dyld arm64 ui install net http proc; do job x86_64-w64-mingw32-g++-posix -std=c++20 -O2 $W -municode $DI -c $f.cpp -o $T/win_$f.o; done
 LINUX=
 if [ -f $L/src/dynarmic/libdynarmic.a ] && pkg-config --exists sdl2 freetype2 fontconfig libpng libcurl; then
   LINUX=1
-  for f in host_linux ui_linux install_linux dyld arm64 net http; do
+  for f in host_linux ui_linux install_linux dyld arm64 net http proc; do
     job g++ -std=c++20 -O2 $W $DI $(pkg-config --cflags sdl2 freetype2 fontconfig libpng libcurl) -c $f.cpp -o $T/lin_$f.o
   done
 else echo "note: dynarmic for Linux (scripts/build-dynarmic.sh --linux) or SDL2/FreeType/fontconfig/libpng/libcurl are missing: skipping bin/scion"; fi

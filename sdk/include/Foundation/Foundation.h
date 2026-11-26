@@ -761,7 +761,7 @@ NS_SWIFT_NAME(FileHandle)
 - (nullable NSURL *)URLForDirectory:(NSSearchPathDirectory)d inDomain:(NSSearchPathDomainMask)m appropriateForURL:(nullable NSURL *)u create:(BOOL)c error:(NSError **)error;
 @end
 @class NSURL;
-/* NSTask: scion cannot start processes yet: -launchAndReturnError: fails (ENOSYS), -launch raises */
+/* NSTask: a Mach-O program runs in its own scion, others natively (on Windows, .exe programs: see posix_spawn) */
 typedef NS_ENUM(NSInteger, NSTaskTerminationReason) { NSTaskTerminationReasonExit = 1, NSTaskTerminationReasonUncaughtSignal = 2 };
 NS_SWIFT_NAME(Process)
 @interface NSTask : NSObject
@@ -773,7 +773,9 @@ NS_SWIFT_NAME(Process)
 @property (readonly) NSTaskTerminationReason terminationReason; @property (readonly, getter=isRunning) BOOL running;
 @property (nullable, copy) void (^terminationHandler)(NSTask *);
 - (BOOL)launchAndReturnError:(NSError **)error; - (void)launch; - (void)waitUntilExit; - (void)terminate;
+- (void)interrupt; - (BOOL)suspend; - (BOOL)resume;
 @end
+FOUNDATION_EXPORT NSNotificationName const NSTaskDidTerminateNotification;
 
 NS_SWIFT_NAME(Bundle)
 @interface NSBundle : NSObject
