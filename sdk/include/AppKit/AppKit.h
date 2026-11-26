@@ -120,8 +120,14 @@ typedef NSInteger NSControlStateValue;
 static const NSControlStateValue NSControlStateValueMixed = -1, NSControlStateValueOff = 0, NSControlStateValueOn = 1;
 enum { NSMixedState = -1, NSOffState = 0, NSOnState = 1 };
 typedef NS_ENUM(NSUInteger, NSControlSize) { NSControlSizeRegular = 0, NSControlSizeSmall = 1, NSControlSizeMini = 2, NSControlSizeLarge = 3 };
+/* as in Apple's SDK: arm64 uses iOS's values for center and right */
+#if defined(__arm64__) || defined(__aarch64__)
+typedef NS_ENUM(NSInteger, NSTextAlignment) { NSTextAlignmentLeft = 0, NSTextAlignmentCenter = 1, NSTextAlignmentRight = 2,
+    NSTextAlignmentJustified = 3, NSTextAlignmentNatural = 4 };
+#else
 typedef NS_ENUM(NSInteger, NSTextAlignment) { NSTextAlignmentLeft = 0, NSTextAlignmentRight = 1, NSTextAlignmentCenter = 2,
     NSTextAlignmentJustified = 3, NSTextAlignmentNatural = 4 };
+#endif
 typedef NS_ENUM(NSInteger, NSLineBreakMode) { NSLineBreakByWordWrapping = 0, NSLineBreakByCharWrapping, NSLineBreakByClipping,
     NSLineBreakByTruncatingHead, NSLineBreakByTruncatingTail, NSLineBreakByTruncatingMiddle };
 typedef NS_ENUM(NSInteger, NSUserInterfaceLayoutOrientation) { NSUserInterfaceLayoutOrientationHorizontal = 0, NSUserInterfaceLayoutOrientationVertical = 1 };
@@ -223,6 +229,16 @@ APPKIT_EXTERN NSAttributedStringKey const NSBackgroundColorAttributeName NS_SWIF
 APPKIT_EXTERN NSAttributedStringKey const NSParagraphStyleAttributeName NS_SWIFT_NAME(paragraphStyle);
 APPKIT_EXTERN NSAttributedStringKey const NSLinkAttributeName NS_SWIFT_NAME(link);
 APPKIT_EXTERN NSAttributedStringKey const NSBaselineOffsetAttributeName NS_SWIFT_NAME(baselineOffset);
+APPKIT_EXTERN NSAttributedStringKey const NSKernAttributeName NS_SWIFT_NAME(kern), NSUnderlineStyleAttributeName NS_SWIFT_NAME(underlineStyle),
+    NSUnderlineColorAttributeName NS_SWIFT_NAME(underlineColor), NSStrikethroughStyleAttributeName NS_SWIFT_NAME(strikethroughStyle),
+    NSStrikethroughColorAttributeName NS_SWIFT_NAME(strikethroughColor), NSStrokeWidthAttributeName NS_SWIFT_NAME(strokeWidth),
+    NSStrokeColorAttributeName NS_SWIFT_NAME(strokeColor), NSShadowAttributeName NS_SWIFT_NAME(shadow), NSLigatureAttributeName NS_SWIFT_NAME(ligature),
+    NSSuperscriptAttributeName NS_SWIFT_NAME(superscript), NSObliquenessAttributeName NS_SWIFT_NAME(obliqueness),
+    NSExpansionAttributeName NS_SWIFT_NAME(expansion), NSToolTipAttributeName NS_SWIFT_NAME(toolTip), NSAttachmentAttributeName NS_SWIFT_NAME(attachment),
+    NSCursorAttributeName NS_SWIFT_NAME(cursor), NSWritingDirectionAttributeName NS_SWIFT_NAME(writingDirection);
+typedef NS_OPTIONS(NSInteger, NSUnderlineStyle) { NSUnderlineStyleNone = 0, NSUnderlineStyleSingle = 1, NSUnderlineStyleThick = 2,
+    NSUnderlineStyleDouble = 9, NSUnderlineStylePatternSolid = 0, NSUnderlineStylePatternDot = 0x100, NSUnderlineStylePatternDash = 0x200,
+    NSUnderlineStyleByWord = 0x8000 };
 typedef NSString *NSRunLoopModeAppKit;
 APPKIT_EXTERN NSString *const NSModalPanelRunLoopMode, *const NSEventTrackingRunLoopMode;
 typedef NSString *NSDeviceDescriptionKey;
@@ -838,9 +854,27 @@ void NSRectFillList(const NSRect *r, NSInteger n); void NSRectClipList(const NSR
 - (void)set; - (void)setFill; - (void)setStroke;
 @end
 APPKIT_EXTERN NSString *const NSCalibratedRGBColorSpace, *const NSDeviceRGBColorSpace;
-@interface NSFontDescriptor : NSObject
+typedef NSString *NSFontDescriptorAttributeName NS_TYPED_ENUM; typedef NSString *NSFontDescriptorTraitKey NS_TYPED_ENUM;
+APPKIT_EXTERN NSFontDescriptorAttributeName const NSFontNameAttribute, NSFontFamilyAttribute, NSFontSizeAttribute, NSFontFaceAttribute,
+    NSFontVisibleNameAttribute, NSFontTraitsAttribute, NSFontMatrixAttribute, NSFontFixedAdvanceAttribute;
+APPKIT_EXTERN NSFontDescriptorTraitKey const NSFontSymbolicTrait, NSFontWeightTrait, NSFontWidthTrait, NSFontSlantTrait;
+typedef uint32_t NSFontDescriptorSymbolicTraits;
+enum { NSFontDescriptorTraitItalic = 1, NSFontDescriptorTraitBold = 2, NSFontDescriptorTraitExpanded = 1 << 5,
+       NSFontDescriptorTraitCondensed = 1 << 6, NSFontDescriptorTraitMonoSpace = 1 << 10 };
+@interface NSFontDescriptor : NSObject <NSCopying>
++ (NSFontDescriptor *)fontDescriptorWithFontAttributes:(nullable NSDictionary<NSFontDescriptorAttributeName, id> *)a;
++ (NSFontDescriptor *)fontDescriptorWithName:(NSString *)n size:(CGFloat)s;
+- (instancetype)initWithFontAttributes:(nullable NSDictionary<NSFontDescriptorAttributeName, id> *)a;
 @property(readonly) CGFloat pointSize;
-- (NSFontDescriptor *)fontDescriptorWithSymbolicTraits:(uint32_t)t;
+@property(readonly, nullable) NSString *postscriptName;
+@property(readonly) NSDictionary<NSFontDescriptorAttributeName, id> *fontAttributes;
+@property(readonly) NSFontDescriptorSymbolicTraits symbolicTraits;
+- (nullable id)objectForKey:(NSFontDescriptorAttributeName)k;
+- (NSFontDescriptor *)fontDescriptorWithSymbolicTraits:(NSFontDescriptorSymbolicTraits)t;
+- (NSFontDescriptor *)fontDescriptorByAddingAttributes:(NSDictionary<NSFontDescriptorAttributeName, id> *)a;
+- (NSFontDescriptor *)fontDescriptorWithSize:(CGFloat)s; - (NSFontDescriptor *)fontDescriptorWithFamily:(NSString *)f;
+- (NSArray<NSFontDescriptor *> *)matchingFontDescriptorsWithMandatoryKeys:(nullable NSSet<NSFontDescriptorAttributeName> *)k;
+- (nullable NSFontDescriptor *)matchingFontDescriptorWithMandatoryKeys:(nullable NSSet<NSFontDescriptorAttributeName> *)k;
 @end
 typedef unsigned int NSGlyph; typedef NSSize *NSSizeArray;
 typedef NSString *NSFontTextStyle NS_TYPED_ENUM;
@@ -1235,8 +1269,11 @@ typedef NS_OPTIONS(NSUInteger, NSFontTraitMask) { NSItalicFontMask = 1, NSBoldFo
 @property(readonly, copy) NSArray<NSLayoutManager *> *layoutManagers;
 - (void)addLayoutManager:(NSLayoutManager *)m; - (void)removeLayoutManager:(NSLayoutManager *)m;
 @end
+@class NSTextView;
+APPKIT_EXTERN NSNotificationName const NSTextStorageWillProcessEditingNotification, NSTextStorageDidProcessEditingNotification;
 @interface NSTextContainer : NSObject
 - (instancetype)initWithSize:(NSSize)s; - (instancetype)initWithContainerSize:(NSSize)s;
+@property(nullable, assign) NSTextView *textView;
 @property NSSize size, containerSize; @property CGFloat lineFragmentPadding; @property(nullable, assign) NSLayoutManager *layoutManager;
 @property BOOL widthTracksTextView, heightTracksTextView; @property NSUInteger maximumNumberOfLines; @property NSLineBreakMode lineBreakMode;
 @end
@@ -1936,6 +1973,7 @@ APPKIT_EXTERN NSNotificationName const NSTextDidBeginEditingNotification, NSText
 - (instancetype)initWithFrame:(NSRect)r textContainer:(nullable NSTextContainer *)c;
 - (void)insertText:(nullable id)s replacementRange:(NSRange)r;
 - (void)scrollRangeToVisible:(NSRange)r;
+- (NSUInteger)characterIndexForInsertionAtPoint:(NSPoint)p;
 @property NSSize textContainerInset;
 @property(nullable, assign) id<NSTextViewDelegate> delegate;
 @property(nullable, readonly) NSTextStorage *textStorage;

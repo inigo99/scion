@@ -251,8 +251,9 @@ NSSize mw_text_size_wrapped(NSString *s, NSFont *f, CGFloat maxw) {
 }
 NSSize mw_text_size(NSString *s, NSFont *f) { return mw_text_size_wrapped(s, f, 0); }
 static void free_data(void *info, const void *data, size_t size) { free((void *)data); }
-/* one line with its baseline's left end at p (user space), upright and on whole device pixels */
-static void draw_line(CGContextRef c, NSString *s, NSFont *f, NSColor *col, CGPoint p) {
+/* one line with its baseline's left end at p (user space), upright and on whole device pixels, in col (NULL: the
+ * context's fill color) */
+void mw_draw_text_line(CGContextRef c, NSString *s, NSFont *f, CGColorRef col, CGPoint p) {
     if (!c || ![s length]) return;
     CGAffineTransform m = CGContextGetCTM(c);
     CGFloat sc = sqrt(fabs(m.a * m.d - m.b * m.c));
@@ -267,11 +268,13 @@ static void draw_line(CGContextRef c, NSString *s, NSFont *f, NSColor *col, CGPo
     CGImageRef img = CGImageCreate(t.w, t.h, 8, 8, t.w, NULL, kCGImageAlphaOnly, dp, NULL, false, 0);
     CGContextSaveGState(c);
     _mwCGContextSetCTM(c, CGAffineTransformIdentity);
-    CGContextSetFillColorWithColor(c, (col ? col : [NSColor blackColor]).CGColor);
+    if (col) CGContextSetFillColorWithColor(c, col);
     CGContextDrawImage(c, r, img);
     CGContextRestoreGState(c);
     CGImageRelease(img); CGDataProviderRelease(dp);
 }
+static void draw_line(CGContextRef c, NSString *s, NSFont *f, NSColor *col, CGPoint p) { mw_draw_text_line(c, s, f, (col ? col : [NSColor blackColor]).CGColor, p); }
+CGFloat mw_text_width(NSString *s, NSFont *f) { return width_of(s, font_or_default(f)); }
 /* ---------------------------------------------------------------- glyphs (CoreText / CGContextShowGlyphs)
  * A glyph here is its UTF-16 character: fonts map characters to themselves. Each glyph's coverage mask is rendered once per
  * font, size and scale and drawn upright with the context's fill color at the text-space position (text matrix, then CTM). */
@@ -328,31 +331,41 @@ static CGFloat glyph_advance(NSFont *f, CGGlyph g) { return width_of([NSString s
 - (void)set { _mwCGContextSetFont(mw_cg(), self); }
 - (void)setInContext:(NSGraphicsContext *)c { _mwCGContextSetFont((CGContextRef)[c CGContext], self); }
 @end
-/* CoreText on NSFont (CTFontRef is toll-free bridged with NSFont, as on macOS) */
-typedef const void *CTFontRef;
+/* CoreText on NSFont (CTFontRef is toll-free bridged with NSFont, as on macOS); layout is in coretext.m */
 CTFontRef CTFontCreateWithName(CFStringRef n, CGFloat size, const CGAffineTransform *m) {
     if (size <= 0) size = 12;
     NSFont *f = n ? [NSFont fontWithName:(NSString *)n size:size] : nil;
     if (!f) f = [(NSString *)n rangeOfString:@"Mono"].location != NSNotFound || [(NSString *)n rangeOfString:@"Menlo"].location != NSNotFound || [(NSString *)n rangeOfString:@"Courier"].location != NSNotFound
         ? [NSFont userFixedPitchFontOfSize:size] : [NSFont systemFontOfSize:size];
-    return [f retain];
+    return (CTFontRef)[f retain];
 }
-CTFontRef CTFontCreateWithFontDescriptor(id d, CGFloat size, const CGAffineTransform *m) { return [[NSFont fontWithDescriptor:d size:size] ?: [NSFont systemFontOfSize:size] retain]; }
-CTFontRef CTFontCreateCopyWithAttributes(CTFontRef f, CGFloat size, const CGAffineTransform *m, id d) { return [[NSFont fontWithName:[(NSFont *)f fontName] size:size > 0 ? size : [(NSFont *)f pointSize]] ?: (NSFont *)f retain]; }
-CTFontRef CTFontCreateForString(CTFontRef f, CFStringRef s, CFRange r) { return [(NSFont *)f retain]; } /* every character is "in" every font */
-CTFontRef CTFontCreateUIFontForLanguage(uint32_t type, CGFloat size, CFStringRef lang) { return [[NSFont systemFontOfSize:size > 0 ? size : 13] retain]; }
+CTFontRef CTFontCreateWithFontDescriptor(CTFontDescriptorRef d, CGFloat size, const CGAffineTransform *m) { return (CTFontRef)[[NSFont fontWithDescriptor:(NSFontDescriptor *)d size:size] ?: [NSFont systemFontOfSize:size] retain]; }
+CTFontRef CTFontCreateCopyWithAttributes(CTFontRef f, CGFloat size, const CGAffineTransform *m, CTFontDescriptorRef d) {
+    NSFontDescriptor *fd = d ? [[(NSFont *)f fontDescriptor] fontDescriptorByAddingAttributes:[(NSFontDescriptor *)d fontAttributes]] : [(NSFont *)f fontDescriptor];
+    return (CTFontRef)[[NSFont fontWithDescriptor:fd size:size > 0 ? size : [(NSFont *)f pointSize]] ?: (NSFont *)f retain];
+}
+CTFontRef CTFontCreateForString(CTFontRef f, CFStringRef s, CFRange r) { return (CTFontRef)[(NSFont *)f retain]; } /* every character is "in" every font */
+CTFontRef CTFontCreateUIFontForLanguage(CTFontUIFontType type, CGFloat size, CFStringRef lang) {
+    CGFloat s = size > 0 ? size : type == kCTFontUIFontSmallSystem || type == kCTFontUIFontSmallEmphasizedSystem || type == kCTFontUIFontToolTip ? 11
+              : type == kCTFontUIFontMiniSystem || type == kCTFontUIFontMiniEmphasizedSystem ? 9 : 13;
+    NSFont *f = type == kCTFontUIFontUserFixedPitch ? [NSFont userFixedPitchFontOfSize:s]
+              : type == kCTFontUIFontEmphasizedSystem || type == kCTFontUIFontSmallEmphasizedSystem || type == kCTFontUIFontMiniEmphasizedSystem
+                || type == kCTFontUIFontEmphasizedSystemDetail || type == kCTFontUIFontAlertHeader ? [NSFont boldSystemFontOfSize:s]
+              : type == kCTFontUIFontUser ? [NSFont userFontOfSize:s] : [NSFont systemFontOfSize:s];
+    return (CTFontRef)[f retain];
+}
 CFCharacterSetRef CTFontCopyCharacterSet(CTFontRef f) {
     NSMutableCharacterSet *cs = [[NSMutableCharacterSet alloc] init];
     [cs addCharactersInRange:NSMakeRange(0x20, 0xD800 - 0x20)]; [cs addCharactersInRange:NSMakeRange(0xE000, 0x10000 - 0xE000)];
     return (CFCharacterSetRef)cs;
 }
-bool CTFontGetGlyphsForCharacters(CTFontRef f, const unichar *ch, CGGlyph *g, CFIndex n) { for (CFIndex i = 0; i < n; i++) g[i] = ch[i]; return true; }
-double CTFontGetAdvancesForGlyphs(CTFontRef f, uint32_t orientation, const CGGlyph *g, CGSize *adv, CFIndex n) {
+bool CTFontGetGlyphsForCharacters(CTFontRef f, const UniChar ch[], CGGlyph g[], CFIndex n) { for (CFIndex i = 0; i < n; i++) g[i] = ch[i]; return true; }
+double CTFontGetAdvancesForGlyphs(CTFontRef f, CTFontOrientation orientation, const CGGlyph g[], CGSize *adv, CFIndex n) {
     double total = 0;
     for (CFIndex i = 0; i < n; i++) { CGFloat a = glyph_advance((NSFont *)f, g[i]); if (adv) adv[i] = CGSizeMake(a, 0); total += a; }
     return total;
 }
-CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef f, uint32_t o, const CGGlyph *g, CGRect *rects, CFIndex n) {
+CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef f, CTFontOrientation o, const CGGlyph g[], CGRect *rects, CFIndex n) {
     CGRect all = CGRectNull;
     for (CFIndex i = 0; i < n; i++) { CGRect r = [(NSFont *)f boundingRectForGlyph:g[i]]; if (rects) rects[i] = r; all = CGRectUnion(all, r); }
     return all;
@@ -369,7 +382,7 @@ CFStringRef CTFontCopyPostScriptName(CTFontRef f) { return (CFStringRef)[[(NSFon
 CFStringRef CTFontCopyFamilyName(CTFontRef f) { return (CFStringRef)[[(NSFont *)f familyName] copy]; }
 CFStringRef CTFontCopyFullName(CTFontRef f) { return (CFStringRef)[[(NSFont *)f displayName] copy]; }
 CFStringRef CTFontCopyDisplayName(CTFontRef f) { return (CFStringRef)[[(NSFont *)f displayName] copy]; }
-void CTFontDrawGlyphs(CTFontRef f, const CGGlyph *g, const CGPoint *pos, size_t n, CGContextRef c) { draw_glyphs(c, (NSFont *)f, g, pos, n); }
+void CTFontDrawGlyphs(CTFontRef f, const CGGlyph g[], const CGPoint pos[], size_t n, CGContextRef c) { draw_glyphs(c, (NSFont *)f, g, pos, n); }
 void CGContextShowGlyphsAtPositions(CGContextRef c, const CGGlyph *g, const CGPoint *pos, size_t n) { draw_glyphs(c, _mwCGContextFont(c), g, pos, n); }
 void CGContextShowGlyphsWithAdvances(CGContextRef c, const CGGlyph *g, const CGSize *adv, size_t n) {
     if (!c || !n) return;
@@ -437,18 +450,20 @@ static NSRect bounding(NSString *s, NSSize size, NSStringDrawingOptions o, NSDic
 - (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o attributes:(NSDictionary *)a { draw_in(self, r, a); }
 - (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o attributes:(NSDictionary *)a context:(id)c { draw_in(self, r, a); }
 @end
-/* ponytail: the attributes of the first character apply to the whole string */
-static NSDictionary *first_attrs(NSAttributedString *s) { return [s length] ? [s attributesAtIndex:0 effectiveRange:NULL] : @{}; }
+/* attributed strings keep their runs: laid out by coretext.m */
 @implementation NSAttributedString (AppKitDrawing)
-- (NSSize)size { return mw_text_size(self.string, attrs(first_attrs(self)).font); }
-- (void)drawAtPoint:(NSPoint)p { draw_at(self.string, p, first_attrs(self)); }
-- (void)drawInRect:(NSRect)r { draw_in(self.string, r, first_attrs(self)); }
-- (NSRect)boundingRectWithSize:(NSSize)s options:(NSStringDrawingOptions)o { return bounding(self.string, s, o, first_attrs(self)); }
-- (NSRect)boundingRectWithSize:(NSSize)s options:(NSStringDrawingOptions)o context:(id)c { return bounding(self.string, s, o, first_attrs(self)); }
-- (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o { draw_in(self.string, r, first_attrs(self)); }
-- (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o context:(id)c { draw_in(self.string, r, first_attrs(self)); }
+- (NSSize)size { return mw_attr_size(self, 0); }
+- (void)drawAtPoint:(NSPoint)p { NSSize z = mw_attr_size(self, 0); mw_attr_draw(self, NSMakeRect(p.x, p.y, z.width + 1, z.height), NO); }
+- (void)drawInRect:(NSRect)r { mw_attr_draw(self, r, YES); }
+static NSRect attr_bounding(NSAttributedString *s, NSSize size, NSStringDrawingOptions o) {
+    NSSize z = mw_attr_size(s, (o & NSStringDrawingUsesLineFragmentOrigin) ? size.width : 0);
+    return NSMakeRect(0, 0, z.width, z.height);
+}
+- (NSRect)boundingRectWithSize:(NSSize)s options:(NSStringDrawingOptions)o { return attr_bounding(self, s, o); }
+- (NSRect)boundingRectWithSize:(NSSize)s options:(NSStringDrawingOptions)o context:(id)c { return attr_bounding(self, s, o); }
+- (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o { mw_attr_draw(self, r, (o & NSStringDrawingUsesLineFragmentOrigin) != 0); }
+- (void)drawWithRect:(NSRect)r options:(NSStringDrawingOptions)o context:(id)c { mw_attr_draw(self, r, (o & NSStringDrawingUsesLineFragmentOrigin) != 0); }
 @end
-
 /* ======================================================================= images */
 @implementation NSImageRep
 - (BOOL)draw { return NO; }

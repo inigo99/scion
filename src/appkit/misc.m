@@ -3,7 +3,6 @@
  * NSUserDefaultsController and NSController, a WebView that shows nothing, segmented controls from nibs, and the
  * pasteboard, workspace and binding constants. */
 #import "internal.h"
-typedef const void *CTFontRef; CFCharacterSetRef CTFontCopyCharacterSet(CTFontRef f);
 @interface NSView (MWNibDecode) - (void)_mwDecodeNib:(NSCoder *)c; @end
 extern void (*mw_defaults_change_hook)(NSString *key, BOOL did);
 
@@ -198,7 +197,25 @@ NSNotificationName const NSPopoverWillShowNotification = @"NSPopoverWillShowNoti
 @end
 
 /* ======================================================================= text system objects (measuring only) */
-@implementation NSTextStorage
+NSNotificationName const NSTextStorageWillProcessEditingNotification = @"NSTextStorageWillProcessEditingNotification",
+    NSTextStorageDidProcessEditingNotification = @"NSTextStorageDidProcessEditingNotification";
+@interface NSTextView (MWLayout) - (void)_mwLayout; @end
+/* an edit (outside beginEditing/endEditing) is announced, and the text views showing the storage lay it out again */
+@implementation NSTextStorage { int _editing; BOOL _edited; }
+- (void)_mwEdited {
+    if (_editing) { _edited = YES; return; }
+    _edited = NO;
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSTextStorageWillProcessEditingNotification object:self];
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSTextStorageDidProcessEditingNotification object:self];
+    for (NSLayoutManager *m in _layoutManagers) for (NSTextContainer *c in m.textContainers) [c.textView _mwLayout];
+}
+- (void)beginEditing { _editing++; }
+- (void)endEditing { if (_editing > 0 && !--_editing && _edited) [self _mwEdited]; }
+- (void)replaceCharactersInRange:(NSRange)r withString:(NSString *)s { _editing++; [super replaceCharactersInRange:r withString:s]; _editing--; _edited = YES; [self _mwEdited]; }
+- (void)replaceCharactersInRange:(NSRange)r withAttributedString:(NSAttributedString *)s { _editing++; [super replaceCharactersInRange:r withAttributedString:s]; _editing--; _edited = YES; [self _mwEdited]; }
+- (void)setAttributes:(NSDictionary *)a range:(NSRange)r { _editing++; [super setAttributes:a range:r]; _editing--; _edited = YES; [self _mwEdited]; }
+- (void)addAttributes:(NSDictionary *)a range:(NSRange)r { _editing++; [super addAttributes:a range:r]; _editing--; _edited = YES; [self _mwEdited]; }
+- (void)removeAttribute:(NSString *)n range:(NSRange)r { _editing++; [super removeAttribute:n range:r]; _editing--; _edited = YES; [self _mwEdited]; }
 - (void)addLayoutManager:(NSLayoutManager *)m { if (!_layoutManagers) _layoutManagers = [[NSMutableArray alloc] init]; [(NSMutableArray *)_layoutManagers addObject:m]; m.textStorage = self; }
 - (void)removeLayoutManager:(NSLayoutManager *)m { [(NSMutableArray *)_layoutManagers removeObjectIdenticalTo:m]; }
 - (void)dealloc { [_layoutManagers release]; [super dealloc]; }
@@ -219,13 +236,17 @@ NSNotificationName const NSPopoverWillShowNotification = @"NSPopoverWillShowNoti
 - (CGFloat)defaultBaselineOffsetForFont:(NSFont *)f { CGFloat a, d; mw_font_metrics(f, &a, &d); return ceil(a); }
 - (NSRange)glyphRangeForTextContainer:(NSTextContainer *)c { return NSMakeRange(0, [_textStorage length]); }
 - (NSRect)usedRectForTextContainer:(NSTextContainer *)c {
-    NSSize s = mw_text_size_wrapped(_textStorage.string, [_textStorage length] ? [_textStorage attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] : nil, c.size.width < 1e6 ? c.size.width - 2 * c.lineFragmentPadding : 0);
+    NSSize s = mw_attr_size(_textStorage, c.size.width < 1e6 ? c.size.width - 2 * c.lineFragmentPadding : 0);
     return NSMakeRect(0, 0, s.width + 2 * c.lineFragmentPadding, s.height);
 }
 - (void)ensureLayoutForTextContainer:(NSTextContainer *)c {}
 - (NSUInteger)numberOfGlyphs { return [_textStorage length]; }
 - (NSRect)boundingRectForGlyphRange:(NSRange)r inTextContainer:(NSTextContainer *)c { return [self usedRectForTextContainer:c]; }
-- (void)drawGlyphsForGlyphRange:(NSRange)r atPoint:(NSPoint)p { [_textStorage drawAtPoint:p]; }
+- (void)drawGlyphsForGlyphRange:(NSRange)r atPoint:(NSPoint)p {
+    NSTextContainer *c = [_containers firstObject];
+    CGFloat w = c && c.size.width < 1e6 ? c.size.width - 2 * c.lineFragmentPadding : 0;
+    mw_attr_draw(_textStorage, NSMakeRect(p.x + (c ? c.lineFragmentPadding : 0), p.y, w, 0), w > 0);
+}
 - (void)drawBackgroundForGlyphRange:(NSRange)r atPoint:(NSPoint)p {}
 @end
 

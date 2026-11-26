@@ -25,6 +25,11 @@ module CoreGraphics [system] [extern_c] {
   header "CoreGraphics/CoreGraphics.h"
   export *
 }
+module CoreText [system] [extern_c] {
+  header "CoreText/CoreText.h"
+  export *
+  link "AppKit"
+}
 module AppKit [system] [extern_c] {
   header "AppKit/AppKit.h"
   export *

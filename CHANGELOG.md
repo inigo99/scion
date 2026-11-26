@@ -7,6 +7,14 @@
   redirects itself so cookies set on them are kept and the redirect delegate can stop them, and answers HTTP Basic
   challenges from the task's delegate or `NSURLCredentialStorage`. `NSURLCredential`, `NSURLProtectionSpace`,
   `NSURLAuthenticationChallenge` and `NSURLCache` (which keeps nothing) exist. With tests.
+- CoreText and rich text: `NSAttributedString` keeps runs of attributes (it had one set for the whole string), with
+  `CFAttributedString` on it. CoreText lays out lines, runs, typesetters, framesetters and frames with paragraph
+  styles (alignment, indents, spacing, line heights, wrapping, truncation); attributed strings and `NSTextView` draw
+  their runs (fonts, colors, underlines, backgrounds), and text views select, place the caret where clicked and move
+  between lines. Fonts: families the system has are used by name, apps can register font files
+  (`CTFontManagerRegisterFontsForURL`, `ATSApplicationFontsPath`), and font descriptors keep their attributes.
+  `NSFontAttributeName` and the other attribute names are Apple's strings, and arm64 programs get arm64's
+  `NSTextAlignment` values (center 1, right 2). With a test.
 - Child processes: `posix_spawn` and `posix_spawnp` (file actions, working directory, environment), `waitpid`,
   `kill`, `system`, `popen`, and `NSTask` / Swift's `Process` with pipes, termination handlers and readability
   handlers (`src/proc.cpp`, on both hosts). A macOS program runs in a new scion, other programs natively; `exec*` run

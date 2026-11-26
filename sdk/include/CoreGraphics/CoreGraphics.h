@@ -5,6 +5,9 @@
 #ifndef MW_CG_GEOMETRY
 #define MW_CG_GEOMETRY
 typedef double CGFloat;
+#define CGFLOAT_MAX 1.7976931348623157e+308
+#define CGFLOAT_MIN 2.2250738585072014e-308
+#define CGFLOAT_IS_DOUBLE 1
 typedef struct CGPoint { CGFloat x, y; } CGPoint;
 typedef struct CGSize { CGFloat width, height; } CGSize;
 typedef struct CGRect { CGPoint origin; CGSize size; } CGRect;

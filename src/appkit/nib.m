@@ -287,7 +287,7 @@ static NSColor *named_color(NSString *name) { /* catalog colors: the NSColor cla
     if ([self isKindOfClass:[NSTextFieldCell class]] && [d[@"NSTextColor"] isKindOfClass:[NSColor class]]) ((NSTextFieldCell *)self).textColor = d[@"NSTextColor"];
     uint32_t cf = [d[@"NSCellFlags"] unsignedIntValue];
     if (cf & 0x20000000u) self.enabled = NO;
-    if ([c containsValueForKey:@"NSAlignment"] || d[@"NSCellFlags2"]) self.alignment = (NSTextAlignment)(([d[@"NSCellFlags2"] unsignedIntValue] >> 26) & 7);
+    if ([c containsValueForKey:@"NSAlignment"] || d[@"NSCellFlags2"]) self.alignment = mw_alignment((([d[@"NSCellFlags2"] unsignedIntValue] >> 26) & 7));
     return self;
 }
 @end
@@ -326,7 +326,7 @@ NSView *mw_nib_init_view(NSView *self, NSCoder *c) {
     [super _mwDecodeNib:c];
     NSCell *cell = [c decodeObjectForKey:@"NSCell"]; NSDictionary *a = cell_attrs(cell);
     if ([cell isKindOfClass:[NSCell class]]) { self.cell = cell; cell.controlView = self; }
-    if ([c containsValueForKey:@"NSControlTextAlignment"]) self.alignment = (NSTextAlignment)[c decodeIntegerForKey:@"NSControlTextAlignment"];
+    if ([c containsValueForKey:@"NSControlTextAlignment"]) self.alignment = mw_alignment([c decodeIntegerForKey:@"NSControlTextAlignment"]);
     if ([c containsValueForKey:@"NSControlLineBreakMode"]) self.lineBreakMode = (NSLineBreakMode)[c decodeIntegerForKey:@"NSControlLineBreakMode"];
     if ([c containsValueForKey:@"NSControlSize"]) self.controlSize = (NSControlSize)[c decodeIntegerForKey:@"NSControlSize"];
     if (!a) return;

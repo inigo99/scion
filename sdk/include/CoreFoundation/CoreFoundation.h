@@ -40,6 +40,7 @@ typedef unsigned long CFTypeID;
 typedef unsigned long CFHashCode;
 typedef unsigned long CFOptionFlags;
 typedef long CFIndex;
+typedef unsigned short UniChar;
 typedef double CFTimeInterval;
 typedef double CFAbsoluteTime;
 typedef unsigned char Boolean;
@@ -67,6 +68,7 @@ typedef const struct CF_BRIDGED_TYPE(NSTimeZone) __CFTimeZone *CFTimeZoneRef;
 typedef const struct CF_BRIDGED_TYPE(NSLocale) __CFLocale *CFLocaleRef;
 typedef struct CF_BRIDGED_TYPE(NSCalendar) __CFCalendar *CFCalendarRef;
 typedef struct { CFIndex location, length; } CFRange;
+static inline CFRange CFRangeMake(CFIndex loc, CFIndex len) { CFRange r = {loc, len}; return r; }
 typedef CF_ENUM(CFIndex, CFComparisonResult) { kCFCompareLessThan = -1L, kCFCompareEqualTo = 0, kCFCompareGreaterThan = 1 };
 typedef uint32_t CFStringEncoding;
 typedef CF_ENUM(CFStringEncoding, CFStringBuiltInEncodings) {
@@ -77,6 +79,9 @@ typedef CF_ENUM(CFStringEncoding, CFStringBuiltInEncodings) {
     kCFStringEncodingUTF32BE = 0x18000100, kCFStringEncodingUTF32LE = 0x1c000100,
 };
 #define kCFAllocatorDefault ((CFAllocatorRef)0)
+#ifndef CFSTR
+#define CFSTR(s) ((CFStringRef)__builtin___CFStringMakeConstantString("" s ""))
+#endif
 #define kCFNotFound ((CFIndex)-1)
 #endif
 #ifndef CF_EXTERN_C_BEGIN
@@ -124,6 +129,7 @@ CFSetRef CFSetCreateCopy(CFAllocatorRef _Nullable allocator, CFSetRef theSet);
 CFArrayRef CFArrayCreateCopy(CFAllocatorRef _Nullable allocator, CFArrayRef theArray);
 CFDictionaryRef CFDictionaryCreateCopy(CFAllocatorRef _Nullable allocator, CFDictionaryRef theDict);
 CFIndex CFArrayGetCount(CFArrayRef theArray);
+const void *CFArrayGetValueAtIndex(CFArrayRef theArray, CFIndex idx);
 CFIndex CFDictionaryGetCount(CFDictionaryRef theDict);
 CFStringRef CFCopyDescription(CFTypeRef cf);
 typedef uint32_t UTF32Char;
@@ -159,6 +165,26 @@ CFStringRef CFErrorCopyDescription(CFErrorRef err);
 CF_IMPLICIT_BRIDGING_DISABLED
 /* a CFURLRef is an NSURL */
 CFURLRef CFURLCreateFromFileSystemRepresentation(CFAllocatorRef a, const unsigned char *buffer, CFIndex length, Boolean isDirectory);
+/* a CFAttributedStringRef is an NSAttributedString */
+typedef const struct CF_BRIDGED_TYPE(NSAttributedString) __CFAttributedString *CFAttributedStringRef;
+typedef struct CF_BRIDGED_MUTABLE_TYPE(NSMutableAttributedString) __CFAttributedString *CFMutableAttributedStringRef;
+CFAttributedStringRef CFAttributedStringCreate(CFAllocatorRef a, CFStringRef s, CFDictionaryRef _Nullable attrs);
+CFAttributedStringRef CFAttributedStringCreateCopy(CFAllocatorRef a, CFAttributedStringRef s);
+CFAttributedStringRef CFAttributedStringCreateWithSubstring(CFAllocatorRef a, CFAttributedStringRef s, CFRange r);
+CFMutableAttributedStringRef CFAttributedStringCreateMutable(CFAllocatorRef a, CFIndex maxLength);
+CFMutableAttributedStringRef CFAttributedStringCreateMutableCopy(CFAllocatorRef a, CFIndex maxLength, CFAttributedStringRef s);
+CFIndex CFAttributedStringGetLength(CFAttributedStringRef s);
+CFStringRef CFAttributedStringGetString(CFAttributedStringRef s);
+CFDictionaryRef CFAttributedStringGetAttributes(CFAttributedStringRef s, CFIndex loc, CFRange *_Nullable effectiveRange);
+CFTypeRef _Nullable CFAttributedStringGetAttribute(CFAttributedStringRef s, CFIndex loc, CFStringRef name, CFRange *_Nullable effectiveRange);
+CFDictionaryRef CFAttributedStringGetAttributesAndLongestEffectiveRange(CFAttributedStringRef s, CFIndex loc, CFRange inRange, CFRange *_Nullable longestEffectiveRange);
+void CFAttributedStringReplaceString(CFMutableAttributedStringRef s, CFRange r, CFStringRef replacement);
+CFMutableStringRef CFAttributedStringGetMutableString(CFMutableAttributedStringRef s);
+void CFAttributedStringSetAttributes(CFMutableAttributedStringRef s, CFRange r, CFDictionaryRef _Nullable replacement, Boolean clearOtherAttributes);
+void CFAttributedStringSetAttribute(CFMutableAttributedStringRef s, CFRange r, CFStringRef name, CFTypeRef value);
+void CFAttributedStringRemoveAttribute(CFMutableAttributedStringRef s, CFRange r, CFStringRef name);
+void CFAttributedStringReplaceAttributedString(CFMutableAttributedStringRef s, CFRange r, CFAttributedStringRef replacement);
+void CFAttributedStringBeginEditing(CFMutableAttributedStringRef s); void CFAttributedStringEndEditing(CFMutableAttributedStringRef s);
 /* a CFRunLoopRef is the NSRunLoop */
 typedef struct __CFRunLoop *CFRunLoopRef; typedef CFStringRef CFRunLoopMode;
 extern const CFStringRef kCFRunLoopDefaultMode, kCFRunLoopCommonModes;

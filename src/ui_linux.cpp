@@ -6,6 +6,7 @@
  * the guest and the tests), per-pixel transparent windows, BMP/TIFF/GIF images, HiDPI (everything is 96 dpi). */
 #include "scion.h"
 #include "uibridge.h"
+#include "fontnames.h"
 #include "metal/mtlbridge.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -570,20 +571,44 @@ static A audio_ctl(A id, A op) {
 /* ======================================================================= text (FreeType + fontconfig) */
 static std::mutex g_tmu;
 static FT_Library g_ft;
+static FontRegistry g_fonts;
+/* a font file: fontconfig takes it for this process; its faces are then known by their names */
+static A font_add(const char *path, char *out, size_t cap) {
+    std::lock_guard<std::mutex> l(g_tmu);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    std::vector<uint8_t> data(64 << 20);
+    size_t got = fread(data.data(), 1, data.size(), fp);
+    fclose(fp);
+    std::vector<FontFace> faces = sfnt_faces(data.data(), got);
+    if (faces.empty() || !FcConfigAppFontAddFile(nullptr, (const FcChar8 *)path)) return -1;
+    std::string names;
+    for (auto &f : faces) { g_fonts.add(f); names += f.postscript + "\n"; }
+    if (out && cap) { size_t n = std::min(names.size(), cap - 1); memcpy(out, names.data(), n); out[n] = 0; }
+    return (A)faces.size();
+}
+/* the font a name stands for: one the app registered, else the families it may name ("ArialMT" -> Arial), in front of a
+ * generic family of the same kind, for fontconfig to choose from (its aliases map Helvetica, Times... to look-alikes) */
 static FT_Face text_face(const char *name, int px, int weight, bool italic, bool mono) {
     static std::map<std::string, FT_Face> cache;
     std::string n = name ? name : "";
     auto has = [&](const char *k) { return n.find(k) != std::string::npos; };
-    const char *family = mono || has("Mono") || has("Menlo") || has("Courier") || has("Monaco") ? "monospace"
-                       : has("Times") || has("Georgia") || has("Serif") ? "serif" : "sans-serif";
+    const char *generic = mono || has("Mono") || has("Menlo") || has("Courier") || has("Monaco") ? "monospace"
+                        : has("Times") || has("Georgia") || has("Serif") ? "serif" : "sans-serif";
     if (has("Bold") && weight < 700) weight = 700;
     if (has("Semibold") && weight < 600) weight = 600;
     if (has("Italic") || has("Oblique")) italic = true;
-    std::string key = std::string(family) + "/" + std::to_string(weight) + (italic ? "/i" : "");
+    std::vector<std::string> families;
+    FontFace reg;
+    if (g_fonts.find(n, reg)) { families.push_back(reg.family); weight = reg.weight == 400 ? weight : reg.weight; italic = italic || reg.italic; }
+    else families = font_candidates(n, weight, italic);
+    std::string key = n + "/" + generic + "/" + std::to_string(weight) + (italic ? "/i" : "");
     FT_Face f = cache.count(key) ? cache[key] : nullptr;
     if (!f) {
         if (!g_ft && FT_Init_FreeType(&g_ft)) return nullptr;
-        FcPattern *p = FcNameParse((const FcChar8 *)family);
+        FcPattern *p = FcPatternCreate();
+        for (auto &fam : families) FcPatternAddString(p, FC_FAMILY, (const FcChar8 *)fam.c_str());
+        FcPatternAddString(p, FC_FAMILY, (const FcChar8 *)generic);
         FcPatternAddInteger(p, FC_WEIGHT, FcWeightFromOpenType(weight));
         FcPatternAddInteger(p, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
         FcConfigSubstitute(nullptr, p, FcMatchPattern); FcDefaultSubstitute(p);
@@ -786,6 +811,7 @@ HCABI A hc_ui(A op, A a, A b, A c, A d, A e) {
     }
     case UI_FREE: free((void *)a); return 0;
     case UI_TEXT: return text_op((MwText *)a);
+    case UI_FONT_ADD: return font_add((const char *)a, (char *)b, (size_t)c);
     case UI_IMAGE_DECODE: return image_decode((const void *)a, b, (MwImage *)c);
     case UI_IMAGE_ENCODE: { float q; memcpy(&q, &c, sizeof q); return image_encode((const MwImage *)a, b, q, (uint64_t *)d); }
     case UI_PRESENT: {

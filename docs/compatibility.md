@@ -43,10 +43,15 @@ If you get another app running, please add it here (and, if it can be fetched fr
   operation queues, JSON, property lists, keyed archiving, regular expressions, dates and calendars (Gregorian; time
   zones with fixed offsets), URLs and file management, user defaults, bundles and localized strings, KVO,
   NSInvocation and forwarding, undo.
-- **AppKit:** windows, views, controls (buttons, switches, sliders, segmented controls, text fields and a basic
-  `NSTextView`), menus and key equivalents, context menus, file dialogs, Auto Layout, stack views, view-based table views,
+- **AppKit:** windows, views, controls (buttons, switches, sliders, segmented controls, text fields and an
+  `NSTextView` with styled text, selection and clicking), menus and key equivalents, context menus, file dialogs, Auto Layout, stack views, view-based table views,
   status items and popovers, documents, compiled nibs, asset catalogs, images (PNG, JPEG, ICNS and more through WIC),
   CoreGraphics drawing, `MTKView`, `CVDisplayLink`.
+- **Text:** attributed strings with runs of attributes (`NSAttributedString`, `CFAttributedString`), drawn and measured
+  with their fonts, colors, underlines, backgrounds and paragraph styles (alignment, indents, spacing, line heights,
+  wrapping and truncation). CoreText: fonts and descriptors, lines, runs, typesetters, framesetters and frames, and
+  font files an app registers (`CTFontManagerRegisterFontsForURL`, `ATSApplicationFontsPath`). Fonts are the host's:
+  a family the system has is used by its name, others get a look-alike.
 - **Metal:** devices, queues, command buffers, compute and render pipelines, buffers, textures, samplers, depth/stencil,
   blits, argument buffers, function constants, indirect commands, heaps and fences, timestamps, visibility results,
   `CAMetalLayer`, parts of Metal 4 (`MTL4*`), MetalFX upscalers; shaders from `.metallib` files and from MSL source.
@@ -66,8 +71,9 @@ These are the big gaps. Each is a good project for a contributor (see [roadmap.m
   file counts as always ready).
 - **Child processes:** no `fork`. On Windows a child gets descriptors 0-2 only, `kill` ends it without running its
   handlers, and processes cannot be stopped (`SIGSTOP`).
-- **Text and fonts:** no CoreText; text is drawn with Windows fonts through Scion's own simple layout. No rich text
-  editing, input methods or spell checking.
+- **Text and fonts:** each run is drawn by the host's text renderer (GDI on Windows, FreeType on Linux), so there are no
+  glyph outlines (`CTFontCreatePathForGlyph`), font features or vertical text, and lines are laid out left to right
+  (no bidirectional reordering). A glyph is its character. No input methods, spell checking or undo in text views.
 - **Graphics:** no OpenGL, no CoreAnimation beyond what Metal presentation needs, no CoreImage.
 - **Media:** no AVFoundation, video or audio input.
 - **Services:** no iCloud, Keychain (Security), StoreKit, notifications, XPC services or login items.

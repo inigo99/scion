@@ -106,6 +106,7 @@ typedef NSComparisonResult (^NSComparator)(id a, id b);
 typedef struct _NSRange { NSUInteger location, length; } NSRange;
 static inline NSRange NSMakeRange(NSUInteger l, NSUInteger n) { NSRange r = {l, n}; return r; }
 static inline NSUInteger NSMaxRange(NSRange r) { return r.location + r.length; }
+static inline BOOL NSEqualRanges(NSRange a, NSRange b) { return a.location == b.location && a.length == b.length; }
 static inline BOOL NSLocationInRange(NSUInteger l, NSRange r) { return l >= r.location && l - r.location < r.length; }
 typedef CGPoint NSPoint;
 typedef CGSize NSSize;
@@ -363,6 +364,11 @@ typedef NSString *NSAttributedStringKey NS_TYPED_EXTENSIBLE_ENUM NS_SWIFT_NAME(N
 - (nullable id)attribute:(NSAttributedStringKey)name atIndex:(NSUInteger)i effectiveRange:(nullable NSRangePointer)r;
 - (NSAttributedString *)attributedSubstringFromRange:(NSRange)r;
 - (void)enumerateAttributesInRange:(NSRange)r options:(NSUInteger)o usingBlock:(void (^)(NSDictionary<NSAttributedStringKey, id> *a, NSRange r, BOOL *stop))b;
+- (void)enumerateAttribute:(NSAttributedStringKey)name inRange:(NSRange)r options:(NSUInteger)o usingBlock:(void (^)(id _Nullable v, NSRange r, BOOL *stop))b;
+- (NSDictionary<NSAttributedStringKey, id> *)attributesAtIndex:(NSUInteger)i longestEffectiveRange:(nullable NSRangePointer)r inRange:(NSRange)in;
+- (nullable id)attribute:(NSAttributedStringKey)name atIndex:(NSUInteger)i longestEffectiveRange:(nullable NSRangePointer)r inRange:(NSRange)in;
+- (BOOL)isEqualToAttributedString:(NSAttributedString *)o;
+- (BOOL)containsAttachmentsInRange:(NSRange)r;
 @end
 @interface NSMutableAttributedString : NSAttributedString
 - (void)appendAttributedString:(NSAttributedString *)s;

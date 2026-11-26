@@ -33,7 +33,7 @@ QUIET="-Wno-objc-protocol-method-implementation -Wno-nonnull -Wno-missing-noesca
 OBJC="-fobjc-runtime=macosx-11 -fno-objc-arc -fobjc-exceptions -funwind-tables -fconstant-cfstrings"
 KIT="-isysroot ../sdk/darwin -isystem ../sdk/include $W $QUIET -Wno-objc-property-no-attribute -Wno-objc-protocol-property-synthesis -Wno-protocol"
 FOUNDATION="NSString collections system regex json runloop extra swift calendar url plist coder cf more kvo eventkit xpc constlit"
-APPKIT="app window menu widgets cg cgdraw draw layout nib document table misc statusbar lzfse assets"
+APPKIT="app window menu widgets cg cgdraw draw coretext layout nib document table misc statusbar lzfse assets"
 
 # ---- 1. objects
 for a in x86_64 arm64; do
