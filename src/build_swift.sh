@@ -21,7 +21,7 @@ rm -f "$out"; exec llvm-ar-18 crs "$out" $files
 EOF
 chmod +x $B/bin/libtool; export PATH=$B/bin:$PATH
 # -lSystem, -lobjc, -lc++ find scion's libraries
-for l in libSystem:libSystem.B libobjc:libobjc.A libc++:libc++.1 libFoundation:Foundation; do ln -sf $MW/bin/lib/${l#*:}.dylib $B/sdklib/${l%%:*}.dylib; done
+for l in libSystem:libSystem.B libobjc:libobjc.A libc++:libc++.1 libFoundation:Foundation libAppKit:AppKit; do ln -sf $MW/bin/lib/${l#*:}.dylib $B/sdklib/${l%%:*}.dylib; done
 for a in arm64 x86_64; do
   cat > $B/tc-$a.cmake <<EOF
 set(CMAKE_SYSTEM_NAME Darwin)
