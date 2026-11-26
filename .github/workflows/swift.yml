@@ -26,6 +26,9 @@ jobs:
             xvfb wine64
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+          # Ubuntu's CMake (3.28), as docs/building.md assumes: the runner's newer one passes the C/C++ linker flags of
+          # src/build_swift.sh to swiftc when it links libswiftCore
+          sudo ln -sf /usr/bin/cmake /usr/local/bin/cmake && cmake --version
 
       - name: Cache dependencies (with the Swift sources)
         uses: actions/cache@v6
