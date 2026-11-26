@@ -73,6 +73,7 @@ jobs:
             out/swift-build
             bin/lib/libswift*.dylib
             bin/lib/Combine.dylib
+            sdk/darwin/usr/lib/swift
           key: swift-base-${{ hashFiles('src/build_swift.sh', 'src/build_swift_overlays.sh', 'src/build_swift_concurrency.sh', 'src/build_swiftui.sh', 'scripts/fetch-deps.sh', 'patches/swift-*', 'src/swift/*.swift', 'src/swift/Combine/**', 'sdk/**') }}
       # the runtime alone (most of the time) is cached too, so a failing overlay does not rebuild it
       - name: Restore the Swift runtime
@@ -111,6 +112,7 @@ jobs:
             out/swift-build
             bin/lib/libswift*.dylib
             bin/lib/Combine.dylib
+            sdk/darwin/usr/lib/swift
           key: ${{ steps.base.outputs.cache-primary-key }}
 
       - name: Build SwiftUI
