@@ -30,8 +30,8 @@ These are the areas where work has the most effect. Each is self-contained enoug
 - A menu bar, status items in the tray (StatusNotifierItem), HiDPI, a Flatpak or AppImage.
 
 **Run more apps**
-- Networking: cookies, authentication challenges and WebSockets in `URLSession`; `Network.framework`; GCD sources on
-  sockets. Sockets and HTTP(S) `URLSession` are there.
+- Networking: WebSockets and a URL cache in `URLSession`; `Network.framework`; GCD sources on Windows pipes. Sockets,
+  HTTP(S) `URLSession` with cookies and authentication, and GCD sources are there.
 - Child processes: `fork` where it can be had (Linux); signals delivered to children's handlers on Windows.
 - Text: real glyphs and shaping (DirectWrite, HarfBuzz) for outlines, features and right-to-left text; input methods;
   undo and rich-text editing commands in `NSTextView`. CoreText layout and styled text are there.

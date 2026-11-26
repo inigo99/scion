@@ -11,6 +11,11 @@
 - SwiftUI grids: `Grid` and `GridRow` (column widths, spans, column alignment, unsized cells), `LazyHGrid`, and
   `LazyVStack`/`LazyHStack` as their own types (they were aliases of `VStack`/`HStack`, a different ABI).
 - `tests/swift/abi.sh` checks SwiftUI's exported symbols against Apple's names for the listed APIs.
+- Networking: GCD read and write sources fire (on the kqueue, for sockets on both hosts and pipes on Linux; files count
+  as always ready). `URLSession` keeps cookies (`NSHTTPCookie`, `NSHTTPCookieStorage`, saved between runs), follows
+  redirects itself so cookies set on them are kept and the redirect delegate can stop them, and answers HTTP Basic
+  challenges from the task's delegate or `NSURLCredentialStorage`. `NSURLCredential`, `NSURLProtectionSpace`,
+  `NSURLAuthenticationChallenge` and `NSURLCache` (which keeps nothing) exist. With tests.
 - CoreText and rich text: `NSAttributedString` keeps runs of attributes (it had one set for the whole string), with
   `CFAttributedString` on it. CoreText lays out lines, runs, typesetters, framesetters and frames with paragraph
   styles (alignment, indents, spacing, line heights, wrapping, truncation); attributed strings and `NSTextView` draw

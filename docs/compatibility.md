@@ -29,10 +29,11 @@ If you get another app running, please add it here (and, if it can be fetched fr
   variables, Mach thread control, signals (with `sigaltstack`), GCD (queues, groups, semaphores, sources), clocks,
   `sysctl` basics.
 - **Networking:** BSD sockets (TCP and UDP, IPv4 and IPv6, Unix-domain on Linux), name resolution (`getaddrinfo`),
-  non-blocking I/O with `poll`, `select` and kqueue (read, write and user events). HTTP and HTTPS with `URLSession`
-  (data, upload and download tasks, completion handlers or a delegate), `NSURLConnection` and `NSData`/`NSString`
-  URL loading, on the host's HTTP stack (WinHTTP on Windows, libcurl on Linux): its proxies, certificates, redirects
-  and compression.
+  non-blocking I/O with `poll`, `select`, kqueue (read, write and user events) and GCD read and write sources. HTTP
+  and HTTPS with `URLSession` (data, upload and download tasks, completion handlers or a delegate), `NSURLConnection`
+  and `NSData`/`NSString` URL loading, on the host's HTTP stack (WinHTTP on Windows, libcurl on Linux): its proxies,
+  certificates and compression. Cookies (`NSHTTPCookieStorage`, kept between runs), redirects with the redirect
+  delegate, and HTTP Basic authentication answered by the task's delegate or `NSURLCredentialStorage`.
 - **Child processes:** `posix_spawn` (file actions, working directory, environment), `waitpid`, `kill`, `system`,
   `popen` and `NSTask` / Swift's `Process` (pipes, termination handler, readability handlers). A macOS program runs in
   a new scion; anything else runs natively: on Linux any program, on Windows an `.exe`, where `/usr/bin/<name>` and
@@ -66,9 +67,10 @@ If you get another app running, please add it here (and, if it can be fetched fr
 
 These are the big gaps. Each is a good project for a contributor (see [roadmap.md](roadmap.md)).
 
-- **Networking above sockets:** no `CFNetwork` or `Network.framework`; `URLSession` has no cookie storage, URL
-  cache, authentication challenges, WebSocket or background sessions, and no Swift `async` methods; GCD read/write
-  sources on sockets do not fire.
+- **Networking above sockets:** no `CFNetwork` or `Network.framework`; `URLSession` has no URL cache, Digest/NTLM
+  authentication or server-trust challenges, WebSocket or background sessions, and no Swift `async` methods;
+  credentials are not kept in a keychain. On Windows, GCD read and write sources fire for sockets only (a pipe or a
+  file counts as always ready).
 - **Child processes:** no `fork`. On Windows a child gets descriptors 0-2 only, `kill` ends it without running its
   handlers, and processes cannot be stopped (`SIGSTOP`).
 - **Text and fonts:** each run is drawn by the host's text renderer (GDI on Windows, FreeType on Linux), so there are no

@@ -690,8 +690,292 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
 - (id)propertyForKey:(NSString *)k { return [k isEqualToString:NSStreamDataWrittenToMemoryStreamKey] && !_path ? [[_mem copy] autorelease] : nil; }
 @end
 
+/* ======================================================================= cookies, credentials, the URL cache
+ * Cookies come from Set-Cookie fields and go back in Cookie fields (URLSession, NSURLConnection, NSData's URL loading);
+ * the shared storage keeps the lasting ones in ~/Library/Cookies. Credentials answer HTTP authentication (401/407):
+ * from the task's delegate, else the credential storage's default. The URL cache keeps nothing (ponytail). */
+NSString *const NSHTTPCookieName = @"Name", *const NSHTTPCookieValue = @"Value", *const NSHTTPCookieOriginURL = @"OriginURL",
+    *const NSHTTPCookieVersion = @"Version", *const NSHTTPCookieDomain = @"Domain", *const NSHTTPCookiePath = @"Path",
+    *const NSHTTPCookieSecure = @"Secure", *const NSHTTPCookieExpires = @"Expires", *const NSHTTPCookieComment = @"Comment",
+    *const NSHTTPCookieCommentURL = @"CommentURL", *const NSHTTPCookieDiscard = @"Discard", *const NSHTTPCookieMaximumAge = @"Max-Age",
+    *const NSHTTPCookiePort = @"Port", *const NSHTTPCookieSameSitePolicy = @"SameSite", *const NSHTTPCookieSameSiteLax = @"lax",
+    *const NSHTTPCookieSameSiteStrict = @"strict";
+static NSString *const kHTTPOnly = @"HttpOnly";
+NSString *const NSHTTPCookieManagerCookiesChangedNotification = @"NSHTTPCookieManagerCookiesChangedNotification",
+    *const NSHTTPCookieManagerAcceptPolicyChangedNotification = @"NSHTTPCookieManagerAcceptPolicyChangedNotification";
+int sscanf(const char *, const char *, ...); char *strstr(const char *, const char *);
+/* "Wed, 21 Oct 2026 07:28:00 GMT" (also with dashes or a two-digit year) */
+static NSDate *cookie_date(NSString *s) {
+    static const char *months = "janfebmaraprmayjunjulaugsepoctnovdec";
+    int day = -1, mon = -1, year = -1, hh = 0, mm = 0, ss = 0;
+    for (NSString *tok in [s componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" ,-"]]) {
+        if (![tok length]) continue;
+        if ([tok rangeOfString:@":"].location != NSNotFound) { sscanf([tok UTF8String], "%d:%d:%d", &hh, &mm, &ss); continue; }
+        if (isdigit([tok characterAtIndex:0])) { int v = [tok intValue]; if (day < 0 && [tok length] <= 2) day = v; else year = v < 70 ? v + 2000 : v < 100 ? v + 1900 : v; continue; }
+        if ([tok length] >= 3) { const char *m = strstr(months, [[[tok substringToIndex:3] lowercaseString] UTF8String]); if (m) mon = (int)(m - months) / 3; }
+    }
+    if (day < 1 || mon < 0 || year < 1601) return nil;
+    long y = year - (mon < 2), era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400, mp = (mon + 9) % 12;
+    long doy = (153 * mp + 2) / 5 + day - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy, days = era * 146097 + doe - 719468;
+    return [NSDate dateWithTimeIntervalSince1970:(double)days * 86400 + hh * 3600 + mm * 60 + ss];
+}
+@implementation NSHTTPCookie { NSDictionary *_p; NSDate *_expires; }
++ (instancetype)cookieWithProperties:(NSDictionary *)p { return [[[self alloc] initWithProperties:p] autorelease]; }
+- (instancetype)initWithProperties:(NSDictionary *)p {
+    if (!p[NSHTTPCookieName] || !p[NSHTTPCookieValue] || (!p[NSHTTPCookieDomain] && !p[NSHTTPCookieOriginURL])) { [self release]; return nil; }
+    if (!(self = [super init])) return nil;
+    NSMutableDictionary *m = [[p mutableCopy] autorelease];
+    if (!m[NSHTTPCookieDomain]) { id o = m[NSHTTPCookieOriginURL]; m[NSHTTPCookieDomain] = [([o isKindOfClass:[NSURL class]] ? o : [NSURL URLWithString:[o description]]) host] ?: @""; }
+    if (!m[NSHTTPCookiePath]) m[NSHTTPCookiePath] = @"/";
+    id e = m[NSHTTPCookieExpires];
+    _expires = [([e isKindOfClass:[NSDate class]] ? e : e ? cookie_date([e description]) : nil) retain];
+    if (m[NSHTTPCookieMaximumAge]) { [_expires release]; _expires = [[NSDate dateWithTimeIntervalSinceNow:[m[NSHTTPCookieMaximumAge] doubleValue]] retain]; }
+    _p = [m copy];
+    return self;
+}
+- (void)dealloc { [_p release]; [_expires release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSDictionary *)properties { return _p; }
+- (NSString *)name { return [_p[NSHTTPCookieName] description]; }
+- (NSString *)value { return [_p[NSHTTPCookieValue] description]; }
+- (NSString *)domain { return [_p[NSHTTPCookieDomain] description]; }
+- (NSString *)path { return [_p[NSHTTPCookiePath] description]; }
+- (NSDate *)expiresDate { return _expires; }
+- (BOOL)isSessionOnly { return !_expires || [_p[NSHTTPCookieDiscard] boolValue]; }
+- (BOOL)isSecure { return [_p[NSHTTPCookieSecure] boolValue] || [[_p[NSHTTPCookieSecure] description] isEqualToString:@"TRUE"]; }
+- (BOOL)isHTTPOnly { return _p[kHTTPOnly] != nil; }
+- (NSUInteger)version { return [_p[NSHTTPCookieVersion] unsignedIntegerValue]; }
+- (NSString *)comment { return _p[NSHTTPCookieComment]; }
+- (NSURL *)commentURL { return _p[NSHTTPCookieCommentURL]; }
+- (NSArray *)portList { return _p[NSHTTPCookiePort] ? @[_p[NSHTTPCookiePort]] : nil; }
+- (NSString *)sameSitePolicy { return _p[NSHTTPCookieSameSitePolicy]; }
+- (BOOL)_mwExpired { return _expires && [_expires timeIntervalSinceNow] <= 0; }
+- (BOOL)_mwSame:(NSHTTPCookie *)o { return [self.name isEqualToString:o.name] && [self.domain caseInsensitiveCompare:o.domain] == NSOrderedSame && [self.path isEqualToString:o.path]; }
+/* the URL's host is the cookie's domain, or inside it for a domain cookie (".example.com"); the path is under the cookie's */
+- (BOOL)_mwMatches:(NSURL *)u {
+    NSString *host = [[u host] lowercaseString], *d = [self.domain lowercaseString];
+    if (!host || [self _mwExpired]) return NO;
+    BOOL dot = [d hasPrefix:@"."];
+    NSString *bare = dot ? [d substringFromIndex:1] : d;
+    if (![host isEqualToString:bare] && !(dot && [host hasSuffix:d])) return NO;
+    if (self.isSecure && ![[[u scheme] lowercaseString] isEqualToString:@"https"]) return NO;
+    NSString *p = [u path]; if (![p length]) p = @"/";
+    return [p hasPrefix:self.path] && ([p length] == [self.path length] || [self.path hasSuffix:@"/"] || [p characterAtIndex:[self.path length]] == '/');
+}
+- (BOOL)isEqual:(id)o { return [o isKindOfClass:[NSHTTPCookie class]] && [self _mwSame:o] && [self.value isEqualToString:[o value]]; }
+- (NSUInteger)hash { return [self.name hash] ^ [self.domain hash]; }
+- (NSString *)description { return [NSString stringWithFormat:@"<NSHTTPCookie %@=%@; domain=%@; path=%@>", self.name, self.value, self.domain, self.path]; }
+/* one cookie from one Set-Cookie field */
+static NSHTTPCookie *parse_set_cookie(NSString *line, NSURL *u) {
+    NSArray *parts = [line componentsSeparatedByString:@";"];
+    NSString *nv = [parts[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSRange eq = [nv rangeOfString:@"="];
+    if (!eq.length || !eq.location) return nil;
+    NSMutableDictionary *p = [NSMutableDictionary dictionary];
+    p[NSHTTPCookieName] = [nv substringToIndex:eq.location]; p[NSHTTPCookieValue] = [nv substringFromIndex:eq.location + 1];
+    NSString *dir = [[u path] length] ? [[u path] stringByDeletingLastPathComponent] : @"/";   /* the default path: the URL's directory */
+    p[NSHTTPCookiePath] = [dir length] ? dir : @"/";
+    p[NSHTTPCookieDomain] = [[u host] lowercaseString] ?: @"";
+    p[NSHTTPCookieOriginURL] = u;
+    for (NSUInteger i = 1; i < [parts count]; i++) {
+        NSString *a = [parts[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSRange e = [a rangeOfString:@"="];
+        NSString *k = [(e.length ? [a substringToIndex:e.location] : a) lowercaseString], *v = e.length ? [a substringFromIndex:e.location + 1] : @"";
+        if ([k isEqualToString:@"domain"] && [v length]) {
+            NSString *d = [v lowercaseString], *host = [[u host] lowercaseString];
+            NSString *bare = [d hasPrefix:@"."] ? [d substringFromIndex:1] : d;
+            if (![host isEqualToString:bare] && ![host hasSuffix:[@"." stringByAppendingString:bare]]) return nil;   /* not for another site */
+            p[NSHTTPCookieDomain] = [@"." stringByAppendingString:bare];
+        } else if ([k isEqualToString:@"path"] && [v hasPrefix:@"/"]) p[NSHTTPCookiePath] = v;
+        else if ([k isEqualToString:@"expires"]) { NSDate *d = cookie_date(v); if (d) p[NSHTTPCookieExpires] = d; }
+        else if ([k isEqualToString:@"max-age"]) p[NSHTTPCookieMaximumAge] = @([v doubleValue]);
+        else if ([k isEqualToString:@"secure"]) p[NSHTTPCookieSecure] = @"TRUE";
+        else if ([k isEqualToString:@"httponly"]) p[kHTTPOnly] = @"TRUE";
+        else if ([k isEqualToString:@"samesite"]) p[NSHTTPCookieSameSitePolicy] = [v lowercaseString];
+    }
+    return [NSHTTPCookie cookieWithProperties:p];
+}
++ (NSArray *)cookiesWithResponseHeaderFields:(NSDictionary *)h forURL:(NSURL *)u {
+    NSMutableArray *a = [NSMutableArray array];
+    for (NSString *k in h) {
+        if ([k caseInsensitiveCompare:@"Set-Cookie"] != NSOrderedSame) continue;
+        id v = h[k];
+        for (NSString *line in [v isKindOfClass:[NSArray class]] ? v : @[v]) { NSHTTPCookie *c = parse_set_cookie(line, u); if (c) [a addObject:c]; }
+    }
+    return a;
+}
++ (NSDictionary *)requestHeaderFieldsWithCookies:(NSArray *)cookies {
+    if (![cookies count]) return @{};
+    NSMutableArray *pairs = [NSMutableArray array];
+    for (NSHTTPCookie *c in cookies) [pairs addObject:[NSString stringWithFormat:@"%@=%@", c.name, c.value]];
+    return @{@"Cookie": [pairs componentsJoinedByString:@"; "]};
+}
+@end
+
+@implementation NSHTTPCookieStorage { NSMutableArray *_cookies; NSHTTPCookieAcceptPolicy _policy; NSString *_file; }
++ (NSHTTPCookieStorage *)sharedHTTPCookieStorage {
+    static NSHTTPCookieStorage *s;
+    @synchronized(self) {
+        if (!s) {
+            s = [[self alloc] init];
+            NSString *who = [[NSBundle mainBundle] bundleIdentifier] ?: [[NSProcessInfo processInfo] processName];
+            s->_file = [[NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Cookies/%@.cookies.plist", who]] copy];
+            for (NSDictionary *p in [NSArray arrayWithContentsOfFile:s->_file] ?: @[]) { NSHTTPCookie *c = [NSHTTPCookie cookieWithProperties:p]; if (c && ![c _mwExpired]) [s->_cookies addObject:c]; }
+        }
+    }
+    return s;
+}
++ (NSHTTPCookieStorage *)sharedCookieStorageForGroupContainerIdentifier:(NSString *)i { return [self sharedHTTPCookieStorage]; }
+- (instancetype)init { if ((self = [super init])) _cookies = [[NSMutableArray alloc] init]; return self; }
+- (void)dealloc { [_cookies release]; [_file release]; [super dealloc]; }
+- (void)_mwChanged {
+    if (_file) {   /* the lasting cookies, for the next run */
+        NSMutableArray *keep = [NSMutableArray array];
+        for (NSHTTPCookie *c in _cookies) if (!c.isSessionOnly && ![c _mwExpired]) {
+            NSMutableDictionary *p = [[c.properties mutableCopy] autorelease];
+            p[NSHTTPCookieExpires] = c.expiresDate; [p removeObjectForKey:NSHTTPCookieMaximumAge]; [p removeObjectForKey:NSHTTPCookieOriginURL];
+            [keep addObject:p];
+        }
+        [[NSFileManager defaultManager] createDirectoryAtPath:[_file stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:NULL];
+        [keep writeToFile:_file atomically:YES];
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSHTTPCookieManagerCookiesChangedNotification object:self];
+}
+- (NSArray *)cookies { @synchronized(self) { return [[_cookies copy] autorelease]; } }
+- (void)setCookie:(NSHTTPCookie *)c {
+    if (!c || _policy == NSHTTPCookieAcceptPolicyNever) return;
+    @synchronized(self) {
+        for (NSUInteger i = [_cookies count]; i-- > 0;) if ([_cookies[i] _mwSame:c]) [_cookies removeObjectAtIndex:i];
+        if (![c _mwExpired]) [_cookies addObject:c];   /* (an expired one deletes) */
+    }
+    [self _mwChanged];
+}
+- (void)deleteCookie:(NSHTTPCookie *)c { @synchronized(self) { for (NSUInteger i = [_cookies count]; i-- > 0;) if ([_cookies[i] _mwSame:c]) [_cookies removeObjectAtIndex:i]; } [self _mwChanged]; }
+- (void)removeCookiesSinceDate:(NSDate *)d { @synchronized(self) { [_cookies removeAllObjects]; } [self _mwChanged]; }   /* ponytail: all of them */
+- (NSArray *)cookiesForURL:(NSURL *)u {
+    NSMutableArray *a = [NSMutableArray array];
+    @synchronized(self) { for (NSHTTPCookie *c in _cookies) if ([c _mwMatches:u]) [a addObject:c]; }
+    [a sortUsingComparator:^NSComparisonResult(NSHTTPCookie *x, NSHTTPCookie *y) { return [@([y.path length]) compare:@([x.path length])]; }];   /* longer paths first */
+    return a;
+}
+- (void)setCookies:(NSArray *)cs forURL:(NSURL *)u mainDocumentURL:(NSURL *)m { for (NSHTTPCookie *c in cs) [self setCookie:c]; }
+- (NSArray *)sortedCookiesUsingDescriptors:(NSArray *)d { return [[self cookies] sortedArrayUsingDescriptors:d]; }
+- (NSHTTPCookieAcceptPolicy)cookieAcceptPolicy { return _policy; }
+- (void)setCookieAcceptPolicy:(NSHTTPCookieAcceptPolicy)p { _policy = p; [[NSNotificationCenter defaultCenter] postNotificationName:NSHTTPCookieManagerAcceptPolicyChangedNotification object:self]; }
+- (void)storeCookies:(NSArray *)cs forTask:(id)t { for (NSHTTPCookie *c in cs) [self setCookie:c]; }
+- (void)getCookiesForTask:(NSURLSessionTask *)t completionHandler:(void (^)(NSArray *))h { h([self cookiesForURL:[[t currentRequest] URL]]); }
+@end
+
+NSString *const NSURLAuthenticationMethodDefault = @"NSURLAuthenticationMethodDefault", *const NSURLAuthenticationMethodHTTPBasic = @"NSURLAuthenticationMethodHTTPBasic",
+    *const NSURLAuthenticationMethodHTTPDigest = @"NSURLAuthenticationMethodHTTPDigest", *const NSURLAuthenticationMethodHTMLForm = @"NSURLAuthenticationMethodHTMLForm",
+    *const NSURLAuthenticationMethodNTLM = @"NSURLAuthenticationMethodNTLM", *const NSURLAuthenticationMethodNegotiate = @"NSURLAuthenticationMethodNegotiate",
+    *const NSURLAuthenticationMethodClientCertificate = @"NSURLAuthenticationMethodClientCertificate",
+    *const NSURLAuthenticationMethodServerTrust = @"NSURLAuthenticationMethodServerTrust",
+    *const NSURLProtectionSpaceHTTP = @"http", *const NSURLProtectionSpaceHTTPS = @"https", *const NSURLProtectionSpaceFTP = @"ftp",
+    *const NSURLProtectionSpaceHTTPProxy = @"http", *const NSURLProtectionSpaceHTTPSProxy = @"https";
+@implementation NSURLCredential { NSString *_user, *_password; NSURLCredentialPersistence _persistence; }
++ (instancetype)credentialWithUser:(NSString *)u password:(NSString *)p persistence:(NSURLCredentialPersistence)n { return [[[self alloc] initWithUser:u password:p persistence:n] autorelease]; }
++ (instancetype)credentialForTrust:(void *)t { return [[[self alloc] initWithUser:nil password:nil persistence:NSURLCredentialPersistenceNone] autorelease]; }
+- (instancetype)initWithUser:(NSString *)u password:(NSString *)p persistence:(NSURLCredentialPersistence)n { if ((self = [super init])) { _user = [u copy]; _password = [p copy]; _persistence = n; } return self; }
+- (instancetype)initWithTrust:(void *)t { return [self initWithUser:nil password:nil persistence:NSURLCredentialPersistenceNone]; }
+- (void)dealloc { [_user release]; [_password release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSString *)user { return _user; } - (NSString *)password { return _password; } - (BOOL)hasPassword { return _password != nil; }
+- (NSURLCredentialPersistence)persistence { return _persistence; }
+- (BOOL)isEqual:(id)o { return [o isKindOfClass:[NSURLCredential class]] && [_user ?: @"" isEqualToString:[o user] ?: @""] && [_password ?: @"" isEqualToString:[o password] ?: @""]; }
+- (NSUInteger)hash { return [_user hash]; }
+@end
+@implementation NSURLProtectionSpace { NSString *_host, *_protocol, *_realm, *_method; NSInteger _port; BOOL _proxy; }
+- (instancetype)initWithHost:(NSString *)h port:(NSInteger)p protocol:(NSString *)pr realm:(NSString *)r authenticationMethod:(NSString *)m {
+    if ((self = [super init])) { _host = [h copy]; _port = p; _protocol = [pr copy]; _realm = [r copy]; _method = [m ?: NSURLAuthenticationMethodDefault copy]; }
+    return self;
+}
+- (instancetype)initWithProxyHost:(NSString *)h port:(NSInteger)p type:(NSString *)t realm:(NSString *)r authenticationMethod:(NSString *)m {
+    if ((self = [self initWithHost:h port:p protocol:t realm:r authenticationMethod:m])) _proxy = YES;
+    return self;
+}
+- (void)dealloc { [_host release]; [_protocol release]; [_realm release]; [_method release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSString *)host { return _host; } - (NSInteger)port { return _port; } - (NSString *)protocol { return _protocol; } - (NSString *)realm { return _realm; }
+- (NSString *)authenticationMethod { return _method; } - (BOOL)isProxy { return _proxy; } - (NSString *)proxyType { return _proxy ? _protocol : nil; }
+- (BOOL)receivesCredentialSecurely { return [_protocol isEqualToString:@"https"] || ![_method isEqualToString:NSURLAuthenticationMethodHTTPBasic]; }
+- (void *)serverTrust { return NULL; }
+- (NSArray *)distinguishedNames { return nil; }
+- (BOOL)isEqual:(id)o {
+    if (![o isKindOfClass:[NSURLProtectionSpace class]]) return NO;
+    NSURLProtectionSpace *x = o;
+    return [_host caseInsensitiveCompare:x->_host ?: @""] == NSOrderedSame && _port == x->_port && [_protocol ?: @"" isEqualToString:x->_protocol ?: @""]
+        && [_realm ?: @"" isEqualToString:x->_realm ?: @""] && [_method isEqualToString:x->_method];
+}
+- (NSUInteger)hash { return [[_host lowercaseString] hash] ^ (NSUInteger)_port; }
+@end
+@implementation NSURLAuthenticationChallenge { NSURLProtectionSpace *_space; NSURLCredential *_proposed; NSInteger _failures; NSURLResponse *_response; NSError *_error; id _sender; }
+- (instancetype)initWithProtectionSpace:(NSURLProtectionSpace *)s proposedCredential:(NSURLCredential *)c previousFailureCount:(NSInteger)n failureResponse:(NSURLResponse *)r error:(NSError *)e sender:(id)sender {
+    if ((self = [super init])) { _space = [s retain]; _proposed = [c retain]; _failures = n; _response = [r retain]; _error = [e retain]; _sender = [sender retain]; }
+    return self;
+}
+- (instancetype)initWithAuthenticationChallenge:(NSURLAuthenticationChallenge *)c sender:(id)sender {
+    return [self initWithProtectionSpace:c.protectionSpace proposedCredential:c.proposedCredential previousFailureCount:c.previousFailureCount failureResponse:c.failureResponse error:c.error sender:sender];
+}
+- (void)dealloc { [_space release]; [_proposed release]; [_response release]; [_error release]; [_sender release]; [super dealloc]; }
+- (NSURLProtectionSpace *)protectionSpace { return _space; } - (NSURLCredential *)proposedCredential { return _proposed; }
+- (NSInteger)previousFailureCount { return _failures; } - (NSURLResponse *)failureResponse { return _response; }
+- (NSError *)error { return _error; } - (id)sender { return _sender; }
+@end
+NSString *const NSURLCredentialStorageChangedNotification = @"NSURLCredentialStorageChangedNotification";
+@implementation NSURLCredentialStorage { NSMutableDictionary *_all, *_defaults; }   /* protection space -> {user -> credential}, -> credential */
++ (NSURLCredentialStorage *)sharedCredentialStorage { static NSURLCredentialStorage *s; @synchronized(self) { if (!s) s = [[self alloc] init]; } return s; }
+- (instancetype)init { if ((self = [super init])) { _all = [[NSMutableDictionary alloc] init]; _defaults = [[NSMutableDictionary alloc] init]; } return self; }
+- (void)dealloc { [_all release]; [_defaults release]; [super dealloc]; }
+- (NSDictionary *)credentialsForProtectionSpace:(NSURLProtectionSpace *)p { @synchronized(self) { return [[_all[p] copy] autorelease]; } }
+- (NSDictionary *)allCredentials { @synchronized(self) { return [[_all copy] autorelease]; } }
+- (void)setCredential:(NSURLCredential *)c forProtectionSpace:(NSURLProtectionSpace *)p {
+    if (!c.user || c.persistence == NSURLCredentialPersistenceNone) return;   /* ponytail: kept for the process (no keychain) */
+    @synchronized(self) { NSMutableDictionary *d = _all[p]; if (!d) _all[p] = d = [NSMutableDictionary dictionary]; d[c.user] = c; }
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSURLCredentialStorageChangedNotification object:self];
+}
+- (void)removeCredential:(NSURLCredential *)c forProtectionSpace:(NSURLProtectionSpace *)p {
+    @synchronized(self) { [_all[p] removeObjectForKey:c.user ?: @""]; if ([_defaults[p] isEqual:c]) [_defaults removeObjectForKey:p]; }
+}
+- (void)removeCredential:(NSURLCredential *)c forProtectionSpace:(NSURLProtectionSpace *)p options:(NSDictionary *)o { [self removeCredential:c forProtectionSpace:p]; }
+- (NSURLCredential *)defaultCredentialForProtectionSpace:(NSURLProtectionSpace *)p {
+    @synchronized(self) { return _defaults[p] ?: [[_all[p] allValues] firstObject]; }
+}
+- (void)setDefaultCredential:(NSURLCredential *)c forProtectionSpace:(NSURLProtectionSpace *)p {
+    [self setCredential:c forProtectionSpace:p];
+    if (c.user && c.persistence != NSURLCredentialPersistenceNone) @synchronized(self) { _defaults[p] = c; }
+}
+@end
+@implementation NSCachedURLResponse { NSURLResponse *_r; NSData *_d; NSDictionary *_u; NSURLCacheStoragePolicy _p; }
+- (instancetype)initWithResponse:(NSURLResponse *)r data:(NSData *)d { return [self initWithResponse:r data:d userInfo:nil storagePolicy:NSURLCacheStorageAllowed]; }
+- (instancetype)initWithResponse:(NSURLResponse *)r data:(NSData *)d userInfo:(NSDictionary *)u storagePolicy:(NSURLCacheStoragePolicy)p {
+    if ((self = [super init])) { _r = [r retain]; _d = [d copy]; _u = [u copy]; _p = p; }
+    return self;
+}
+- (void)dealloc { [_r release]; [_d release]; [_u release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSURLResponse *)response { return _r; } - (NSData *)data { return _d; } - (NSDictionary *)userInfo { return _u; } - (NSURLCacheStoragePolicy)storagePolicy { return _p; }
+@end
+@implementation NSURLCache { NSUInteger _mem, _disk; }
+static NSURLCache *g_url_cache;
++ (NSURLCache *)sharedURLCache { @synchronized(self) { if (!g_url_cache) g_url_cache = [[self alloc] initWithMemoryCapacity:512 * 1024 diskCapacity:10 << 20 diskPath:nil]; } return g_url_cache; }
++ (void)setSharedURLCache:(NSURLCache *)c { @synchronized(self) { [c retain]; [g_url_cache release]; g_url_cache = c; } }
+- (instancetype)initWithMemoryCapacity:(NSUInteger)m diskCapacity:(NSUInteger)d diskPath:(NSString *)p { if ((self = [super init])) { _mem = m; _disk = d; } return self; }
+- (instancetype)initWithMemoryCapacity:(NSUInteger)m diskCapacity:(NSUInteger)d directoryURL:(NSURL *)u { return [self initWithMemoryCapacity:m diskCapacity:d diskPath:nil]; }
+- (NSCachedURLResponse *)cachedResponseForRequest:(NSURLRequest *)r { return nil; }
+- (void)storeCachedResponse:(NSCachedURLResponse *)c forRequest:(NSURLRequest *)r {}
+- (void)removeCachedResponseForRequest:(NSURLRequest *)r {}
+- (void)removeAllCachedResponses {}
+- (void)removeCachedResponsesSinceDate:(NSDate *)d {}
+- (void)getCachedResponseForDataTask:(NSURLSessionDataTask *)t completionHandler:(void (^)(NSCachedURLResponse *))h { h(nil); }
+- (void)storeCachedResponse:(NSCachedURLResponse *)c forDataTask:(NSURLSessionDataTask *)t {}
+- (NSUInteger)memoryCapacity { return _mem; } - (void)setMemoryCapacity:(NSUInteger)m { _mem = m; }
+- (NSUInteger)diskCapacity { return _disk; } - (void)setDiskCapacity:(NSUInteger)d { _disk = d; }
+- (NSUInteger)currentMemoryUsage { return 0; } - (NSUInteger)currentDiskUsage { return 0; }
+@end
+
 /* ======================================================================= URL loading: requests, responses, URLSession */
-@implementation NSURLRequest { @protected NSURL *_url; NSString *_method; NSMutableDictionary *_headers; NSData *_body; NSTimeInterval _timeout; NSURLRequestCachePolicy _policy; }
+@implementation NSURLRequest { @protected NSURL *_url; NSString *_method; NSMutableDictionary *_headers; NSData *_body; NSTimeInterval _timeout; NSURLRequestCachePolicy _policy; BOOL _noCookies; }
 + (instancetype)requestWithURL:(NSURL *)u { return [[[self alloc] initWithURL:u] autorelease]; }
 + (instancetype)requestWithURL:(NSURL *)u cachePolicy:(NSURLRequestCachePolicy)p timeoutInterval:(NSTimeInterval)t { return [[[self alloc] initWithURL:u cachePolicy:p timeoutInterval:t] autorelease]; }
 - (instancetype)initWithURL:(NSURL *)u { return [self initWithURL:u cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:60]; }
@@ -699,8 +983,9 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
     _url = [u copy]; _method = @"GET"; _headers = [[NSMutableDictionary alloc] init]; _timeout = t; _policy = p; return self;
 }
 - (void)dealloc { [_url release]; [_method release]; [_headers release]; [_body release]; [super dealloc]; }
-- (id)copyWithZone:(NSZone *)z { NSURLRequest *r = [[NSURLRequest alloc] initWithURL:_url cachePolicy:_policy timeoutInterval:_timeout]; r->_method = [_method copy]; [r->_headers addEntriesFromDictionary:_headers]; r->_body = [_body copy]; return r; }
-- (id)mutableCopyWithZone:(NSZone *)z { NSMutableURLRequest *r = [[NSMutableURLRequest alloc] initWithURL:_url cachePolicy:_policy timeoutInterval:_timeout]; [r setHTTPMethod:_method]; [r setAllHTTPHeaderFields:_headers]; [r setHTTPBody:_body]; return r; }
+- (id)copyWithZone:(NSZone *)z { NSURLRequest *r = [[NSURLRequest alloc] initWithURL:_url cachePolicy:_policy timeoutInterval:_timeout]; [r->_method release]; r->_method = [_method copy]; [r->_headers addEntriesFromDictionary:_headers]; r->_body = [_body copy]; r->_noCookies = _noCookies; return r; }
+- (id)mutableCopyWithZone:(NSZone *)z { NSMutableURLRequest *r = [[NSMutableURLRequest alloc] initWithURL:_url cachePolicy:_policy timeoutInterval:_timeout]; [r setHTTPMethod:_method]; [r setAllHTTPHeaderFields:_headers]; [r setHTTPBody:_body]; [r setHTTPShouldHandleCookies:!_noCookies]; return r; }
+- (BOOL)HTTPShouldHandleCookies { return !_noCookies; }
 - (NSURL *)URL { return _url; }
 - (NSString *)HTTPMethod { return _method; }
 - (NSDictionary *)allHTTPHeaderFields { return [[_headers copy] autorelease]; }
@@ -718,18 +1003,39 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
 - (void)setHTTPBody:(NSData *)b { [_body release]; _body = [b copy]; }
 - (void)setTimeoutInterval:(NSTimeInterval)t { _timeout = t; }
 - (void)setCachePolicy:(NSURLRequestCachePolicy)p { _policy = p; }
+- (void)setHTTPShouldHandleCookies:(BOOL)b { _noCookies = !b; }
 @end
-@implementation NSURLSessionConfiguration { NSDictionary *_headers; NSTimeInterval _req, _res; NSURLRequestCachePolicy _policy; NSInteger _conns; BOOL _cell, _wait, _cookies; }
+@implementation NSURLSessionConfiguration {
+    NSDictionary *_headers; NSTimeInterval _req, _res; NSURLRequestCachePolicy _policy; NSInteger _conns; BOOL _cell, _wait, _cookies;
+    NSHTTPCookieStorage *_jar; NSURLCredentialStorage *_creds; NSURLCache *_cache; NSHTTPCookieAcceptPolicy _accept; NSString *_identifier;
+}
 + (NSURLSessionConfiguration *)defaultSessionConfiguration { return [[[self alloc] init] autorelease]; }
-+ (NSURLSessionConfiguration *)ephemeralSessionConfiguration { return [[[self alloc] init] autorelease]; }
-- (instancetype)init { _req = 60; _res = 7 * 86400; _conns = 6; _cell = _cookies = YES; return self; }
-- (void)dealloc { [_headers release]; [super dealloc]; }
+/* its own cookies and credentials, in memory */
++ (NSURLSessionConfiguration *)ephemeralSessionConfiguration {
+    NSURLSessionConfiguration *c = [[[self alloc] init] autorelease];
+    [c->_jar release]; c->_jar = [[NSHTTPCookieStorage alloc] init];
+    [c->_creds release]; c->_creds = [[NSURLCredentialStorage alloc] init];
+    return c;
+}
++ (NSURLSessionConfiguration *)backgroundSessionConfigurationWithIdentifier:(NSString *)i { NSURLSessionConfiguration *c = [self defaultSessionConfiguration]; c->_identifier = [i copy]; return c; }   /* ponytail: runs in the foreground */
+- (instancetype)init {
+    _req = 60; _res = 7 * 86400; _conns = 6; _cell = _cookies = YES; _accept = NSHTTPCookieAcceptPolicyOnlyFromMainDocumentDomain;
+    _jar = [[NSHTTPCookieStorage sharedHTTPCookieStorage] retain]; _creds = [[NSURLCredentialStorage sharedCredentialStorage] retain]; _cache = [[NSURLCache sharedURLCache] retain];
+    return self;
+}
+- (void)dealloc { [_headers release]; [_jar release]; [_creds release]; [_cache release]; [_identifier release]; [super dealloc]; }
 - (id)copyWithZone:(NSZone *)z {
     NSURLSessionConfiguration *c = [[NSURLSessionConfiguration alloc] init];
     c->_headers = [_headers copy]; c->_req = _req; c->_res = _res; c->_policy = _policy; c->_conns = _conns;
-    c->_cell = _cell; c->_wait = _wait; c->_cookies = _cookies;
+    c->_cell = _cell; c->_wait = _wait; c->_cookies = _cookies; c->_accept = _accept; c->_identifier = [_identifier copy];
+    [c->_jar release]; c->_jar = [_jar retain]; [c->_creds release]; c->_creds = [_creds retain]; [c->_cache release]; c->_cache = [_cache retain];
     return c;
 }
+- (NSHTTPCookieStorage *)HTTPCookieStorage { return _jar; } - (void)setHTTPCookieStorage:(NSHTTPCookieStorage *)s { [s retain]; [_jar release]; _jar = s; }
+- (NSURLCredentialStorage *)URLCredentialStorage { return _creds; } - (void)setURLCredentialStorage:(NSURLCredentialStorage *)s { [s retain]; [_creds release]; _creds = s; }
+- (NSURLCache *)URLCache { return _cache; } - (void)setURLCache:(NSURLCache *)c { [c retain]; [_cache release]; _cache = c; }
+- (NSHTTPCookieAcceptPolicy)HTTPCookieAcceptPolicy { return _accept; } - (void)setHTTPCookieAcceptPolicy:(NSHTTPCookieAcceptPolicy)p { _accept = p; }
+- (NSString *)identifier { return _identifier; }
 - (NSDictionary *)HTTPAdditionalHeaders { return _headers; } - (void)setHTTPAdditionalHeaders:(NSDictionary *)h { [_headers release]; _headers = [h copy]; }
 - (NSTimeInterval)timeoutIntervalForRequest { return _req; } - (void)setTimeoutIntervalForRequest:(NSTimeInterval)t { _req = t; }
 - (NSTimeInterval)timeoutIntervalForResource { return _res; } - (void)setTimeoutIntervalForResource:(NSTimeInterval)t { _res = t; }
@@ -738,7 +1044,7 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
 - (BOOL)allowsCellularAccess { return _cell; } - (void)setAllowsCellularAccess:(BOOL)b { _cell = b; }
 - (BOOL)waitsForConnectivity { return _wait; } - (void)setWaitsForConnectivity:(BOOL)b { _wait = b; }
 - (BOOL)HTTPShouldSetCookies { return _cookies; } - (void)setHTTPShouldSetCookies:(BOOL)b { _cookies = b; }
-/* the rest of the configuration (cookie storage, caches, proxies, TLS versions) is accepted and has no effect */
+/* the rest of the configuration (proxies, TLS versions, protocol classes) is accepted and has no effect */
 - (void)setValue:(id)v forUndefinedKey:(NSString *)k {} - (id)valueForUndefinedKey:(NSString *)k { return nil; }
 @end
 
@@ -822,15 +1128,37 @@ typedef struct {
     NSURLRequest *request; NSDictionary *extra;  /* the session's HTTPAdditionalHeaders */
     NSData *body; NSTimeInterval timeout;
     volatile int64_t *handle; volatile BOOL *cancelled;   /* (shared with -cancel) */
+    NSHTTPCookieStorage *cookies;                         /* nil: none sent or kept */
+    NSURLCredentialStorage *credentials;
+    /* an authentication challenge: the credential to answer with (nil: none); *cancel to stop with an error */
+    NSURLCredential *(^challenge)(NSURLAuthenticationChallenge *c, BOOL *cancel);
+    /* a redirect: the request to follow it with (nil: stop, the redirect is the response) */
+    NSURLRequest *(^redirect)(NSHTTPURLResponse *r, NSURLRequest *next);
 } HTTPJob;
 
 /* Runs a request in this thread: the response once its headers are in (got_response may cancel it), then the body in
  * pieces to got_data. Returns nil or the error. */
+/* the protection space of a 401 / 407 response (WWW-Authenticate / Proxy-Authenticate: Basic realm="x") */
+static NSURLProtectionSpace *space_of(NSHTTPURLResponse *resp, NSURL *u) {
+    BOOL proxy = [resp statusCode] == 407;
+    NSString *h = [resp valueForHTTPHeaderField:proxy ? @"Proxy-Authenticate" : @"WWW-Authenticate"] ?: @"";
+    NSString *scheme = [[[h componentsSeparatedByString:@" "] firstObject] lowercaseString], *realm = nil;
+    NSRange r = [h rangeOfString:@"realm=\"" options:NSCaseInsensitiveSearch];
+    if (r.length) { NSString *rest = [h substringFromIndex:NSMaxRange(r)]; NSRange q = [rest rangeOfString:@"\""]; realm = q.length ? [rest substringToIndex:q.location] : rest; }
+    NSString *method = [scheme isEqualToString:@"basic"] ? NSURLAuthenticationMethodHTTPBasic : [scheme isEqualToString:@"digest"] ? NSURLAuthenticationMethodHTTPDigest
+                     : [scheme isEqualToString:@"ntlm"] ? NSURLAuthenticationMethodNTLM : [scheme isEqualToString:@"negotiate"] ? NSURLAuthenticationMethodNegotiate : NSURLAuthenticationMethodDefault;
+    NSInteger port = [[u port] integerValue] ?: ([[[u scheme] lowercaseString] isEqualToString:@"https"] ? 443 : 80);
+    return [[[NSURLProtectionSpace alloc] initWithHost:[u host] port:port protocol:[[u scheme] lowercaseString] realm:realm authenticationMethod:method] autorelease];
+}
 static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_response)(NSHTTPURLResponse *), BOOL (^got_data)(const void *, size_t)) {
     NSURLRequest *r = j->request;
     NSURL *u = [r URL];
     if (!u) return url_error(NSURLErrorBadURL, nil);
     if (!is_http(u)) return url_error(NSURLErrorUnsupportedURL, u);
+    NSURLCredential *cred = nil;
+    int redirects = 0;
+    BOOL keep_body = YES;   /* (a redirect to GET drops it) */
+    for (int attempt = 0;; attempt++) {
     NSMutableString *headers = [NSMutableString string];
     NSDictionary *own = [r allHTTPHeaderFields];
     for (NSString *k in j->extra) if (!header_in(own, k)) [headers appendFormat:@"%@: %@\r\n", k, j->extra[k]];
@@ -841,7 +1169,15 @@ static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_respons
         NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0";
         [headers appendFormat:@"User-Agent: %@/%@ CFNetwork/1410.0.3 Darwin/22.6.0\r\n", name, version];
     }
-    NSData *body = j->body ?: [r HTTPBody];
+    if (j->cookies && [r HTTPShouldHandleCookies] && !header_in(own, @"Cookie")) {
+        NSString *c = [NSHTTPCookie requestHeaderFieldsWithCookies:[j->cookies cookiesForURL:u]][@"Cookie"];
+        if (c) [headers appendFormat:@"Cookie: %@\r\n", c];
+    }
+    if (cred.user) {   /* Basic: user:password in base64 */
+        NSString *pair = [NSString stringWithFormat:@"%@:%@", cred.user, cred.password ?: @""];
+        [headers appendFormat:@"Authorization: Basic %@\r\n", [[pair dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]];
+    }
+    NSData *body = keep_body ? (j->body ?: [r HTTPBody]) : [r HTTPBody];
     char rh[32768], fu[4096];
     struct dhttpreq q = {0};
     q.method = (uint64_t)[[r HTTPMethod] ?: @"GET" UTF8String];
@@ -849,6 +1185,7 @@ static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_respons
     q.headers = (uint64_t)[headers UTF8String];
     q.body = (uint64_t)[body bytes]; q.body_len = [body length];
     q.timeout_ms = (int64_t)((j->timeout > 0 ? j->timeout : 60) * 1000);
+    q.flags = NET_HTTP_NO_REDIRECT;   /* followed here: its cookies are kept and the delegate decides */
     q.resp_headers = (uint64_t)rh; q.resp_headers_cap = sizeof rh; q.final_url = (uint64_t)fu; q.final_url_cap = sizeof fu;
     int64_t h = _scion_net(NET_HTTP_NEW, (uint64_t)&q, 0, 0, 0, 0);
     if (h < 0) return url_error(h, u);
@@ -856,14 +1193,17 @@ static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_respons
     if (*j->cancelled) _scion_net(NET_HTTP_CANCEL, h, 0, 0, 0, 0);
     NSError *err = nil;
     int64_t rc = _scion_net(NET_HTTP_SEND, h, (uint64_t)&q, 0, 0, 0);
+    BOOL again = NO;
     if (rc < 0) err = url_error(rc, u);
     else {
         NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+        NSMutableArray *set_cookies = [NSMutableArray array];
         for (NSString *line in [@(rh) componentsSeparatedByString:@"\r\n"]) {
             NSRange c = [line rangeOfString:@":"];
             if (!c.length) continue;
             NSString *k = [line substringToIndex:c.location];
             NSString *v = [[line substringFromIndex:c.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if ([k caseInsensitiveCompare:@"Set-Cookie"] == NSOrderedSame) [set_cookies addObject:v];   /* (dates have commas: one by one) */
             NSString *have = header_in(fields, k);
             if (have) {   /* a repeated field: one value, comma-separated, under the first spelling */
                 for (NSString *key in [fields allKeys]) if ([key caseInsensitiveCompare:k] == NSOrderedSame) fields[key] = [NSString stringWithFormat:@"%@, %@", have, v];
@@ -871,8 +1211,39 @@ static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_respons
         }
         NSURL *final = [NSURL URLWithString:@(fu)] ?: u;
         NSHTTPURLResponse *resp = [[[NSHTTPURLResponse alloc] initWithURL:final statusCode:q.status HTTPVersion:@"HTTP/1.1" headerFields:fields] autorelease];
+        if (j->cookies && [r HTTPShouldHandleCookies] && [set_cookies count])
+            [j->cookies setCookies:[NSHTTPCookie cookiesWithResponseHeaderFields:@{@"Set-Cookie": (id)set_cookies} forURL:final] forURL:final mainDocumentURL:nil];
+        NSString *loc = [resp valueForHTTPHeaderField:@"Location"];
+        if ((q.status == 301 || q.status == 302 || q.status == 303 || q.status == 307 || q.status == 308) && loc) {
+            if (++redirects > 16) err = url_error(NSURLErrorHTTPTooManyRedirects, u);
+            else {
+                NSMutableURLRequest *next = [[r mutableCopy] autorelease];
+                next.URL = [[NSURL URLWithString:loc relativeToURL:final] absoluteURL] ?: final;
+                if (q.status == 303 || ((q.status == 301 || q.status == 302) && [[[r HTTPMethod] uppercaseString] isEqualToString:@"POST"])) {
+                    next.HTTPMethod = @"GET"; next.HTTPBody = nil; keep_body = NO;
+                    [next setValue:nil forHTTPHeaderField:@"Content-Type"]; [next setValue:nil forHTTPHeaderField:@"Content-Length"];
+                }
+                NSURLRequest *follow = j->redirect ? j->redirect(resp, next) : next;
+                if (follow) { r = follow; u = [r URL]; cred = nil; attempt = -1; again = YES; }
+            }
+        }
+        else if ((q.status == 401 || q.status == 407) && attempt < 8) {
+            /* ask the delegate (or take the stored default) for a credential, and try again with it */
+            NSURLProtectionSpace *space = space_of(resp, final);
+            NSURLCredential *proposed = [j->credentials defaultCredentialForProtectionSpace:space];
+            NSURLAuthenticationChallenge *ch = [[[NSURLAuthenticationChallenge alloc] initWithProtectionSpace:space proposedCredential:proposed
+                previousFailureCount:attempt failureResponse:resp error:nil sender:nil] autorelease];
+            BOOL cancel = NO;
+            NSURLCredential *c = j->challenge ? j->challenge(ch, &cancel) : (attempt == 0 ? proposed : nil);
+            if (cancel) err = url_error(NSURLErrorCancelled, u);
+            else if (c.user && [space.authenticationMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]) {
+                if (c.persistence != NSURLCredentialPersistenceNone) [j->credentials setCredential:c forProtectionSpace:space];
+                cred = c; again = YES;
+            }
+        }
         if (out) *out = resp;
-        if (got_response && !got_response(resp)) err = url_error(NSURLErrorCancelled, u);
+        if (again || err) {}
+        else if (got_response && !got_response(resp)) err = url_error(NSURLErrorCancelled, u);
         else {
             enum { N = 65536 };
             char *buf = malloc(N);
@@ -886,14 +1257,15 @@ static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_respons
     *j->handle = 0;
     _scion_net(NET_HTTP_CLOSE, h, 0, 0, 0, 0);
     if (*j->cancelled) err = url_error(NSURLErrorCancelled, u);
-    return err;
+    if (!again || err) return err;
+    }
 }
 
 /* the whole body of an http(s) URL, in this thread (NSData's and NSString's URL initializers) */
 __attribute__((visibility("hidden"))) NSData *_scion_url_data(NSURL *u, NSError **e) {
     NSMutableData *d = [NSMutableData data];
     volatile int64_t handle = 0; volatile BOOL cancelled = NO;
-    HTTPJob j = {[NSURLRequest requestWithURL:u], nil, nil, 60, &handle, &cancelled};
+    HTTPJob j = {[NSURLRequest requestWithURL:u], nil, nil, 60, &handle, &cancelled, [NSHTTPCookieStorage sharedHTTPCookieStorage], [NSURLCredentialStorage sharedCredentialStorage], nil, nil};
     NSHTTPURLResponse *resp = nil;
     NSError *err = http_run(&j, &resp, nil, ^BOOL(const void *p, size_t n) { [d appendBytes:p length:n]; return YES; });
     if (!err && [resp statusCode] >= 400) err = [NSError errorWithDomain:NSCocoaErrorDomain code:256 userInfo:@{NSURLErrorKey: u}];   /* NSFileReadUnknownError */
@@ -951,7 +1323,45 @@ enum { TASK_DATA, TASK_DOWNLOAD, TASK_UPLOAD };
     NSURLSession *s = _session;
     id d = _handler ? nil : [s _delegate];
     NSURLSessionConfiguration *c = [s _config];
-    HTTPJob j = {_current, [c HTTPAdditionalHeaders], _upload, [_current timeoutInterval] ?: [c timeoutIntervalForRequest], &_host, &_cancelled};
+    /* an authentication challenge goes to the delegate (even with a completion handler), on its queue; this thread waits */
+    id cd = [s _delegate];
+    BOOL wants_challenge = [cd respondsToSelector:@selector(URLSession:task:didReceiveChallenge:completionHandler:)];
+    NSURLCredential *(^challenge)(NSURLAuthenticationChallenge *, BOOL *) = ^NSURLCredential *(NSURLAuthenticationChallenge *ch, BOOL *cancel) {
+        if (!wants_challenge) return ch.previousFailureCount == 0 ? ch.proposedCredential : nil;
+        __block NSInteger disposition = NSURLSessionAuthChallengePerformDefaultHandling;
+        __block NSURLCredential *answer = nil;
+        dsem_t sem = dispatch_semaphore_create(0);
+        [self _deliver:^{
+            [cd URLSession:s task:self didReceiveChallenge:ch completionHandler:^(NSURLSessionAuthChallengeDisposition x, NSURLCredential *cr) {
+                disposition = x; answer = [cr retain]; dispatch_semaphore_signal(sem);
+            }];
+        }];
+        dispatch_semaphore_wait(sem, ~0ull);
+        dispatch_release(sem);
+        [answer autorelease];
+        if (disposition == NSURLSessionAuthChallengeCancelAuthenticationChallenge) { *cancel = YES; return nil; }
+        if (disposition == NSURLSessionAuthChallengeUseCredential) return answer;
+        if (disposition == NSURLSessionAuthChallengePerformDefaultHandling) return ch.previousFailureCount == 0 ? ch.proposedCredential : nil;
+        return nil;
+    };
+    BOOL wants_redirect = [cd respondsToSelector:@selector(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:)];
+    NSURLRequest *(^redirect)(NSHTTPURLResponse *, NSURLRequest *) = ^NSURLRequest *(NSHTTPURLResponse *resp, NSURLRequest *next) {
+        NSURLRequest *follow = next;
+        if (wants_redirect) {
+            __block NSURLRequest *answer = nil;
+            dsem_t sem = dispatch_semaphore_create(0);
+            [self _deliver:^{
+                [cd URLSession:s task:self willPerformHTTPRedirection:resp newRequest:next completionHandler:^(NSURLRequest *x) { answer = [x copy]; dispatch_semaphore_signal(sem); }];
+            }];
+            dispatch_semaphore_wait(sem, ~0ull);
+            dispatch_release(sem);
+            follow = [answer autorelease];
+        }
+        if (follow) { NSURLRequest *old = _current; _current = [follow copy]; [old release]; }
+        return follow;
+    };
+    HTTPJob j = {_current, [c HTTPAdditionalHeaders], _upload, [_current timeoutInterval] ?: [c timeoutIntervalForRequest], &_host, &_cancelled,
+                 [c HTTPShouldSetCookies] ? [c HTTPCookieStorage] : nil, [c URLCredentialStorage], challenge, redirect};
     if (j.timeout <= 0) j.timeout = [c timeoutIntervalForRequest];
     _sent = (int64_t)[_upload ?: [_current HTTPBody] length];
     NSMutableData *data = _kind != TASK_DOWNLOAD && _handler ? [NSMutableData data] : nil;
@@ -1113,7 +1523,7 @@ static NSUInteger g_task_ids;
 + (NSData *)sendSynchronousRequest:(NSURLRequest *)r returningResponse:(NSURLResponse **)resp error:(NSError **)e {
     NSMutableData *d = [NSMutableData data];
     volatile int64_t handle = 0; volatile BOOL cancelled = NO;
-    HTTPJob j = {r, nil, nil, [r timeoutInterval], &handle, &cancelled};
+    HTTPJob j = {r, nil, nil, [r timeoutInterval], &handle, &cancelled, [NSHTTPCookieStorage sharedHTTPCookieStorage], [NSURLCredentialStorage sharedCredentialStorage], nil, nil};
     NSHTTPURLResponse *got = nil;
     NSError *err = http_run(&j, &got, nil, ^BOOL(const void *p, size_t n) { [d appendBytes:p length:n]; return YES; });
     if (resp) *resp = got;

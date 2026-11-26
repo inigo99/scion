@@ -78,12 +78,16 @@ int main(int argc, char **argv) {
     CHECK(st == 0 && !strcmp(out, "xyz\n"));
 
     /* file actions: stdout to a file; a working directory */
-    unlink("/tmp/scion_spawn_out.txt"); unlink("/tmp/scion_spawn_marker");
+    /* (names of this process's own: the tests of both architectures run at the same time) */
+    char outf[64], mark[64], markp[80];
+    snprintf(outf, sizeof outf, "/tmp/scion_spawn_out_%d.txt", getpid());
+    snprintf(mark, sizeof mark, "scion_spawn_marker_%d", getpid());
+    snprintf(markp, sizeof markp, "/tmp/%s", mark);
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, "/tmp/scion_spawn_out.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_addopen(&fa, 1, outf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     st = run(self, (char *[]){"args", "to a file", NULL}, NULL, &fa, NULL, NULL, 0);
-    int fd = open("/tmp/scion_spawn_out.txt", O_RDONLY);
+    int fd = open(outf, O_RDONLY);
     CHECK(st == 0 && fd >= 0);
     ssize_t n = read(fd, out, sizeof out - 1); close(fd);
     CHECK(n > 0 && (out[n] = 0, !strcmp(out, "[to a file]\n")));
@@ -93,9 +97,9 @@ int main(int argc, char **argv) {
     if (self[0] == '/') snprintf(abs_self, sizeof abs_self, "%s", self);
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addchdir_np(&fa, "/tmp");
-    st = run(abs_self, (char *[]){"touch", "scion_spawn_marker", NULL}, NULL, &fa, NULL, NULL, 0);
-    CHECK(st == 0 && access("/tmp/scion_spawn_marker", F_OK) == 0);
-    unlink("/tmp/scion_spawn_out.txt"); unlink("/tmp/scion_spawn_marker");
+    st = run(abs_self, (char *[]){"touch", mark, NULL}, NULL, &fa, NULL, NULL, 0);
+    CHECK(st == 0 && access(markp, F_OK) == 0);
+    unlink(outf); unlink(markp);
 
     /* WNOHANG, kill, an ended child's status; errors */
     int pid;

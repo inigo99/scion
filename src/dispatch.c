@@ -393,13 +393,14 @@ void dispatch_group_async(struct dgroup *g, struct dqueue *q, void *block) { dis
 /* ===================================================================== sources
  * Timers ride the timer thread; data sources merge on the caller; signal sources count in an async-safe handler that
  * a poller (every 10 ms) turns into events. The event handler runs on the target queue, one delivery at a time, with
- * the data coalesced (dispatch_source_get_data). READ/WRITE/PROC/VNODE/MACH/MEMORYPRESSURE sources never fire.
+ * the data coalesced (dispatch_source_get_data). READ and WRITE sources ride a kqueue (below). PROC/VNODE/MACH/
+ * MEMORYPRESSURE sources never fire.
  * dispatch_suspend/resume work on sources; on queues they are ignored (ponytail). */
 struct dispatch_source_type_s { int kind; };
-enum { SRC_ADD = 1, SRC_OR, SRC_REPLACE, SRC_TIMER, SRC_SIGNAL, SRC_INERT };
+enum { SRC_ADD = 1, SRC_OR, SRC_REPLACE, SRC_TIMER, SRC_SIGNAL, SRC_INERT, SRC_READ, SRC_WRITE };
 const struct dispatch_source_type_s _dispatch_source_type_data_add = {SRC_ADD}, _dispatch_source_type_data_or = {SRC_OR},
     _dispatch_source_type_data_replace = {SRC_REPLACE}, _dispatch_source_type_timer = {SRC_TIMER}, _dispatch_source_type_signal = {SRC_SIGNAL},
-    _dispatch_source_type_read = {SRC_INERT}, _dispatch_source_type_write = {SRC_INERT}, _dispatch_source_type_proc = {SRC_INERT},
+    _dispatch_source_type_read = {SRC_READ}, _dispatch_source_type_write = {SRC_WRITE}, _dispatch_source_type_proc = {SRC_INERT},
     _dispatch_source_type_vnode = {SRC_INERT}, _dispatch_source_type_mach_send = {SRC_INERT}, _dispatch_source_type_mach_recv = {SRC_INERT},
     _dispatch_source_type_memorypressure = {SRC_INERT};
 #define SRC_MAGIC 0x6d77737263ull /* "mwsrc": tells a source from a queue in the generic calls */
@@ -413,6 +414,7 @@ struct dsource {
     int suspend, pending, canceled, cancel_done, activated;
     uint64_t start, interval; unsigned gen;
     struct dsource *next_signal;
+    int always;                        /* READ/WRITE on a descriptor the kqueue cannot watch: always ready */
 };
 static int is_source(void *o) { return o && ((struct dsource *)o)->magic == SRC_MAGIC; }
 static void src_call(struct dsource *s, void *h, int is_f) {
@@ -420,6 +422,7 @@ static void src_call(struct dsource *s, void *h, int is_f) {
     if (is_f) ((dfunc)h)(s->ctx); else call_block(h);
 }
 static void src_deliver(void *p);
+static void fd_rearm(struct dsource *s);
 static void src_signal(struct dsource *s) { /* call with s->m held */
     if (!s->data || s->suspend || s->canceled || s->pending || !s->handler) return;
     s->pending = 1;
@@ -435,7 +438,9 @@ static void src_deliver(void *p) {
     pthread_mutex_lock(&s->m);
     s->pending = 0;
     src_signal(s);
+    int rearm = (s->kind == SRC_READ || s->kind == SRC_WRITE) && !s->canceled;
     pthread_mutex_unlock(&s->m);
+    if (rearm) fd_rearm(s);
 }
 static void src_reg_run(void *p) { struct dsource *s = p; src_call(s, s->reg_handler, s->reg_is_f); }
 static void src_cancel_run(void *p) { struct dsource *s = p; src_call(s, s->cancel_handler, s->cancel_is_f); }
@@ -489,6 +494,48 @@ static void *sig_poll(void *a) {
     return a;
 }
 
+/* descriptors: one kqueue for every READ and WRITE source, waited on by a thread. A registration is EV_DISPATCH: reported
+ * once, then enabled again after the handler has run, so a source fires as long as its descriptor stays ready (as in
+ * libdispatch) without the thread spinning meanwhile. The data is what kevent says: bytes to read, or room to write. */
+struct dkev { uint64_t ident; int16_t filter; uint16_t flags; uint32_t fflags; int64_t data; uint64_t udata; };
+int kqueue(void); int kevent(int, const struct dkev *, int, struct dkev *, int, const struct timespec *);
+enum { KF_READ = -1, KF_WRITE = -2, KV_ADD = 1, KV_DELETE = 2, KV_ENABLE = 4, KV_DISPATCH = 0x80, KV_ERROR = 0x4000 };
+static int fd_kq = -1; static pthread_mutex_t fd_lock;
+static void *fd_watch(void *a) {
+    struct dkev ev[16];
+    for (;;) {
+        int n = kevent(fd_kq, 0, 0, ev, 16, 0);
+        for (int i = 0; i < n; i++) {
+            struct dsource *s = (struct dsource *)(uintptr_t)ev[i].udata;
+            if (!s || (ev[i].flags & KV_ERROR)) continue;
+            pthread_mutex_lock(&s->m);
+            if (!s->canceled) { s->data += ev[i].data > 0 ? (unsigned long)ev[i].data : 1; src_signal(s); }
+            pthread_mutex_unlock(&s->m);
+        }
+    }
+    return a;
+}
+static void fd_always(void *p) {   /* a descriptor kqueue cannot watch: ready again a moment after each delivery */
+    struct dsource *s = p;
+    pthread_mutex_lock(&s->m);
+    if (!s->canceled) { s->data += 1; src_signal(s); }
+    pthread_mutex_unlock(&s->m);
+}
+static int fd_change(struct dsource *s, int flags) {
+    struct dkev c = {s->handle, (int16_t)(s->kind == SRC_READ ? KF_READ : KF_WRITE), (uint16_t)flags, 0, 0, (uint64_t)(uintptr_t)s};
+    return kevent(fd_kq, &c, 1, 0, 0, 0);
+}
+static void fd_register(struct dsource *s) {   /* on activation */
+    pthread_mutex_lock(&fd_lock);
+    if (fd_kq < 0 && (fd_kq = kqueue()) >= 0) { void *t; pthread_create(&t, 0, fd_watch, 0); }
+    pthread_mutex_unlock(&fd_lock);
+    if (fd_kq < 0 || fd_change(s, KV_ADD | KV_DISPATCH) < 0) { s->always = 1; dispatch_async_f(s->q, s, fd_always); }
+}
+static void fd_rearm(struct dsource *s) {
+    if (s->always) dispatch_after_f(dispatch_time(0, 1000000), s->q, s, fd_always);
+    else fd_change(s, KV_ENABLE | KV_DISPATCH);
+}
+
 struct dsource *dispatch_source_create(const struct dispatch_source_type_s *type, uintptr_t handle, unsigned long mask, struct dqueue *q) {
     if (!type) return 0;
     struct dsource *s = calloc(1, sizeof *s);
@@ -538,8 +585,10 @@ void dispatch_source_merge_data(struct dsource *s, unsigned long v) {
 void dispatch_source_cancel(struct dsource *s) {
     if (!s) return;
     pthread_mutex_lock(&s->m);
+    int was = s->canceled;
     if (!s->canceled) { s->canceled = 1; s->gen++; src_maybe_cancel(s); }
     pthread_mutex_unlock(&s->m);
+    if (!was && (s->kind == SRC_READ || s->kind == SRC_WRITE) && s->activated && !s->always) fd_change(s, KV_DELETE);
     if (s->kind == SRC_SIGNAL) {
         pthread_mutex_lock(&sig_lock);
         for (struct dsource **p = &sig_sources; *p; p = &(*p)->next_signal) if (*p == s) { *p = s->next_signal; break; }
@@ -561,6 +610,7 @@ void dispatch_resume(void *o) {
             s->activated = 1;
             if (s->reg_handler) dispatch_async_f(s->q, s, src_reg_run);
             if (s->kind == SRC_TIMER && s->start != ~0ull && !s->canceled) src_timer_arm(s, s->start);
+            if ((s->kind == SRC_READ || s->kind == SRC_WRITE) && !s->canceled) { pthread_mutex_unlock(&s->m); fd_register(s); pthread_mutex_lock(&s->m); }
         }
         src_signal(s);
         src_maybe_cancel(s);
