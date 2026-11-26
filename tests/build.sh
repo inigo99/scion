@@ -92,7 +92,7 @@ finish
 if [ -n "$SWIFT_TC" ] && [ -d out/swift ]; then
   for a in x86_64 arm64; do
     for t in language combine system foundation; do sh $T/swift/swiftc.sh $a $O/swift_${t}_$a $T/swift/$t.swift; done
-    for t in concurrency swiftui navigation; do sh $T/swift/swiftc.sh $a $O/swift_${t}_$a $T/swift/$t.swift -parse-as-library; done   # @main
+    for t in concurrency swiftui navigation animation; do sh $T/swift/swiftc.sh $a $O/swift_${t}_$a $T/swift/$t.swift -parse-as-library; done   # @main
     sh $T/swift/swiftc.sh $a $W/Sample_$a $T/swift/plist.swift
   done
   mkdir -p $O/Sample.app/Contents/MacOS   # a universal binary: the runner picks the architecture with SCION_ARCH

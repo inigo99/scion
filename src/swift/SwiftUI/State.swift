@@ -40,8 +40,9 @@ final class _MWConstantLocation<Value>: AnyLocation<Value> {
     @usableFromInline init() { elements = nil }
 }
 @usableFromInline internal final class _MWPropertyListElement {
-    var animation: Animation?
-    init(_ a: Animation?) { animation = a }
+    let animation: Animation?
+    let disables: Bool
+    init(_ a: Animation?, disables: Bool = false) { animation = a; self.disables = disables }
 }
 
 @frozen public struct Transaction {
@@ -50,12 +51,13 @@ final class _MWConstantLocation<Value>: AnyLocation<Value> {
     public init(animation: Animation?) { plist = PropertyList(); plist.elements = _MWPropertyListElement(animation) }
     public var animation: Animation? {
         get { plist.elements?.animation }
-        set { plist.elements = _MWPropertyListElement(newValue) }
+        set { plist.elements = _MWPropertyListElement(newValue, disables: disablesAnimations) }
     }
-    public var disablesAnimations: Bool { get { false } set {} }
+    public var disablesAnimations: Bool {
+        get { plist.elements?.disables ?? false }
+        set { plist.elements = _MWPropertyListElement(animation, disables: newValue) }
+    }
 }
-public func withTransaction<Result>(_ transaction: Transaction, _ body: () throws -> Result) rethrows -> Result { try body() }
-public func withAnimation<Result>(_ animation: Animation? = .default, _ body: () throws -> Result) rethrows -> Result { try body() }
 
 // MARK: - the engine's hook
 
@@ -114,16 +116,18 @@ extension State: _MWDynamic {
     }
     public var wrappedValue: Value {
         get { location.get() }
-        nonmutating set { location.set(newValue, transaction: transaction) }
+        nonmutating set { withTransaction(transaction) { location.set(newValue, transaction: transaction) } }
     }
     public var projectedValue: Binding<Value> { self }
     public init(projectedValue: Binding<Value>) { self = projectedValue }
     public subscript<Subject>(dynamicMember keyPath: WritableKeyPath<Value, Subject>) -> Binding<Subject> {
         let l = location
-        return Binding<Subject>(get: { l.get()[keyPath: keyPath] }, set: { v, t in var whole = l.get(); whole[keyPath: keyPath] = v; l.set(whole, transaction: t) })
+        var b = Binding<Subject>(get: { l.get()[keyPath: keyPath] }, set: { v, t in var whole = l.get(); whole[keyPath: keyPath] = v; l.set(whole, transaction: t) })
+        b.transaction = transaction
+        return b
     }
     public func transaction(_ transaction: Transaction) -> Binding<Value> { var b = self; b.transaction = transaction; return b }
-    public func animation(_ animation: Animation? = .default) -> Binding<Value> { self }
+    public func animation(_ animation: Animation? = .default) -> Binding<Value> { var b = self; b.transaction.animation = animation; return b }
 }
 extension Binding {
     public init<V>(_ base: Binding<V>) where Value == V? {

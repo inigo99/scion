@@ -654,9 +654,6 @@ extension View {
     public func hidden() -> some View { modifier(_MWWrap { n, _ in n.isHidden = true; return n }) }
     public func shadow(color: Color = Color(.sRGBLinear, white: 0, opacity: 0.33), radius: CGFloat, x: CGFloat = 0, y: CGFloat = 0) -> some View { self }
     public func blur(radius: CGFloat, opaque: Bool = false) -> some View { self }
-    public func rotationEffect(_ angle: Angle, anchor: UnitPoint = .center) -> some View { self }
-    public func scaleEffect(_ s: CGFloat, anchor: UnitPoint = .center) -> some View { self }
-    public func scaleEffect(_ s: CGSize, anchor: UnitPoint = .center) -> some View { self }
     public func brightness(_ amount: Double) -> some View { self }
     public func saturation(_ amount: Double) -> some View { self }
     public func colorMultiply(_ color: Color) -> some View { self }
@@ -676,8 +673,9 @@ public enum ColorRenderingMode: Hashable, Sendable { case nonLinear, linear, ext
     public static let container = SafeAreaRegions(rawValue: 1), keyboard = SafeAreaRegions(rawValue: 2), all = SafeAreaRegions(rawValue: .max)
 }
 
-final class _MWAlphaNode: _MWNode {
-    let alpha: Double
+final class _MWAlphaNode: _MWNode, _MWAnimatableNode {
+    var alpha: Double
+    var animValues: [CGFloat] { get { [alpha] } set { alpha = newValue[0] } }
     init(_ n: _MWNode, _ a: Double) { alpha = a; super.init([n]) }
     override func size(_ p: _MWProposal) -> CGSize { children[0].size(p) }
     override func place(_ r: CGRect) { frame = r; children[0].place(r) }
@@ -792,58 +790,3 @@ extension SubscriptionView: _MWResolvable {
         return _mwResolve(content, c.child("sv"))
     }
 }
-
-// MARK: - animation (changes apply at once)
-
-@frozen public struct Animation: Equatable {
-    @usableFromInline internal var box: AnimationBoxBase
-    init(duration: Double) { box = AnimationBoxBase(duration) }
-    var duration: Double { box.duration }
-    public static func == (a: Animation, b: Animation) -> Bool { a.box === b.box || a.box.duration == b.box.duration }
-    public static let `default` = Animation(duration: 0.35)
-    public static let linear = Animation(duration: 0.35)
-    public static let easeIn = Animation(duration: 0.35)
-    public static let easeOut = Animation(duration: 0.35)
-    public static let easeInOut = Animation(duration: 0.35)
-    public static let spring = Animation(duration: 0.5)
-    public static func linear(duration: Double) -> Animation { Animation(duration: duration) }
-    public static func easeIn(duration: Double) -> Animation { Animation(duration: duration) }
-    public static func easeOut(duration: Double) -> Animation { Animation(duration: duration) }
-    public static func easeInOut(duration: Double) -> Animation { Animation(duration: duration) }
-    public static func spring(response: Double = 0.55, dampingFraction: Double = 0.825, blendDuration: Double = 0) -> Animation { Animation(duration: response) }
-    public static func interactiveSpring(response: Double = 0.15, dampingFraction: Double = 0.86, blendDuration: Double = 0.25) -> Animation { Animation(duration: response) }
-    public func delay(_ delay: Double) -> Animation { self }
-    public func speed(_ speed: Double) -> Animation { self }
-    public func repeatForever(autoreverses: Bool = true) -> Animation { self }
-    public func repeatCount(_ repeatCount: Int, autoreverses: Bool = true) -> Animation { self }
-}
-@usableFromInline internal class AnimationBoxBase {
-    let duration: Double
-    init(_ d: Double) { duration = d }
-}
-@frozen public struct _AnimationModifier<Value>: ViewModifier where Value: Equatable {
-    public var animation: Animation?
-    public var value: Value
-    @inlinable public init(animation: Animation?, value: Value) { self.animation = animation; self.value = value }
-    public typealias Body = Never
-}
-extension _AnimationModifier: _MWModifier {
-    func _mwModify(_ c: _MWContext, _ content: @escaping (_MWContext) -> [_MWNode]) -> [_MWNode] { content(c) }
-}
-extension View {
-    public func animation<V>(_ animation: Animation?, value: V) -> some View where V: Equatable { modifier(_AnimationModifier(animation: animation, value: value)) }
-    @inlinable public func animation(_ animation: Animation?) -> some View { modifier(_AnimationModifier(animation: animation, value: 0)) }
-}
-@frozen public struct AnyTransition {
-    @usableFromInline internal let box: AnyTransitionBox
-    init() { box = AnyTransitionBox() }
-    public static let identity = AnyTransition(), opacity = AnyTransition(), slide = AnyTransition()
-    public static func scale(scale: CGFloat, anchor: UnitPoint = .center) -> AnyTransition { AnyTransition() }
-    public static var scale: AnyTransition { AnyTransition() }
-    public static func move(edge: Edge) -> AnyTransition { AnyTransition() }
-    public static func offset(_ offset: CGSize) -> AnyTransition { AnyTransition() }
-    public static func asymmetric(insertion: AnyTransition, removal: AnyTransition) -> AnyTransition { AnyTransition() }
-    public func combined(with other: AnyTransition) -> AnyTransition { self }
-    public func animation(_ animation: Animation?) -> AnyTransition { self }
-}
-@usableFromInline internal class AnyTransitionBox { init() {} }

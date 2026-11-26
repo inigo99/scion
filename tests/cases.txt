@@ -55,6 +55,7 @@ Swift Concurrency {arch}           | CONCURRENCY OK       | - | swift_concurrenc
 Combine {arch}                     | COMBINE OK           | - | swift_combine_{arch}
 SwiftUI {arch}                     | SWIFTUI OK           | - | swift_swiftui_{arch}
 SwiftUI navigation, grids {arch}   | NAVIGATION OK        | - | swift_navigation_{arch}
+SwiftUI animations {arch}          | ANIMATION OK         | - | swift_animation_{arch}
 Swift: Darwin, Dispatch {arch}     | SYSTEM OK            | - | swift_system_{arch}
 Swift: Foundation {arch}           | FOUNDATION OK        | - | swift_foundation_{arch}
 plist, Bundle, UserDefaults {arch} | PLIST OK             | SCION_ARCH={arch} | Sample.app
