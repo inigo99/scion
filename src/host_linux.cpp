@@ -56,8 +56,11 @@ static A derr(int e = errno) {
     case EOPNOTSUPP: return -45;      /* ENOTSUP */
     case ENODATA: return -93;         /* ENOATTR */
     case EOVERFLOW: return -84;
-    case ENOTSOCK: return -D_ENOTSOCK;
+    case EINPROGRESS: return -D_EINPROGRESS;
+    case EALREADY: return -D_EALREADY;
     }
+    if (e >= 88 && e <= 111) return -(e - 50);   /* ENOTSOCK .. ECONNREFUSED: Darwin keeps BSD's numbers */
+    if (e == 112 || e == 113) return -(e - 48);  /* EHOSTDOWN, EHOSTUNREACH */
     return e > 0 && e <= 34 ? -e : -D_EIO;   /* 1..34 are the same on both, except the two above */
 }
 static A chk(long r) { return r < 0 ? derr() : r; }
@@ -87,10 +90,11 @@ HC hc_open(A dirfd, A path, A flags, A mode, A, A) {
 struct DirBuf { std::vector<char> buf; size_t pos = 0, len = 0; };
 static std::mutex g_dirmu;
 static std::unordered_map<int, DirBuf> g_dirs;
-static std::unordered_map<int, uint64_t> g_kq;   /* kqueue (an eventfd) -> EVFILT_USER ident */
 HC hc_close(A fd, A, A, A, A, A) {
-    { std::lock_guard<std::mutex> l(g_dirmu); g_dirs.erase((int)fd); g_kq.erase((int)fd); }
-    return fd <= 2 ? 0 : chk(close((int)fd));   /* the guest closing stdio must not close ours */
+    { std::lock_guard<std::mutex> l(g_dirmu); g_dirs.erase((int)fd); }
+    if (fd <= 2) return 0;   /* the guest closing stdio must not close ours */
+    net_fd_closed((int)fd);
+    return chk(close((int)fd));
 }
 HC hc_lseek(A fd, A off, A whence, A, A, A) { return chk(lseek((int)fd, off, (int)whence)); }
 static void fill_stat(struct dstat *d, const struct stat &s) {
@@ -412,29 +416,6 @@ HC hc_futex(A addr, A op, A val, A timeout, A, A) {
     if (op) { futex((void *)addr, FUTEX_WAKE, op == 1 ? 1 : INT_MAX); return 0; }
     return futex((void *)addr, FUTEX_WAIT, (uint32_t)val, timeout) < 0 && errno == ETIMEDOUT ? -D_ETIMEDOUT : 0;
 }
-/* kqueue: only EVFILT_USER (Go's netpoll wakeup), on an eventfd; registering fds fails, callers then block on I/O */
-HC hc_kqueue(A, A, A, A, A, A) {
-    int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); if (fd < 0) return derr();
-    std::lock_guard<std::mutex> l(g_dirmu); g_kq[fd] = 0;
-    return fd;
-}
-HC hc_kevent(A kq, A chp, A nch, A evp, A nev, A timeout) {
-    uint64_t *ident;
-    { std::lock_guard<std::mutex> l(g_dirmu); auto it = g_kq.find((int)kq); if (it == g_kq.end()) return -D_EBADF; ident = &it->second; }
-    struct dkevent *ch = (struct dkevent *)chp, *ev = (struct dkevent *)evp;
-    for (A i = 0; i < nch; i++) {
-        if (ch[i].filter != D_EVFILT_USER) return -D_EINVAL;
-        if (ch[i].flags & D_EV_ADD) *ident = ch[i].ident;
-        if (ch[i].fflags & D_NOTE_TRIGGER) { uint64_t one = 1; if (write((int)kq, &one, 8)) {} }
-    }
-    if (nev <= 0) return 0;
-    struct pollfd p = {(int)kq, POLLIN, 0};
-    if (poll(&p, 1, timeout < 0 ? -1 : (int)((timeout + 999999) / 1000000)) <= 0) return 0;
-    uint64_t v; if (read((int)kq, &v, 8)) {}
-    memset(ev, 0, sizeof *ev); ev->ident = *ident; ev->filter = D_EVFILT_USER;
-    return 1;
-}
-
 /* ======================================================================= threads */
 /* host-private per-thread state, in gthread.handle (gthread.host is the arm64 JIT's) */
 struct HostThread { pthread_t pt; std::atomic<uint64_t> pending{0}; std::atomic<int> suspend{0}; ucontext_t *uc = nullptr; std::atomic<int> parked{0}; };

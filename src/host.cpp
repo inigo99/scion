@@ -13,6 +13,7 @@
 #include <malloc.h>
 #include <math.h>
 #include <mutex>
+#include <memory>
 #include <atomic>
 #include <algorithm>
 #include <map>
@@ -27,12 +28,12 @@ DWORD g_tls_self; static DWORD g_tls_go;
 static std::string g_root; /* directory backing "/" for paths that are not /<drive>/... */
 static std::mutex g_fdmu;
 
-enum FdKind { FD_FREE, FD_FILE, FD_DIR, FD_KQ };
+enum FdKind { FD_FREE, FD_FILE, FD_DIR, FD_KQ, FD_SOCK };
 struct Fd {
     FdKind kind = FD_FREE; HANDLE h = INVALID_HANDLE_VALUE; std::wstring path; bool append = false;
     int dev = 0; /* reads from /dev/zero (1) or /dev/random, /dev/urandom (2): writes go to NUL */
     HANDLE find = INVALID_HANDLE_VALUE; bool find_done = false; WIN32_FIND_DATAW fd{};
-    HANDLE ev = nullptr; uint64_t uident = 0; /* kqueue EVFILT_USER */
+    uintptr_t sock = ~(uintptr_t)0; std::shared_ptr<void> sock_owner;   /* FD_SOCK: closed with the last descriptor (net.cpp) */
 };
 static std::vector<Fd> g_fds;
 
@@ -169,6 +170,13 @@ static Fd *fd_get(int64_t fd) {
     std::lock_guard<std::mutex> l(g_fdmu);
     return fd >= 0 && fd < (int64_t)g_fds.size() && g_fds[fd].kind != FD_FREE ? &g_fds[fd] : nullptr;
 }
+/* for net.cpp */
+uintptr_t host_fd_socket(int fd) {
+    std::lock_guard<std::mutex> l(g_fdmu);
+    return fd >= 0 && fd < (int)g_fds.size() && g_fds[fd].kind == FD_SOCK ? g_fds[fd].sock : ~(uintptr_t)0;
+}
+int host_fd_add_socket(uintptr_t s, std::shared_ptr<void> owner) { Fd f; f.kind = FD_SOCK; f.sock = s; f.sock_owner = std::move(owner); return fd_alloc(std::move(f)); }
+int host_fd_add_kqueue() { Fd f; f.kind = FD_KQ; return fd_alloc(std::move(f)); }
 
 static int64_t filetime_ns(FILETIME ft) { return (int64_t)((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000ull) * 100; }
 static uint64_t path_ino(const std::wstring &p) { uint64_t h = 1469598103934665603ull; for (wchar_t c : p) h = (h ^ towlower(c)) * 1099511628211ull; return h; }
@@ -190,7 +198,8 @@ static inline A G(A x) { return g_guest_arm ? (A)arm64_translate((uint64_t)x) : 
 static A hc_write(A fd, A buf, A n, A, A, A) {
     buf = G(buf);
     TRACE("write fd=%lld n=%lld\n", (long long)fd, (long long)n);
-    Fd *f = fd_get(fd); if (!f || f->kind != FD_FILE) return -D_EBADF;
+    Fd *f = fd_get(fd); if (!f || (f->kind != FD_FILE && f->kind != FD_SOCK)) return -D_EBADF;
+    if (f->kind == FD_SOCK) return net_sock_io((int)fd, f->sock, (void *)buf, (size_t)n, true);
     if (f->append) { LARGE_INTEGER z{}; SetFilePointerEx(f->h, z, nullptr, FILE_END); }
     DWORD w = 0;
     if (!WriteFile(f->h, (void *)buf, (DWORD)n, &w, nullptr)) return err_from_win();
@@ -200,6 +209,7 @@ static A hc_read(A fd, A buf, A n, A, A, A) {
     buf = G(buf);
     Fd *f = fd_get(fd); if (!f) return -D_EBADF;
     if (f->kind == FD_DIR) return -D_EISDIR;
+    if (f->kind == FD_SOCK) return net_sock_io((int)fd, f->sock, (void *)buf, (size_t)n, false);
     if (f->dev == 1) { memset((void *)buf, 0, n); return n; }
     if (f->dev == 2) { BCryptGenRandom(nullptr, (PUCHAR)buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG); return n; }
     DWORD r = 0;
@@ -252,13 +262,17 @@ static A hc_open(A dirfd, A path, A flags, A mode, A, A) {
     return fd_alloc(std::move(f));
 }
 static A hc_close(A fd, A, A, A, A, A) {
-    std::lock_guard<std::mutex> l(g_fdmu);
-    if (fd < 0 || fd >= (A)g_fds.size() || g_fds[fd].kind == FD_FREE) return -D_EBADF;
-    Fd &f = g_fds[fd];
-    if (f.find != INVALID_HANDLE_VALUE) FindClose(f.find);
-    if (f.ev) CloseHandle(f.ev);
-    if (f.h != INVALID_HANDLE_VALUE && fd > 2) CloseHandle(f.h);
-    f = Fd();
+    std::shared_ptr<void> sock;   /* closed (the last reference) outside the table's lock */
+    {
+        std::lock_guard<std::mutex> l(g_fdmu);
+        if (fd < 0 || fd >= (A)g_fds.size() || g_fds[fd].kind == FD_FREE) return -D_EBADF;
+        Fd &f = g_fds[fd];
+        if (f.find != INVALID_HANDLE_VALUE) FindClose(f.find);
+        if (f.h != INVALID_HANDLE_VALUE && fd > 2) CloseHandle(f.h);
+        sock = std::move(f.sock_owner);
+        f = Fd();
+    }
+    net_fd_closed((int)fd);
     return 0;
 }
 static A hc_lseek(A fd, A off, A whence, A, A, A) {
@@ -272,6 +286,10 @@ static A hc_stat(A dirfd, A path, A stp, A flags, A, A) {
     struct dstat *st = (struct dstat *)stp;
     if (!path) { /* fstat */
         Fd *f = fd_get(dirfd); if (!f) return -D_EBADF;
+        if (f->kind == FD_SOCK || f->kind == FD_KQ) {
+            memset(st, 0, sizeof *st); st->mode = (f->kind == FD_SOCK ? D_S_IFSOCK : 0) | 0666; st->nlink = 1; st->blksize = 4096;
+            return 0;
+        }
         DWORD t = GetFileType(f->h);
         if (f->kind == FD_FILE && t != FILE_TYPE_DISK) {
             memset(st, 0, sizeof *st); st->mode = (t == FILE_TYPE_CHAR ? D_S_IFCHR : D_S_IFIFO) | 0620; st->nlink = 1; st->blksize = 4096;
@@ -293,8 +311,9 @@ static A hc_stat(A dirfd, A path, A stp, A flags, A, A) {
 }
 static A hc_dup(A fd, A want, A, A, A, A) {
     Fd *f = fd_get(fd); if (!f) return -D_EBADF;
-    Fd n = *f; n.find = INVALID_HANDLE_VALUE; n.ev = nullptr;
-    if (!DuplicateHandle(GetCurrentProcess(), f->h, GetCurrentProcess(), &n.h, 0, FALSE, DUPLICATE_SAME_ACCESS)) return err_from_win();
+    Fd n = *f; n.find = INVALID_HANDLE_VALUE;
+    if (f->kind == FD_KQ) return -D_EBADF;   /* ponytail: kqueue state is per descriptor (net.cpp) */
+    if (f->kind != FD_SOCK && !DuplicateHandle(GetCurrentProcess(), f->h, GetCurrentProcess(), &n.h, 0, FALSE, DUPLICATE_SAME_ACCESS)) return err_from_win();
     if (want >= 0) hc_close(want, 0, 0, 0, 0, 0);
     return fd_alloc(std::move(n), (int)want);
 }
@@ -481,22 +500,6 @@ A hc_clock(A kind, A, A, A, A, A) {
 }
 static A hc_random(A buf, A n, A, A, A, A) { BCryptGenRandom(nullptr, (PUCHAR)G(buf), (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG); return 0; }
 static A hc_ncpu(A, A, A, A, A, A) { return GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); }
-static A hc_kqueue(A, A, A, A, A, A) { Fd f; f.kind = FD_KQ; f.ev = CreateEventW(nullptr, FALSE, FALSE, nullptr); return fd_alloc(std::move(f)); }
-/* Only EVFILT_USER (Go's netpoll wakeup) is supported; registering fds fails so callers fall back to blocking I/O. */
-static A hc_kevent(A kq, A chp, A nch, A evp, A nev, A timeout) {
-    Fd *f = fd_get(kq); if (!f || f->kind != FD_KQ) return -D_EBADF;
-    struct dkevent *ch = (struct dkevent *)chp, *ev = (struct dkevent *)evp;
-    for (A i = 0; i < nch; i++) {
-        if (ch[i].filter != D_EVFILT_USER) return -D_EINVAL;
-        if (ch[i].flags & D_EV_ADD) f->uident = ch[i].ident;
-        if (ch[i].fflags & D_NOTE_TRIGGER) SetEvent(f->ev);
-    }
-    if (nev <= 0) return 0;
-    DWORD ms = timeout < 0 ? INFINITE : (DWORD)((timeout + 999999) / 1000000);
-    if (WaitForSingleObject(f->ev, ms) != WAIT_OBJECT_0) return 0;
-    memset(ev, 0, sizeof *ev); ev->ident = f->uident; ev->filter = D_EVFILT_USER;
-    return 1;
-}
 static void guest_backtrace(uint64_t pc, uint64_t fp, uint64_t lr);
 /* msg, optional frame pointer: with it, a backtrace of the guest stack follows (abort) */
 static A hc_log(A msg, A fp, A, A, A, A) { fprintf(stderr, "[scion] %s\n", (const char *)msg); if (fp) guest_backtrace(0, (uint64_t)fp, 0); return 0; }

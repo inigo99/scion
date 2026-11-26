@@ -26,8 +26,10 @@ If you get another app running, please add it here (and, if it can be fetched fr
 - **Binaries:** Mach-O x86_64 and arm64, thin or universal; classic binds and chained fixups; `@rpath` frameworks
   inside bundles; thread-local variables; Objective-C, Swift, C++, Go and Rust programs.
 - **System:** files and directories, memory (`mmap`, `mprotect`, `mach_vm_*`, `vm_remap`), threads, locks, condition
-  variables, Mach thread control, signals (with `sigaltstack`), kqueue, GCD (queues, groups, semaphores, sources),
-  clocks, `sysctl` basics.
+  variables, Mach thread control, signals (with `sigaltstack`), GCD (queues, groups, semaphores, sources), clocks,
+  `sysctl` basics.
+- **Networking:** BSD sockets (TCP and UDP, IPv4 and IPv6, Unix-domain on Linux), name resolution (`getaddrinfo`),
+  non-blocking I/O with `poll`, `select` and kqueue (read, write and user events).
 - **Foundation:** most of the everyday API: strings (Unicode), collections, run loops and timers, notifications,
   operation queues, JSON, property lists, keyed archiving, regular expressions, dates and calendars (Gregorian; time
   zones with fixed offsets), URLs and file management, user defaults, bundles and localized strings, KVO,
@@ -49,7 +51,8 @@ If you get another app running, please add it here (and, if it can be fetched fr
 
 These are the big gaps. Each is a good project for a contributor (see [roadmap.md](roadmap.md)).
 
-- **Networking:** sockets return `EAFNOSUPPORT`; there is no `URLSession` or `Network.framework`.
+- **Networking above sockets:** no `URLSession`, `CFNetwork` or `Network.framework`; GCD read/write sources on sockets
+  do not fire.
 - **Child processes:** no `fork`, `posix_spawn` or `NSTask`; `system()` fails.
 - **Text and fonts:** no CoreText; text is drawn with Windows fonts through Scion's own simple layout. No rich text
   editing, input methods or spell checking.

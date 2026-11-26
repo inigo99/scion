@@ -57,7 +57,8 @@
     X(alias)      /* dst (0 = anywhere), len, src, fixed, int *cur_prot -> dst / -errno: vm_remap(copy=FALSE), arm64 only */ \
     X(metal)      /* op, a, b, c, d, e -> see metal/mtlbridge.h (forwarded to scion-metal.dll) */ \
     X(ui)         /* op, a, b, c, d, e -> see uibridge.h (windows, events, menus, controllers, sound) */ \
-    X(xattr)      /* op (0 get, 1 set, 2 remove, 3 list), fd (path == 0) , path, name, buf, size -> bytes / -errno */
+    X(xattr)      /* op (0 get, 1 set, 2 remove, 3 list), fd (path == 0) , path, name, buf, size -> bytes / -errno */ \
+    X(net)        /* op, a, b, c, d, e -> sockets, name resolution, poll: see NET_* (net.cpp) */
 
 enum {
 #define HC_ENUM(n) HC_##n,
@@ -120,6 +121,32 @@ struct ddirent {
 /* Darwin struct kevent (64-bit). */
 struct dkevent { uint64_t ident; int16_t filter; uint16_t flags; uint32_t fflags; int64_t data; uint64_t udata; };
 
+/* HC_net operations. Everything crossing is Darwin's: socket domains, types, options, flags, sockaddrs, errnos. */
+enum {
+    NET_SOCKET,     /* domain, type, protocol -> fd */
+    NET_SOCKETPAIR, /* domain, type, protocol, int fds[2] */
+    NET_CONNECT,    /* fd, sockaddr, len */
+    NET_BIND,       /* fd, sockaddr, len */
+    NET_LISTEN,     /* fd, backlog */
+    NET_ACCEPT,     /* fd, sockaddr out (or 0), uint32_t *len -> fd */
+    NET_SEND,       /* fd, struct dnetio * -> bytes */
+    NET_RECV,       /* fd, struct dnetio * (addrlen updated) -> bytes */
+    NET_SHUTDOWN,   /* fd, how */
+    NET_GETSOCKOPT, /* fd, level, name, value, uint32_t *len */
+    NET_SETSOCKOPT, /* fd, level, name, value, len */
+    NET_SOCKNAME,   /* fd, sockaddr out, uint32_t *len, peer (getpeername) */
+    NET_RESOLVE,    /* node, service, struct dnethints *, struct dnetai *out, max -> count / -(1000 + EAI_x) */
+    NET_NAMEINFO,   /* struct dnetni * -> 0 / EAI_x */
+    NET_POLL,       /* struct dpollfd *, n, timeout_ns (-1 inf) -> ready */
+    NET_FLAGS,      /* fd, set (-1: get), Darwin O_ flags (only O_NONBLOCK changes) -> flags */
+    NET_NREAD,      /* fd -> bytes ready to read (FIONREAD) */
+};
+struct dnetio { uint64_t buf, len; int32_t flags; uint32_t addrlen; uint64_t addr; };   /* send(to), recv(from) */
+struct dnethints { int32_t flags, family, socktype, protocol; uint64_t canon, canonlen; };
+struct dnetai { int32_t family, socktype, protocol; uint32_t addrlen; uint8_t addr[28]; uint8_t pad[4]; };
+struct dnetni { uint64_t addr; uint32_t addrlen; int32_t flags; uint64_t host, hostlen, serv, servlen; };
+struct dpollfd { int32_t fd; int16_t events, revents; };
+
 /* Darwin ABI values used by both sides. */
 enum {
     D_EPERM = 1, D_ENOENT = 2, D_EINTR = 4, D_EIO = 5, D_EBADF = 9, D_ENOMEM = 12, D_EACCES = 13, D_EFAULT = 14,
@@ -133,5 +160,9 @@ enum {
     D_AT_FDCWD = -2, D_AT_SYMLINK_NOFOLLOW = 0x20,
     D_S_IFIFO = 0010000, D_S_IFCHR = 0020000, D_S_IFDIR = 0040000, D_S_IFREG = 0100000, D_S_IFLNK = 0120000,
     D_DT_DIR = 4, D_DT_REG = 8, D_DT_LNK = 10,
-    D_EVFILT_USER = -10, D_EV_ADD = 1, D_EV_DELETE = 2, D_EV_CLEAR = 0x20, D_EV_ERROR = 0x4000, D_NOTE_TRIGGER = 0x1000000,
+    D_EVFILT_READ = -1, D_EVFILT_WRITE = -2, D_EVFILT_USER = -10,
+    D_EV_ADD = 1, D_EV_DELETE = 2, D_EV_ENABLE = 4, D_EV_DISABLE = 8, D_EV_ONESHOT = 0x10, D_EV_CLEAR = 0x20,
+    D_EV_RECEIPT = 0x40, D_EV_DISPATCH = 0x80, D_EV_ERROR = 0x4000, D_EV_EOF = 0x8000, D_NOTE_TRIGGER = 0x1000000,
+    D_EPIPE = 32, D_EINPROGRESS = 36, D_EALREADY = 37, D_ENOPROTOOPT = 42, D_EOPNOTSUPP = 45, D_ECONNRESET = 54,
+    D_ENOTCONN = 57, D_ECONNREFUSED = 61, D_S_IFSOCK = 0140000,
 };

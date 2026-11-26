@@ -12,6 +12,7 @@ dylib via @rpath + TLV {arch}      | dylib @rpath OK      | - | dylib/app_{arch}
 dispatch sources {arch}            | SOURCES OK           | - | sources_{arch}
 code generated at run time {arch}  | JIT OK               | - | jit_{arch}
 vm_remap without copying {arch}    | REMAP OK             | - | remap_{arch}
+sockets, kqueue, DNS {arch}        | NET OK               | - | net_{arch}
 Go: signals, preemption {arch}     | goroutines: 2999997 2999997 | - | signals_{arch}
 # C++ and Objective-C
 C++ {arch}                         | CXX OK               | - | cxx_{arch}
