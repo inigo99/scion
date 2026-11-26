@@ -51,7 +51,7 @@ extern const CFStringRef kCGColorSpaceSRGB, kCGColorSpaceGenericRGB, kCGColorSpa
 CGFloat CGRectGetMinX(CGRect r); CGFloat CGRectGetMidX(CGRect r); CGFloat CGRectGetMaxX(CGRect r);
 CGFloat CGRectGetMinY(CGRect r); CGFloat CGRectGetMidY(CGRect r); CGFloat CGRectGetMaxY(CGRect r);
 CGFloat CGRectGetWidth(CGRect r); CGFloat CGRectGetHeight(CGRect r);
-bool CGRectEqualToRect(CGRect a, CGRect b); bool CGSizeEqualToSize(CGSize a, CGSize b); bool CGPointEqualToPoint(CGPoint a, CGPoint b);
+bool CGRectEqualToRect(CGRect a, CGRect b) __attribute__((swift_name("CGRect.equalTo(self:_:)"))); bool CGSizeEqualToSize(CGSize a, CGSize b); bool CGPointEqualToPoint(CGPoint a, CGPoint b);
 bool CGRectIsEmpty(CGRect r); bool CGRectIsNull(CGRect r); bool CGRectContainsPoint(CGRect r, CGPoint p); bool CGRectContainsRect(CGRect a, CGRect b);
 bool CGRectIntersectsRect(CGRect a, CGRect b);
 CGRect CGRectStandardize(CGRect r); CGRect CGRectInset(CGRect r, CGFloat dx, CGFloat dy); CGRect CGRectOffset(CGRect r, CGFloat dx, CGFloat dy);
@@ -127,7 +127,8 @@ CGAffineTransform CGAffineTransformMakeRotation(CGFloat angle);
 bool CGAffineTransformIsIdentity(CGAffineTransform t);
 bool CGAffineTransformEqualToTransform(CGAffineTransform a, CGAffineTransform b);
 CGSize CGSizeApplyAffineTransform(CGSize s, CGAffineTransform t);
-void CGRectDivide(CGRect r, CGRect *slice, CGRect *remainder, CGFloat amount, CGRectEdge edge);
+void CGRectDivide(CGRect r, CGRect *slice, CGRect *remainder, CGFloat amount, CGRectEdge edge)
+    __attribute__((swift_name("CGRect.__divided(self:slice:remainder:atDistance:from:)")));   /* (src/swift/CGGeometry.swift) */
 CGRect CGRectApplyAffineTransform(CGRect r, CGAffineTransform t);
 
 CGMutablePathRef CGPathCreateMutable(void);

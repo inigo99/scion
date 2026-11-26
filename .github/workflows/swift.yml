@@ -64,7 +64,7 @@ jobs:
 
       # The Swift runtime, overlays and concurrency library: from the cache, or built (and cached right away, so a
       # failure later in this job does not throw an hour of work away)
-      - name: Restore the Swift runtime and overlays
+      - name: Restore the Swift runtime, overlays and concurrency library
         id: base
         uses: actions/cache/restore@v6
         with:
@@ -73,14 +73,36 @@ jobs:
             out/swift-build
             bin/lib/libswift*.dylib
             bin/lib/Combine.dylib
-          key: swift-base-${{ hashFiles('src/build_swift.sh', 'src/build_swift_overlays.sh', 'src/build_swift_concurrency.sh', 'src/build_swiftui.sh', 'scripts/fetch-deps.sh', 'patches/swift-*', 'src/swift/Combine/**') }}
-      - name: Build the Swift runtime and overlays (an hour or more, once)
+          key: swift-base-${{ hashFiles('src/build_swift.sh', 'src/build_swift_overlays.sh', 'src/build_swift_concurrency.sh', 'src/build_swiftui.sh', 'scripts/fetch-deps.sh', 'patches/swift-*', 'src/swift/*.swift', 'src/swift/Combine/**', 'sdk/**') }}
+      # the runtime alone (most of the time) is cached too, so a failing overlay does not rebuild it
+      - name: Restore the Swift runtime
+        id: core
+        if: steps.base.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            out/swift
+            out/swift-build
+            bin/lib/libswiftCore.dylib
+          key: swift-core-${{ hashFiles('src/build_swift.sh', 'scripts/fetch-deps.sh', 'patches/swift-*', 'sdk/darwin/**') }}
+      - name: Build the Swift runtime (once)
+        if: steps.base.outputs.cache-hit != 'true' && steps.core.outputs.cache-hit != 'true'
+        run: |
+          src/build_swift.sh || { for l in out/swift-build/*.log out/swift-build/*/*.log; do [ -f "$l" ] && { echo "== $l"; tail -n 40 "$l"; }; done; exit 1; }
+      - name: Save the Swift runtime
+        if: steps.base.outputs.cache-hit != 'true' && steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            out/swift
+            out/swift-build
+            bin/lib/libswiftCore.dylib
+          key: ${{ steps.core.outputs.cache-primary-key }}
+      - name: Build the overlays and the concurrency library
         if: steps.base.outputs.cache-hit != 'true'
         run: |
-          src/build_swift.sh && src/build_swift_overlays.sh && src/build_swift_concurrency.sh || {
-            for l in out/swift-build/*.log out/swift-build/frameworks/*.log; do [ -f "$l" ] && { echo "== $l"; tail -n 40 "$l"; }; done
-            exit 1; }
-      - name: Save the Swift runtime and overlays
+          src/build_swift_overlays.sh && src/build_swift_concurrency.sh || { for l in out/swift-build/*.log out/swift-build/*/*.log; do [ -f "$l" ] && { echo "== $l"; tail -n 40 "$l"; }; done; exit 1; }
+      - name: Save the Swift runtime, overlays and concurrency library
         if: steps.base.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
@@ -92,7 +114,8 @@ jobs:
           key: ${{ steps.base.outputs.cache-primary-key }}
 
       - name: Build SwiftUI
-        run: ONLY=SwiftUI src/build_swiftui.sh
+        run: |
+          ONLY=SwiftUI src/build_swiftui.sh || { tail -n 60 out/swift-build/frameworks/*.log; exit 1; }
 
       - name: Check SwiftUI's symbols against Apple's (tests/swift/swiftui-abi.txt)
         run: tests/swift/abi.sh
