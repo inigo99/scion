@@ -22,7 +22,7 @@ sudo apt install clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-
 # to run the tests (docs/testing.md); golang is optional
 sudo apt install wine64 xvfb mesa-vulkan-drivers golang
 # for the native Linux host (bin/scion)
-sudo apt install libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev
+sudo apt install libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev libcurl4-openssl-dev
 ```
 
 `clang` and `clang++` must be clang 18 or newer. The scripts call versioned LLVM tools (`ld64.lld-18`, `llvm-lipo-18`,

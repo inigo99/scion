@@ -519,8 +519,11 @@ static unichar strip_accent(unichar c) {
 static id adopt(NSString *me, NSString *s) { if (!s) { [me release]; return nil; } return [me initWithString:s]; }
 - (instancetype)initWithContentsOfFile:(NSString *)p encoding:(NSStringEncoding)e error:(NSError **)err { return adopt(self, [NSString stringWithContentsOfFile:p encoding:e error:err]); }
 - (instancetype)initWithContentsOfFile:(NSString *)p usedEncoding:(NSStringEncoding *)e error:(NSError **)err { return adopt(self, [NSString stringWithContentsOfFile:p usedEncoding:e error:err]); }
-- (instancetype)initWithContentsOfURL:(NSURL *)u encoding:(NSStringEncoding)e error:(NSError **)err { return adopt(self, [NSString stringWithContentsOfFile:[u path] encoding:e error:err]); }
-- (instancetype)initWithContentsOfURL:(NSURL *)u usedEncoding:(NSStringEncoding *)e error:(NSError **)err { return adopt(self, [NSString stringWithContentsOfFile:[u path] usedEncoding:e error:err]); }
+- (instancetype)initWithContentsOfURL:(NSURL *)u encoding:(NSStringEncoding)e error:(NSError **)err { return adopt(self, [NSString stringWithContentsOfURL:u encoding:e error:err]); }
+- (instancetype)initWithContentsOfURL:(NSURL *)u usedEncoding:(NSStringEncoding *)e error:(NSError **)err {
+    if (![u isFileURL]) { if (e) *e = NSUTF8StringEncoding; return adopt(self, [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:err]); }
+    return adopt(self, [NSString stringWithContentsOfFile:[u path] usedEncoding:e error:err]);
+}
 - (instancetype)initWithFormat:(NSString *)f locale:(id)l arguments:(va_list)ap { return [self initWithFormat:f arguments:ap]; }
 - (BOOL)writeToURL:(NSURL *)u atomically:(BOOL)a encoding:(NSStringEncoding)e error:(NSError **)err {
     if (![u isFileURL]) { if (err) *err = [NSError errorWithDomain:NSCocoaErrorDomain code:518 userInfo:nil]; return NO; }
@@ -699,7 +702,12 @@ static NSData *b64_decode(const unsigned char *p, NSUInteger n, BOOL ignore) {
     NSData *d = [NSData dataWithContentsOfFile:p options:o error:e]; if (!d) { [self release]; return nil; } return [self initWithData:d];
 }
 - (instancetype)initWithContentsOfURL:(NSURL *)u options:(NSDataReadingOptions)o error:(NSError **)e {
-    if (![u isFileURL]) { if (e) *e = [NSError errorWithDomain:NSCocoaErrorDomain code:262 userInfo:nil]; [self release]; return nil; }
+    if (![u isFileURL]) {
+        NSData *_scion_url_data(NSURL *, NSError **);
+        NSData *d = _scion_url_data(u, e);
+        if (!d) { [self release]; return nil; }
+        return [self initWithData:d];
+    }
     return [self initWithContentsOfFile:[u path] options:o error:e];
 }
 - (instancetype)initWithContentsOfURL:(NSURL *)u { return [self initWithContentsOfURL:u options:0 error:0]; }

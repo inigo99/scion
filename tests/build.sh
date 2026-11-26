@@ -53,7 +53,7 @@ prog cxx cpp/cxx.cpp "$CXX" "$L/libc++.1.dylib"
 prog threads cpp/threads.cpp "$CXX" "$L/libc++.1.dylib"
 # Objective-C: the runtime without Foundation, Foundation, exceptions, regex, AppKit pieces
 prog runtime objc/runtime.m "$OBJC -fobjc-arc" "$L/libobjc.A.dylib"
-for t in foundation foundation2 exceptions regex invocations; do prog $t objc/$t.m "$OBJC -fobjc-arc" "$L/Foundation.dylib $L/libobjc.A.dylib"; done
+for t in foundation foundation2 exceptions regex invocations urlsession; do prog $t objc/$t.m "$OBJC -fobjc-arc" "$L/Foundation.dylib $L/libobjc.A.dylib"; done
 for t in autolayout asset_catalog; do prog ${t}2 objc/$t.m "$OBJC -fobjc-arc" "$FW"; done
 for t in status_item table_views; do prog $t objc/$t.m "$OBJC -fno-objc-arc" "$FW"; done
 # AppKit, GameController (ARC, like real apps)

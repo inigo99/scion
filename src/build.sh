@@ -57,16 +57,16 @@ for a in x86_64 arm64; do
   job clang $G $KIT -Wno-atomic-property-with-user-defined-accessor $OBJC -c gamecontroller/gc.m -o $T/gc_$a.o
   job clang $G -isysroot ../sdk/darwin -isystem ../sdk/include -fblocks $W -Wno-four-char-constants -c audio/audiotoolbox.c -o $T/at_$a.o
 done
-# the hosts: scion.exe (MinGW), scionw.exe and, with dynarmic for Linux and SDL2/FreeType/fontconfig/libpng/libjpeg, scion
+# the hosts: scion.exe (MinGW), scionw.exe and, with dynarmic for Linux and SDL2/FreeType/fontconfig/libpng/libjpeg/libcurl, scion
 DI="-I$D/src -I$D/externals/mcl/include -I$D/externals/fmt/include"
-for f in host dyld arm64 ui install net; do job x86_64-w64-mingw32-g++-posix -std=c++20 -O2 $W -municode $DI -c $f.cpp -o $T/win_$f.o; done
+for f in host dyld arm64 ui install net http; do job x86_64-w64-mingw32-g++-posix -std=c++20 -O2 $W -municode $DI -c $f.cpp -o $T/win_$f.o; done
 LINUX=
-if [ -f $L/src/dynarmic/libdynarmic.a ] && pkg-config --exists sdl2 freetype2 fontconfig libpng; then
+if [ -f $L/src/dynarmic/libdynarmic.a ] && pkg-config --exists sdl2 freetype2 fontconfig libpng libcurl; then
   LINUX=1
-  for f in host_linux ui_linux install_linux dyld arm64 net; do
-    job g++ -std=c++20 -O2 $W $DI $(pkg-config --cflags sdl2 freetype2 fontconfig libpng) -c $f.cpp -o $T/lin_$f.o
+  for f in host_linux ui_linux install_linux dyld arm64 net http; do
+    job g++ -std=c++20 -O2 $W $DI $(pkg-config --cflags sdl2 freetype2 fontconfig libpng libcurl) -c $f.cpp -o $T/lin_$f.o
   done
-else echo "note: dynarmic for Linux (scripts/build-dynarmic.sh --linux) or SDL2/FreeType/fontconfig/libpng are missing: skipping bin/scion"; fi
+else echo "note: dynarmic for Linux (scripts/build-dynarmic.sh --linux) or SDL2/FreeType/fontconfig/libpng/libcurl are missing: skipping bin/scion"; fi
 job x86_64-w64-mingw32-g++-posix -std=c++20 -O2 -Wall -municode -mwindows launcher.cpp -o $OUT/scionw.exe -lshell32 -lole32 -luuid -static
 finish
 
@@ -96,9 +96,9 @@ for l in ls:libSystem.B cxx:libc++.1 objc:libobjc.A fnd:Foundation mtl:Metal ak:
   llvm-lipo-18 -create $T/${l%%:*}_x86_64.dylib $T/${l%%:*}_arm64.dylib -output $OUT/lib/${l#*:}.dylib
 done
 x86_64-w64-mingw32-g++-posix -municode $T/win_*.o -o $OUT/scion.exe \
-  $B/src/dynarmic/libdynarmic.a $(find $B/externals -name '*.a') -lws2_32 -lbcrypt -lwinmm -lsynchronization -ldwmapi -lole32 -luuid -lgdi32 \
+  $B/src/dynarmic/libdynarmic.a $(find $B/externals -name '*.a') -lws2_32 -lwinhttp -lshlwapi -lbcrypt -lwinmm -lsynchronization -ldwmapi -lole32 -luuid -lgdi32 \
   -lshell32 -lwindowscodecs -static -Wl,-Map=../out/scion.map
 # scion: the native Linux host (#10), sharing lib/ with scion.exe
 [ -z "$LINUX" ] || g++ $T/lin_*.o -o $OUT/scion $L/src/dynarmic/libdynarmic.a $(find $L/externals -name '*.a') \
-  $(pkg-config --libs sdl2 freetype2 fontconfig libpng) -ljpeg -lX11 -lpthread -lrt
+  $(pkg-config --libs sdl2 freetype2 fontconfig libpng libcurl) -ljpeg -lX11 -lpthread -lrt
 echo "OK -> $OUT"
