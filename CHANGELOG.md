@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- CI: `.github/workflows/swift.yml` builds Combine and SwiftUI with Swift 6.1.3 and runs the Swift tests on the native
+  host and under Wine when Swift code changes; the Swift runtime and overlays are cached between runs.
 - CoreText and rich text: `NSAttributedString` keeps runs of attributes (it had one set for the whole string), with
   `CFAttributedString` on it. CoreText lays out lines, runs, typesetters, framesetters and frames with paragraph
   styles (alignment, indents, spacing, line heights, wrapping, truncation); attributed strings and `NSTextView` draw

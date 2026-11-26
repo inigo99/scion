@@ -42,7 +42,7 @@ icons after a few seconds and quit. That is how the third-party apps are checked
 | Part | Needs | Notes |
 |---|---|---|
 | Go test | `go` | cross-compiled for `GOOS=darwin` |
-| Swift tests | `SWIFT_TC` and Scion's Swift build (`out/swift`) | see [building.md](building.md) |
+| Swift tests | `SWIFT_TC` and Scion's Swift build (`out/swift`) | see [building.md](building.md). On GitHub, `.github/workflows/swift.yml` builds Combine and SwiftUI and runs these tests (native host and Wine) whenever Swift code changes, with the Swift runtime and overlays cached between runs. |
 | class-dump | `git` and network | GPLv2, cloned and built in a temporary folder by `tests/apps/class-dump.sh`; not part of Scion |
 | Metal sample shaders | `deps/indium` (`scripts/fetch-deps.sh`) | Apple's sample `.metallib` files from Indium's tests, copied at build time |
 | Third-party apps | `tests/apps/fetch.sh` (curl, tar, unzip; 7z for Hex Fiend's `.dmg`) | esbuild 0.28.2, Biome 2.6.2, SwiftFormat 0.64.5, Itsycal 0.15.15, Reminders MenuBar 2.2.0, Hex Fiend 2.18.1, downloaded from their official releases into `out/tests/apps`. None of them is redistributed by Scion. |

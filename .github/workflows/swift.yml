@@ -1,0 +1,123 @@
+# Builds Scion's Combine and SwiftUI (src/swift) with Swift 6.1.3 and runs the Swift tests on the native Linux host and
+# under Wine, when Swift code changes. The Swift runtime and overlays under them (src/build_swift*.sh) take an hour or
+# more: they are cached and rebuilt only when their scripts or patches change. The libraries and the test programs are
+# kept as an artifact, to try them elsewhere.
+name: Swift
+on:
+  pull_request:
+    paths: ['src/swift/**', 'tests/swift/**', 'src/build_swift*.sh', 'patches/swift-*', '.github/workflows/swift.yml']
+  push:
+    branches: [main]
+    paths: ['src/swift/**', 'tests/swift/**', 'src/build_swift*.sh', 'patches/swift-*', '.github/workflows/swift.yml']
+  workflow_dispatch:
+
+jobs:
+  swift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 llvm-20 mingw-w64 cmake ninja-build libboost-dev python3 \
+            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev libcurl4-openssl-dev libvulkan-dev libzstd-dev \
+            xvfb wine64
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+      - name: Cache dependencies (with the Swift sources)
+        uses: actions/cache@v6
+        with:
+          path: deps
+          key: deps-swift-${{ hashFiles('scripts/fetch-deps.sh', 'scripts/build-dynarmic.sh', 'patches/**') }}
+
+      - name: Fetch and build dependencies
+        run: |
+          scripts/fetch-deps.sh --swift
+          [ -f deps/dynarmic/build-win/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh
+          [ -f deps/dynarmic/build-linux/src/dynarmic/libdynarmic.a ] || scripts/build-dynarmic.sh --linux
+
+      - name: Cache the Swift 6.1.3 toolchain
+        id: tc
+        uses: actions/cache@v6
+        with:
+          path: ~/swift-6.1.3
+          key: swift-toolchain-6.1.3-ubuntu24.04
+      - name: Swift 6.1.3 toolchain
+        run: |
+          if [ ! -d ~/swift-6.1.3/usr ]; then
+            mkdir -p ~/swift-6.1.3
+            curl -sSL https://download.swift.org/swift-6.1.3-release/ubuntu2404/swift-6.1.3-RELEASE/swift-6.1.3-RELEASE-ubuntu24.04.tar.gz \
+              | tar xz -C ~/swift-6.1.3 --strip-components 1
+          fi
+          # the scripts expect the layout of Ubuntu's swiftlang package (usr/libexec/swift/{bin,lib})
+          mkdir -p ~/swift-tc/libexec && ln -sfn ~/swift-6.1.3/usr ~/swift-tc/libexec/swift
+          echo "SWIFT_TC=$HOME/swift-tc" >> "$GITHUB_ENV"
+
+      - name: Build Scion (core)
+        run: src/build.sh
+
+      # The Swift runtime, overlays and concurrency library: from the cache, or built (and cached right away, so a
+      # failure later in this job does not throw an hour of work away)
+      - name: Restore the Swift runtime and overlays
+        id: base
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            out/swift
+            out/swift-build
+            bin/lib/libswift*.dylib
+            bin/lib/Combine.dylib
+          key: swift-base-${{ hashFiles('src/build_swift.sh', 'src/build_swift_overlays.sh', 'src/build_swift_concurrency.sh', 'src/build_swiftui.sh', 'scripts/fetch-deps.sh', 'patches/swift-*', 'src/swift/Combine/**') }}
+      - name: Build the Swift runtime and overlays (an hour or more, once)
+        if: steps.base.outputs.cache-hit != 'true'
+        run: |
+          src/build_swift.sh
+          src/build_swift_overlays.sh
+          src/build_swift_concurrency.sh
+      - name: Save the Swift runtime and overlays
+        if: steps.base.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            out/swift
+            out/swift-build
+            bin/lib/libswift*.dylib
+            bin/lib/Combine.dylib
+          key: ${{ steps.base.outputs.cache-primary-key }}
+
+      - name: Build SwiftUI
+        run: ONLY=SwiftUI src/build_swiftui.sh
+
+      - name: Build the tests
+        run: tests/build.sh
+
+      - name: Run the Swift tests (native Linux host)
+        run: |
+          export SCION="$PWD/bin/scion"
+          tests/run.sh Swift
+          tests/run.sh Combine
+
+      - name: Run the Swift tests (Wine)
+        run: |
+          mkdir -p /run/user/$(id -u) || true
+          wineboot -i >/dev/null 2>&1 || true
+          tests/run.sh Swift
+          tests/run.sh Combine
+
+      - name: Keep the Swift libraries and test programs
+        if: always()
+        run: |
+          mkdir -p swift-out/lib swift-out/tests
+          cp bin/lib/SwiftUI.dylib bin/lib/Combine.dylib swift-out/lib/ 2>/dev/null || true
+          cp out/tests/swift_* swift-out/tests/ 2>/dev/null || true
+          tar cf swift-out.tar swift-out
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: scion-swift-test
+          path: swift-out.tar
+          retention-days: 7
+          if-no-files-found: ignore
