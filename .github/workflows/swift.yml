@@ -74,9 +74,9 @@ jobs:
       - name: Build the Swift runtime and overlays (an hour or more, once)
         if: steps.base.outputs.cache-hit != 'true'
         run: |
-          src/build_swift.sh
-          src/build_swift_overlays.sh
-          src/build_swift_concurrency.sh
+          src/build_swift.sh && src/build_swift_overlays.sh && src/build_swift_concurrency.sh || {
+            for l in out/swift-build/*.log out/swift-build/frameworks/*.log; do [ -f "$l" ] && { echo "== $l"; tail -n 40 "$l"; }; done
+            exit 1; }
       - name: Save the Swift runtime and overlays
         if: steps.base.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
