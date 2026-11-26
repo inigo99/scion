@@ -242,6 +242,7 @@ extension App {
                      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     w.title = title.isEmpty ? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "") : title
     w.contentView = host
+    if let h = _mwFindHost(host) { _mwApplyTitle(h) }   // (its first update had no window yet)
     w.center()
     w.makeKeyAndOrderFront(nil)
     _mwKeepAlive.append(w)

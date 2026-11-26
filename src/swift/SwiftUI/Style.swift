@@ -285,7 +285,8 @@ func _mwColor<S: ShapeStyle>(_ s: S, _ env: EnvironmentValues) -> NSColor { (s a
                 if s[n] == "%" { out += "%"; i = s.index(after: n); continue }
                 var j = n
                 while j < s.endIndex, !s[j].isLetter, s[j] != "@" { j = s.index(after: j) }
-                if j < s.endIndex { out += args.next()?.text ?? ""; i = s.index(after: j); if s[j] == "l", i < s.endIndex { i = s.index(after: i) }; continue }
+                while j < s.endIndex, "hlqLztj".contains(s[j]) { j = s.index(after: j) }   // (length modifiers: %lld)
+                if j < s.endIndex { out += args.next()?.text ?? ""; i = s.index(after: j); continue }
             }
             out.append(s[i]); i = s.index(after: i)
         }

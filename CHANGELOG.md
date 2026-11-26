@@ -10,6 +10,8 @@
   as columns or a stack, their styles, and `navigationTitle` as the window's title.
 - SwiftUI grids: `Grid` and `GridRow` (column widths, spans, column alignment, unsized cells), `LazyHGrid`, and
   `LazyVStack`/`LazyHStack` as their own types (they were aliases of `VStack`/`HStack`, a different ABI).
+- SwiftUI fixes: `Text("n = \(n)")` with an `Int` showed a stray `d` (the `%lld` of `LocalizedStringKey`); a
+  window's first `navigationTitle` was replaced by the `WindowGroup`'s title.
 - `tests/swift/abi.sh` checks SwiftUI's exported symbols against Apple's names for the listed APIs.
 - Networking: GCD read and write sources fire (on the kqueue, for sockets on both hosts and pipes on Linux; files count
   as always ready). `URLSession` keeps cookies (`NSHTTPCookie`, `NSHTTPCookieStorage`, saved between runs), follows
