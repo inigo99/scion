@@ -41,6 +41,7 @@ MetalFX {arch}                     | METALFX OK           | - | metalfx_{arch}
 AppKit {arch}                      | APPKIT OK            | - | appkit_{arch}
 file dialogs, context menus {arch} | DIALOGS OK           | - | dialogs_{arch}
 2D drawing and controls {arch}     | DRAWING OK           | - | drawing_{arch}
+CoreText, rich text {arch}         | CORETEXT OK          | - | coretext_{arch}
 Auto Layout {arch}                 | AUTOLAYOUT OK        | - | autolayout_{arch}
 Auto Layout (VFL) {arch}           | AUTOLAYOUT OK        | - | autolayout2_{arch}
 NSTableView {arch}                 | TABLES OK            | - | table_views_{arch}

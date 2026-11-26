@@ -250,7 +250,7 @@ static std::string expand(const std::string &p, Image *loader) {
  * resolves to libSystem, whose stubs (and the flat fallback) take over. */
 static std::string locate(const std::string &name, Image *loader) {
     static const std::map<std::string, std::string> alias = {
-        {"CoreFoundation", "Foundation"}, {"QuartzCore", "Metal"}, {"MetalFX", "Metal"}, {"Cocoa", "AppKit"}, {"CoreGraphics", "AppKit"}, {"ApplicationServices", "AppKit"},
+        {"CoreFoundation", "Foundation"}, {"QuartzCore", "Metal"}, {"MetalFX", "Metal"}, {"Cocoa", "AppKit"}, {"CoreGraphics", "AppKit"}, {"CoreText", "AppKit"}, {"ApplicationServices", "AppKit"},
         {"CoreVideo", "AppKit"}, {"MetalKit", "AppKit"}, {"CoreHaptics", "GameController"}, {"AudioUnit", "AudioToolbox"}, {"CoreAudio", "AudioToolbox"}, {"CoreServices", "Foundation"}, {"EventKit", "Foundation"}, {"ScriptingBridge", "Foundation"}, {"libSystem.B", "libSystem.B"},
         {"libc++abi", "libc++.1"}, {"libc++", "libc++.1"},
     };

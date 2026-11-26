@@ -42,6 +42,8 @@ enum {
     UI_PRESENT,          /* window id, const MwImage* (0: none): the window's client area shows these pixels (non-Metal windows) */
     UI_STATUS_ITEM,      /* id (> 0), op (1 set, 0 remove), const MwImage *icon (0: keep), const char *tooltip (0: keep):
                             an icon in the notification area (NSStatusItem); clicks come back as UI_EV_STATUS */
+    UI_FONT_ADD,         /* const char *path (a TrueType/OpenType file or collection), char *names out, cap -> faces added (their
+                            PostScript names, one per line, in names), -1: not a font file */
     UI_OP_COUNT
 };
 

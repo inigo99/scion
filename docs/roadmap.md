@@ -33,7 +33,8 @@ These are the areas where work has the most effect. Each is self-contained enoug
 - Networking: cookies, authentication challenges and WebSockets in `URLSession`; `Network.framework`; GCD sources on
   sockets. Sockets and HTTP(S) `URLSession` are there.
 - Child processes: `fork` where it can be had (Linux); signals delivered to children's handlers on Windows.
-- Text: CoreText on DirectWrite, rich text in `NSTextView`, input methods.
+- Text: real glyphs and shaping (DirectWrite, HarfBuzz) for outlines, features and right-to-left text; input methods;
+  undo and rich-text editing commands in `NSTextView`. CoreText layout and styled text are there.
 - CoreAnimation layers beyond Metal presentation; CoreImage basics.
 - AVFoundation playback; audio input.
 - More of SwiftUI (navigation, grids, animations, more modifiers).

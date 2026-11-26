@@ -3,6 +3,7 @@
  * libSystem (stubs.c). Callback structs are accepted and ignored: CF collections here always retain like NS ones. */
 #include "internal.h"
 #undef kCFAllocatorDefault
+#undef CFSTR
 #define CFSTR(s) ((CFStringRef)@s)
 
 NSStringEncoding ns_encoding(CFStringEncoding e); /* swift.m */
@@ -214,3 +215,47 @@ const CFStringRef kDADiskDescriptionBusNameKey = CFSTR("DABusName"), kDADiskDesc
 const CFStringRef kSMDomainSystemLaunchd = CFSTR("kSMDomainSystemLaunchd"), kSMDomainUserLaunchd = CFSTR("kSMDomainUserLaunchd");
 const CFStringRef kSecDigestSHA1 = CFSTR("SHA1"), kSecDigestSHA2 = CFSTR("SHA2"), kSecTransformInputAttributeName = CFSTR("INPUT"),
     kSecTransformOutputAttributeName = CFSTR("OUTPUT");
+
+/* ---------------- attributed strings (NSAttributedString; CoreText lays them out) ---------------- */
+#define AS(x) ((NSAttributedString *)(x))
+#define MAS(x) ((NSMutableAttributedString *)(x))
+static NSRange ns_range(CFRange r) { return NSMakeRange((NSUInteger)r.location, (NSUInteger)r.length); }
+static void out_range(CFRange *eff, NSRange r) { if (eff) *eff = (CFRange){(CFIndex)r.location, (CFIndex)r.length}; }
+CFAttributedStringRef CFAttributedStringCreate(CFAllocatorRef a, CFStringRef s, CFDictionaryRef attrs) {
+    return (CFAttributedStringRef)[[NSAttributedString alloc] initWithString:(NSString *)s attributes:(NSDictionary *)attrs];
+}
+CFAttributedStringRef CFAttributedStringCreateCopy(CFAllocatorRef a, CFAttributedStringRef s) { return (CFAttributedStringRef)[AS(s) copy]; }
+CFAttributedStringRef CFAttributedStringCreateWithSubstring(CFAllocatorRef a, CFAttributedStringRef s, CFRange r) {
+    return (CFAttributedStringRef)[[AS(s) attributedSubstringFromRange:ns_range(r)] copy];
+}
+CFMutableAttributedStringRef CFAttributedStringCreateMutable(CFAllocatorRef a, CFIndex max) { return (CFMutableAttributedStringRef)[[NSMutableAttributedString alloc] init]; }
+CFMutableAttributedStringRef CFAttributedStringCreateMutableCopy(CFAllocatorRef a, CFIndex max, CFAttributedStringRef s) { return (CFMutableAttributedStringRef)[AS(s) mutableCopy]; }
+CFIndex CFAttributedStringGetLength(CFAttributedStringRef s) { return (CFIndex)[AS(s) length]; }
+CFStringRef CFAttributedStringGetString(CFAttributedStringRef s) { return (CFStringRef)[AS(s) string]; }
+CFDictionaryRef CFAttributedStringGetAttributes(CFAttributedStringRef s, CFIndex i, CFRange *eff) {
+    NSRange r; NSDictionary *d = [AS(s) attributesAtIndex:(NSUInteger)i effectiveRange:&r];
+    out_range(eff, r);
+    return (CFDictionaryRef)d;
+}
+CFTypeRef CFAttributedStringGetAttribute(CFAttributedStringRef s, CFIndex i, CFStringRef name, CFRange *eff) {
+    NSRange r; id v = [AS(s) attribute:(NSString *)name atIndex:(NSUInteger)i effectiveRange:&r];
+    out_range(eff, r);
+    return v;
+}
+CFDictionaryRef CFAttributedStringGetAttributesAndLongestEffectiveRange(CFAttributedStringRef s, CFIndex i, CFRange in, CFRange *eff) {
+    NSRange r; NSDictionary *d = [AS(s) attributesAtIndex:(NSUInteger)i longestEffectiveRange:&r inRange:ns_range(in)];
+    out_range(eff, r);
+    return (CFDictionaryRef)d;
+}
+void CFAttributedStringReplaceString(CFMutableAttributedStringRef s, CFRange r, CFStringRef str) { [MAS(s) replaceCharactersInRange:ns_range(r) withString:(NSString *)str]; }
+CFMutableStringRef CFAttributedStringGetMutableString(CFMutableAttributedStringRef s) { return (CFMutableStringRef)[MAS(s) mutableString]; }
+void CFAttributedStringSetAttributes(CFMutableAttributedStringRef s, CFRange r, CFDictionaryRef a, Boolean clear) {
+    if (clear) [MAS(s) setAttributes:(NSDictionary *)a range:ns_range(r)]; else [MAS(s) addAttributes:(NSDictionary *)a range:ns_range(r)];
+}
+void CFAttributedStringSetAttribute(CFMutableAttributedStringRef s, CFRange r, CFStringRef name, CFTypeRef v) { [MAS(s) addAttribute:(NSString *)name value:(id)v range:ns_range(r)]; }
+void CFAttributedStringRemoveAttribute(CFMutableAttributedStringRef s, CFRange r, CFStringRef name) { [MAS(s) removeAttribute:(NSString *)name range:ns_range(r)]; }
+void CFAttributedStringReplaceAttributedString(CFMutableAttributedStringRef s, CFRange r, CFAttributedStringRef with) {
+    [MAS(s) replaceCharactersInRange:ns_range(r) withAttributedString:AS(with)];
+}
+void CFAttributedStringBeginEditing(CFMutableAttributedStringRef s) { [MAS(s) beginEditing]; }
+void CFAttributedStringEndEditing(CFMutableAttributedStringRef s) { [MAS(s) endEditing]; }

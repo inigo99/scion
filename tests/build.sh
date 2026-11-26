@@ -58,7 +58,9 @@ for t in foundation foundation2 exceptions regex invocations urlsession task; do
 for t in autolayout asset_catalog; do prog ${t}2 objc/$t.m "$OBJC -fobjc-arc" "$FW"; done
 for t in status_item table_views; do prog $t objc/$t.m "$OBJC -fno-objc-arc" "$FW"; done
 # AppKit, GameController (ARC, like real apps)
-for t in appkit dialogs drawing autolayout; do prog $t appkit/$t.m "$OBJC -fobjc-arc" "$FW"; done
+for t in appkit dialogs drawing autolayout coretext; do prog $t appkit/$t.m "$OBJC -fobjc-arc" "$FW"; done
+# a font file for the CoreText test to register (any TrueType/OpenType font fontconfig knows; skipped without one)
+f=$(fc-match -f '%{file}' 'DejaVu Sans:bold' 2>/dev/null) && case $f in *.ttf|*.otf) cp "$f" $O/font.ttf;; esac
 for t in gamepad keyboard; do prog $t gamepad/$t.m "$OBJC -fobjc-arc" "$FW"; done
 # Metal: Apple-compiled sample metallibs from Indium's tests (deps/indium, scripts/fetch-deps.sh), a modern-AIR metallib
 # generated here, and MSL sources compiled at run time
