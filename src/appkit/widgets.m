@@ -102,9 +102,49 @@ C(alternateSelectedControlTextColor, 1, 1, 1, 1) C(selectedMenuItemTextColor, 1,
 @end
 
 /* ======================================================================= fonts */
-@implementation NSFontDescriptor { @public CGFloat _size; }
-- (CGFloat)pointSize { return _size; }
-- (NSFontDescriptor *)fontDescriptorWithSymbolicTraits:(uint32_t)t { return self; }
+/* a font descriptor is its attributes (a CTFontDescriptorRef too): name or family, size, traits */
+NSFontDescriptorAttributeName const NSFontNameAttribute = @"NSFontNameAttribute", NSFontFamilyAttribute = @"NSFontFamilyAttribute",
+    NSFontSizeAttribute = @"NSFontSizeAttribute", NSFontFaceAttribute = @"NSFontFaceAttribute", NSFontVisibleNameAttribute = @"NSFontVisibleNameAttribute",
+    NSFontTraitsAttribute = @"NSCTFontTraitsAttribute", NSFontMatrixAttribute = @"NSFontMatrixAttribute",
+    NSFontFixedAdvanceAttribute = @"NSCTFontFixedAdvanceAttribute";
+NSFontDescriptorTraitKey const NSFontSymbolicTrait = @"NSCTFontSymbolicTrait", NSFontWeightTrait = @"NSCTFontWeightTrait",
+    NSFontWidthTrait = @"NSCTFontProportionTrait", NSFontSlantTrait = @"NSCTFontSlantTrait";
+@implementation NSFontDescriptor { NSDictionary *_attrs; }
++ (NSFontDescriptor *)fontDescriptorWithFontAttributes:(NSDictionary *)a { NSFontDescriptor *d = [[[self alloc] init] autorelease]; d->_attrs = [a ?: @{} copy]; return d; }
++ (NSFontDescriptor *)fontDescriptorWithName:(NSString *)n size:(CGFloat)s { return [self fontDescriptorWithFontAttributes:@{NSFontNameAttribute: n ?: @"Helvetica", NSFontSizeAttribute: @(s)}]; }
+- (instancetype)initWithFontAttributes:(NSDictionary *)a { if ((self = [super init])) _attrs = [a ?: @{} copy]; return self; }
+- (void)dealloc { [_attrs release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSDictionary *)fontAttributes { return _attrs ?: @{}; }
+- (id)objectForKey:(NSString *)k { return _attrs[k]; }
+- (CGFloat)pointSize { return [_attrs[NSFontSizeAttribute] doubleValue]; }
+- (NSString *)postscriptName { return _attrs[NSFontNameAttribute]; }
+- (uint32_t)symbolicTraits {
+    uint32_t t = [_attrs[NSFontTraitsAttribute][NSFontSymbolicTrait] unsignedIntValue];
+    NSString *n = _attrs[NSFontNameAttribute];
+    if ([n rangeOfString:@"Bold"].location != NSNotFound) t |= 2;
+    if ([n rangeOfString:@"Italic"].location != NSNotFound || [n rangeOfString:@"Oblique"].location != NSNotFound) t |= 1;
+    return t;
+}
+- (NSFontDescriptor *)fontDescriptorByAddingAttributes:(NSDictionary *)a {
+    NSMutableDictionary *m = [[_attrs mutableCopy] autorelease] ?: [NSMutableDictionary dictionary];
+    [m addEntriesFromDictionary:a];
+    return [NSFontDescriptor fontDescriptorWithFontAttributes:m];
+}
+- (NSFontDescriptor *)fontDescriptorWithSize:(CGFloat)s { return [self fontDescriptorByAddingAttributes:@{NSFontSizeAttribute: @(s)}]; }
+- (NSFontDescriptor *)fontDescriptorWithFamily:(NSString *)f {
+    NSMutableDictionary *m = [[_attrs mutableCopy] autorelease]; [m removeObjectForKey:NSFontNameAttribute]; m[NSFontFamilyAttribute] = f;
+    return [NSFontDescriptor fontDescriptorWithFontAttributes:m];
+}
+- (NSFontDescriptor *)fontDescriptorWithSymbolicTraits:(uint32_t)t {
+    NSMutableDictionary *traits = [[_attrs[NSFontTraitsAttribute] mutableCopy] autorelease] ?: [NSMutableDictionary dictionary];
+    traits[NSFontSymbolicTrait] = @(t);
+    return [self fontDescriptorByAddingAttributes:@{NSFontTraitsAttribute: traits}];
+}
+- (NSArray *)matchingFontDescriptorsWithMandatoryKeys:(NSSet *)k { return @[self]; }
+- (NSFontDescriptor *)matchingFontDescriptorWithMandatoryKeys:(NSSet *)k { return self; }
+- (BOOL)isEqual:(id)o { return [o isKindOfClass:[NSFontDescriptor class]] && [[self fontAttributes] isEqual:[o fontAttributes]]; }
+- (NSUInteger)hash { return [[self fontAttributes] hash]; }
 @end
 @interface NSFont () { @public CGFloat _size; NSFontWeight _weight; NSString *_name; BOOL _fixed; } @end
 @implementation NSFont
@@ -136,7 +176,17 @@ static NSFont *font(NSString *name, CGFloat size, NSFontWeight w, BOOL fixed) {
 + (NSFont *)messageFontOfSize:(CGFloat)s { return [self systemFontOfSize:s]; }
 + (NSFont *)controlContentFontOfSize:(CGFloat)s { return [self systemFontOfSize:s]; }
 + (NSFont *)fontWithName:(NSString *)n size:(CGFloat)s { return font(n, s, NSFontWeightRegular, [n rangeOfString:@"Mono"].location != NSNotFound || [n hasPrefix:@"Menlo"] || [n hasPrefix:@"Courier"]); }
-+ (NSFont *)fontWithDescriptor:(NSFontDescriptor *)d size:(CGFloat)s { return [self systemFontOfSize:s ? s : d.pointSize]; }
+/* the descriptor's name, else its family with its bold and italic traits ("Family-BoldItalic"), else the system font */
++ (NSFont *)fontWithDescriptor:(NSFontDescriptor *)d size:(CGFloat)s {
+    CGFloat size = s ? s : d.pointSize;
+    NSString *name = [d objectForKey:NSFontNameAttribute], *family = [d objectForKey:NSFontFamilyAttribute];
+    uint32_t t = d.symbolicTraits;
+    if (!name && family) name = (t & 3) ? [NSString stringWithFormat:@"%@-%@%@", family, (t & 2) ? @"Bold" : @"", (t & 1) ? @"Italic" : @""] : family;
+    if (name && (t & 2) && [name rangeOfString:@"Bold"].location == NSNotFound && ![name hasPrefix:@"."]) name = [name stringByAppendingString:@"-Bold"];
+    if (!name) return (t & 2) ? [self boldSystemFontOfSize:size] : [self systemFontOfSize:size];
+    if ([name hasPrefix:@".AppleSystemUIFont"] && (t & 2)) return [self boldSystemFontOfSize:size];
+    return [self fontWithName:name size:size];
+}
 + (CGFloat)systemFontSize { return 13; }
 + (CGFloat)smallSystemFontSize { return 11; }
 + (CGFloat)labelFontSize { return 10; }
@@ -152,7 +202,7 @@ static NSFont *font(NSString *name, CGFloat size, NSFontWeight w, BOOL fixed) {
 - (NSString *)fontName { return _name; }
 - (NSString *)familyName { return _name; }
 - (NSString *)displayName { return _name; }
-- (NSFontDescriptor *)fontDescriptor { NSFontDescriptor *d = [[[NSFontDescriptor alloc] init] autorelease]; d->_size = _size; return d; }
+- (NSFontDescriptor *)fontDescriptor { return [NSFontDescriptor fontDescriptorWithName:_name size:_size]; }
 - (BOOL)isFixedPitch { return _fixed; }
 - (NSRect)boundingRectForFont { return NSMakeRect(0, self.descender, _size, self.ascender - self.descender); }
 - (CGFloat)defaultLineHeightForFont { return ceil(self.ascender - self.descender); }
@@ -1380,12 +1430,12 @@ static void mw_text_option_set(id self, SEL _cmd, void *v) { }
 @end
 NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEditingNotification", NSTextDidEndEditingNotification = @"NSTextDidEndEditingNotification",
     NSTextDidChangeNotification = @"NSTextDidChangeNotification", NSTextViewDidChangeSelectionNotification = @"NSTextViewDidChangeSelectionNotification";
-/* a text view: the text is its NSTextStorage, drawn wrapped in one style (the first run's attributes); a caret at the
- * selection; typing, deleting, the arrows and copy/paste. ponytail: no glyph layout, so no per-run styles and the caret
- * is placed by measuring the text before it. */
+/* a text view: the text is its NSTextStorage, laid out with its runs and paragraph styles (coretext.m); the selection
+ * and a caret; clicking and dragging, typing, deleting, the arrows and copy/paste. ponytail: no input methods, no undo. */
 @implementation NSTextView {
     NSTextStorage *_storage; NSLayoutManager *_lm; NSTextContainer *_tc; NSDictionary *_typing; NSColor *_ipColor;
     NSRange _sel; id<NSTextViewDelegate> _tvDelegate; BOOL _allowsUndo, _fieldEditor, _vres, _hres; NSSize _minSize, _maxSize, _inset;
+    _MWTextLayout *_layout; NSString *_layoutText; CGFloat _layoutWidth; NSUInteger _anchor;
 }
 @synthesize allowsUndo = _allowsUndo, fieldEditor = _fieldEditor, verticallyResizable = _vres, horizontallyResizable = _hres, minSize = _minSize, maxSize = _maxSize, textContainerInset = _inset;
 /* a text view of this class inside a scroll view (macOS 10.14) */
@@ -1405,6 +1455,7 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
         _lm = [[NSLayoutManager alloc] init]; [_storage addLayoutManager:_lm];
         _tc = c ? [c retain] : [[NSTextContainer alloc] initWithSize:NSMakeSize(r.size.width, 1e7)];
         [_lm addTextContainer:_tc];
+        _tc.textView = self;
         self.editable = YES; self.selectable = YES; self.drawsBackground = YES; self.richText = YES;
         _vres = YES; _maxSize = NSMakeSize(1e7, 1e7);
         _typing = [@{NSFontAttributeName: [NSFont systemFontOfSize:12], NSForegroundColorAttributeName: [NSColor textColor]} copy];
@@ -1412,12 +1463,12 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
     return self;
 }
 - (instancetype)initWithFrame:(NSRect)r { return [self initWithFrame:r textContainer:nil]; }
-- (void)dealloc { [_storage release]; [_lm release]; [_tc release]; [_typing release]; [_ipColor release]; [super dealloc]; }
+- (void)dealloc { [_storage release]; [_lm release]; [_tc release]; [_typing release]; [_ipColor release]; [_layout release]; [_layoutText release]; [super dealloc]; }
 - (BOOL)isFlipped { return YES; }
 - (NSTextStorage *)textStorage { return _storage; }
 - (NSLayoutManager *)layoutManager { return _lm; }
 - (NSTextContainer *)textContainer { return _tc; }
-- (void)setTextContainer:(NSTextContainer *)c { [c retain]; [_tc release]; _tc = c; }
+- (void)setTextContainer:(NSTextContainer *)c { [c retain]; [_tc release]; _tc = c; c.textView = self; }
 - (void)replaceTextContainer:(NSTextContainer *)c { self.textContainer = c; }
 - (id<NSTextViewDelegate>)delegate { return _tvDelegate; }
 - (void)setDelegate:(id<NSTextViewDelegate>)d { _tvDelegate = d; }
@@ -1443,6 +1494,8 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
 - (void)setSelectedRange:(NSRange)r {
     NSUInteger n = [_storage length]; if (r.location > n) r = NSMakeRange(n, 0); if (NSMaxRange(r) > n) r.length = n - r.location;
     _sel = r; self.needsDisplay = YES;
+    /* typing continues in the style of the text before the caret */
+    if (n && self.richText) { NSDictionary *a = [_storage attributesAtIndex:r.location ? r.location - 1 : 0 effectiveRange:NULL]; if ([a count]) self.typingAttributes = a; }
     if ([(id)_tvDelegate respondsToSelector:@selector(textViewDidChangeSelection:)]) [_tvDelegate textViewDidChangeSelection:[NSNotification notificationWithName:NSTextViewDidChangeSelectionNotification object:self]];
 }
 - (NSArray *)selectedRanges { return @[[NSValue valueWithRange:_sel]]; }
@@ -1451,7 +1504,23 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
 - (NSUndoManager *)undoManager { return nil; }
 /* geometry: the text wrapped at the view's width less the insets and the container's line padding */
 - (NSRect)_mwTextRect { NSRect b = self.bounds; CGFloat pad = _tc ? _tc.lineFragmentPadding : 5; return NSMakeRect(_inset.width + pad, _inset.height, fmax(1, b.size.width - 2 * (_inset.width + pad)), b.size.height - 2 * _inset.height); }
-- (NSSize)_mwTextSize:(NSString *)s { NSRect t = [self _mwTextRect]; return mw_text_size_wrapped([s length] ? s : @"X", self.font, t.size.width); }
+/* the layout, kept while the text, its attributes and the width stay the same */
+- (_MWTextLayout *)_mwLayoutNow {
+    CGFloat w = [self _mwTextRect].size.width;
+    NSString *key = [NSString stringWithFormat:@"%lu %lu", (unsigned long)[_storage length], (unsigned long)[_storage hash]];
+    NSAttributedString *snap = [[_storage copy] autorelease];
+    if (!_layout || w != _layoutWidth || ![_layoutText isEqual:key] || ![objc_getAssociatedObject(self, "mw_snap") isEqualToAttributedString:snap]) {
+        [_layout release]; _layout = [mw_text_layout(snap, w) retain];
+        [_layoutText release]; _layoutText = [key copy]; _layoutWidth = w;
+        objc_setAssociatedObject(self, "mw_snap", snap, OBJC_ASSOCIATION_RETAIN);
+    }
+    return _layout;
+}
+- (NSSize)_mwTextSize:(NSString *)s {
+    _MWTextLayout *t = [self _mwLayoutNow];
+    CGFloat a, d; mw_font_metrics(self.font, &a, &d);
+    return NSMakeSize(0, fmax(t->height, ceil(a + d)));
+}
 - (void)_mwLayout {
     if (_vres) {   /* grow with the text, like a text view in a scroll view */
         CGFloat h = [self _mwTextSize:_storage.string].height + 2 * _inset.height;
@@ -1463,18 +1532,25 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
 - (void)drawRect:(NSRect)r {
     if (self.drawsBackground) mw_fill_round(self.bounds, 0, self.backgroundColor ?: [NSColor textBackgroundColor]);
     NSRect t = [self _mwTextRect];
-    NSString *s = _storage.string;
-    mw_draw_text_in(s, t, self.font, self.textColor ?: [NSColor textColor], NSTextAlignmentLeft, NSLineBreakByWordWrapping, YES, NO);
-    if (self.window.firstResponder == self && self.isEditable) {   /* the caret after the text before the selection */
-        NSString *before = [s substringToIndex:_sel.location];
-        NSArray *lines = [before componentsSeparatedByString:@"\n"];
-        NSSize all = [before length] ? mw_text_size_wrapped(before, self.font, t.size.width) : NSZeroSize, last = mw_text_size([lines lastObject], self.font);
-        CGFloat lh = mw_text_size(@"X", self.font).height, w = fmod(last.width, fmax(1, t.size.width));
-        CGFloat y = t.origin.y + fmax(0, ([before length] ? all.height : lh) - lh);
-        if ([before hasSuffix:@"\n"]) { y = t.origin.y + all.height; w = 0; }
+    _MWTextLayout *l = [self _mwLayoutNow];
+    if (_sel.length && self.isSelectable)
+        for (NSValue *v in mw_text_rects(l, _sel)) { NSRect q = v.rectValue; q.origin.x += t.origin.x; q.origin.y += t.origin.y; mw_fill_round(q, 0, [NSColor selectedTextBackgroundColor]); }
+    mw_text_layout_draw(l, t.origin);
+    if (self.window.firstResponder == self && self.isEditable && !_sel.length) {
+        NSRect c = mw_text_caret(l, _sel.location, self.font);
         [self.insertionPointColor setFill];
-        NSRectFill(NSMakeRect(t.origin.x + w, y, 1, lh));
+        NSRectFill(NSMakeRect(t.origin.x + c.origin.x, t.origin.y + c.origin.y, 1, c.size.height));
     }
+}
+- (NSUInteger)characterIndexForInsertionAtPoint:(NSPoint)p {
+    NSRect t = [self _mwTextRect];
+    return mw_text_index([self _mwLayoutNow], NSMakePoint(p.x - t.origin.x, p.y - t.origin.y));
+}
+- (NSRect)firstRectForCharacterRange:(NSRange)r actualRange:(NSRangePointer)ar {
+    NSRect t = [self _mwTextRect], c = mw_text_caret([self _mwLayoutNow], r.location, self.font);
+    c.origin.x += t.origin.x; c.origin.y += t.origin.y;
+    if (ar) *ar = r;
+    return [self.window convertRectToScreen:[self convertRect:c toView:nil]];
 }
 - (BOOL)acceptsFirstResponder { return self.isSelectable; }
 - (BOOL)becomeFirstResponder {
@@ -1490,7 +1566,27 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
     [[NSNotificationCenter defaultCenter] postNotification:n];
     self.needsDisplay = YES; return YES;
 }
-- (void)mouseDown:(NSEvent *)e { [self.window makeFirstResponder:self]; self.selectedRange = NSMakeRange([_storage length], 0); }
+- (void)mouseDown:(NSEvent *)e {
+    [self.window makeFirstResponder:self];
+    NSUInteger i = [self characterIndexForInsertionAtPoint:[self convertPoint:e.locationInWindow fromView:nil]];
+    if (e.clickCount >= 2) {   /* a word, or the paragraph */
+        NSString *s = _storage.string;
+        if (e.clickCount >= 3 || ![s length]) { self.selectedRange = [s paragraphRangeForRange:NSMakeRange(MIN(i, [s length]), 0)]; return; }
+        NSUInteger a = MIN(i, [s length] - 1), b = a;
+        NSCharacterSet *w = [NSCharacterSet alphanumericCharacterSet];
+        while (a > 0 && [w characterIsMember:[s characterAtIndex:a - 1]]) a--;
+        while (b < [s length] && [w characterIsMember:[s characterAtIndex:b]]) b++;
+        self.selectedRange = NSMakeRange(a, MAX(b, a + 1) - a);
+        return;
+    }
+    if (e.modifierFlags & NSEventModifierFlagShift) { _anchor = _sel.location; self.selectedRange = NSMakeRange(MIN(_anchor, i), (NSUInteger)labs((long)i - (long)_anchor)); return; }
+    _anchor = i;
+    self.selectedRange = NSMakeRange(i, 0);
+}
+- (void)mouseDragged:(NSEvent *)e {
+    NSUInteger i = [self characterIndexForInsertionAtPoint:[self convertPoint:e.locationInWindow fromView:nil]];
+    self.selectedRange = NSMakeRange(MIN(_anchor, i), (NSUInteger)labs((long)i - (long)_anchor));
+}
 - (void)keyDown:(NSEvent *)e { if (self.isEditable) [self interpretKeyEvents:@[e]]; else [super keyDown:e]; }
 - (void)doCommandBySelector:(SEL)s {
     if ([(id)_tvDelegate respondsToSelector:@selector(textView:doCommandBySelector:)] && [_tvDelegate textView:self doCommandBySelector:s]) return;
@@ -1535,8 +1631,10 @@ NSNotificationName const NSTextDidBeginEditingNotification = @"NSTextDidBeginEdi
 - (void)moveRight:(id)s { self.selectedRange = NSMakeRange(_sel.length ? NSMaxRange(_sel) : _sel.location < [_storage length] ? NSMaxRange([_storage.string rangeOfComposedCharacterSequenceAtIndex:_sel.location]) : _sel.location, 0); }
 - (void)moveToBeginningOfLine:(id)s { self.selectedRange = NSMakeRange([_storage.string lineRangeForRange:NSMakeRange(_sel.location, 0)].location, 0); }
 - (void)moveToEndOfLine:(id)s { NSRange l = [_storage.string lineRangeForRange:NSMakeRange(_sel.location, 0)]; NSUInteger e = NSMaxRange(l); if (e > l.location && [_storage.string characterAtIndex:e - 1] == '\n') e--; self.selectedRange = NSMakeRange(e, 0); }
-- (void)moveUp:(id)s { [self moveToBeginningOfLine:s]; }
-- (void)moveDown:(id)s { [self moveToEndOfLine:s]; }
+- (void)moveUp:(id)s { NSUInteger i = mw_text_vertical([self _mwLayoutNow], _sel.location, -1, self.font); self.selectedRange = NSMakeRange(i == NSNotFound ? 0 : i, 0); }
+- (void)moveDown:(id)s { NSUInteger i = mw_text_vertical([self _mwLayoutNow], NSMaxRange(_sel), 1, self.font); self.selectedRange = NSMakeRange(i == NSNotFound ? [_storage length] : i, 0); }
+- (void)moveLeftAndModifySelection:(id)s { if (_sel.location) self.selectedRange = NSMakeRange(_sel.location - 1, _sel.length + 1); }
+- (void)moveRightAndModifySelection:(id)s { if (NSMaxRange(_sel) < [_storage length]) self.selectedRange = NSMakeRange(_sel.location, _sel.length + 1); }
 - (void)moveToBeginningOfDocument:(id)s { self.selectedRange = NSMakeRange(0, 0); }
 - (void)moveToEndOfDocument:(id)s { self.selectedRange = NSMakeRange([_storage length], 0); }
 - (void)selectAll:(id)s { self.selectedRange = NSMakeRange(0, [_storage length]); }

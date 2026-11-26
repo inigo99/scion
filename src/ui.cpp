@@ -4,6 +4,8 @@
  * Sound: WASAPI shared mode (float32, the system converts rate and channels), or a null sink without a device. */
 #include "scion.h"
 #include "uibridge.h"
+#include "fontnames.h"
+#include <set>
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <xinput.h>
@@ -1081,21 +1083,63 @@ static void raw_init() {
 }
 /* ======================================================================= text (GDI), images (WIC) */
 static std::mutex g_tmu;
+static FontRegistry g_fonts;
+static std::set<std::wstring> g_families;   /* TrueType/OpenType families GDI has (lower case), and those added */
+static std::wstring wlower(std::wstring s) { for (wchar_t &c : s) c = towlower(c); return s; }
+static bool have_family(const std::wstring &f) {
+    static bool listed = false;
+    if (!listed) {
+        listed = true;
+        HDC dc = GetDC(nullptr);
+        LOGFONTW lf{}; lf.lfCharSet = DEFAULT_CHARSET;
+        EnumFontFamiliesExW(dc, &lf, [](const LOGFONTW *l, const TEXTMETRICW *, DWORD type, LPARAM) -> int {
+            if (!(type & RASTER_FONTTYPE) && l->lfFaceName[0] != L'@') g_families.insert(wlower(l->lfFaceName));   /* outline fonts */
+            return 1;
+        }, 0, 0);
+        ReleaseDC(nullptr, dc);
+    }
+    return g_families.count(wlower(f)) > 0;
+}
+/* a font file: GDI takes it for this process; its faces are then known by their names */
+static A font_add(const char *path, char *out, size_t cap) {
+    std::lock_guard<std::mutex> l(g_tmu);
+    std::wstring wp = darwin_to_win(path, -1);
+    HANDLE h = CreateFileW(wp.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER sz{}; GetFileSizeEx(h, &sz);
+    std::vector<uint8_t> data((size_t)std::min<LONGLONG>(sz.QuadPart, 64 << 20));
+    DWORD got = 0; ReadFile(h, data.data(), (DWORD)data.size(), &got, nullptr); CloseHandle(h);
+    std::vector<FontFace> faces = sfnt_faces(data.data(), got);
+    if (faces.empty() || !AddFontResourceExW(wp.c_str(), FR_PRIVATE, nullptr)) return -1;
+    have_family(L"");
+    std::string names;
+    for (auto &f : faces) { g_fonts.add(f); g_families.insert(wlower(wide(f.family.c_str()))); names += f.postscript + "\n"; }
+    if (out && cap) { size_t n = std::min(names.size(), cap - 1); memcpy(out, names.data(), n); out[n] = 0; }
+    return (A)faces.size();
+}
+/* the font a name stands for: one the app registered, else a family Windows has ("Georgia", "ArialMT" -> Arial), else a
+ * stand-in of the same kind (Segoe UI, Times New Roman, Consolas; Arial for Helvetica) */
 static HFONT text_font(const char *name, int px, int weight, bool italic, bool mono) {
     static std::vector<std::pair<std::string, HFONT>> cache;
     std::string n = name ? name : "";
     auto has = [&](const char *k) { return n.find(k) != std::string::npos; };
-    const wchar_t *family = mono || has("Mono") || has("Menlo") || has("Courier") || has("Monaco") || has("Consolas") ? L"Consolas"
-                          : has("Times") || has("Georgia") || has("Serif") ? L"Times New Roman" : L"Segoe UI";
     if (has("Bold") && weight < 700) weight = 700;
     if (has("Semibold") && weight < 600) weight = 600;
     if (has("Italic") || has("Oblique")) italic = true;
-    std::string key = std::to_string(px) + "/" + std::to_string(weight) + "/" + (italic ? "i" : "") + "/" + std::to_string((uintptr_t)family);
+    std::wstring family;
+    FontFace reg;
+    if (g_fonts.find(n, reg)) { family = wide(reg.family.c_str()); weight = reg.weight == 400 ? weight : reg.weight; italic = italic || reg.italic; }
+    else for (auto &c : font_candidates(n, weight, italic)) if (have_family(wide(c.c_str()))) { family = wide(c.c_str()); break; }
+    if (family.empty())
+        family = mono || has("Mono") || has("Menlo") || has("Courier") || has("Monaco") || has("Consolas") ? L"Consolas"
+               : has("Times") || has("Georgia") || has("Serif") ? L"Times New Roman"
+               : (has("Helvetica") || has("Arial")) && have_family(L"Arial") ? L"Arial" : L"Segoe UI";
+    std::string key = std::to_string(px) + "/" + std::to_string(weight) + "/" + (italic ? "i" : "") + "/" + n + "/" + std::to_string(mono);
     for (auto &[k, f] : cache) if (k == key) return f;
     /* the pitch tells GDI what to fall back to when the family is missing (Consolas under Wine, say): a monospaced font */
-    BYTE pitch = family[0] == L'C' ? FIXED_PITCH | FF_MODERN : family[0] == L'T' ? VARIABLE_PITCH | FF_ROMAN : VARIABLE_PITCH | FF_SWISS;
+    BYTE pitch = family == L"Consolas" ? FIXED_PITCH | FF_MODERN : family == L"Times New Roman" ? VARIABLE_PITCH | FF_ROMAN : VARIABLE_PITCH | FF_SWISS;
     HFONT f = CreateFontW(-px, 0, 0, 0, weight, italic, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                          pitch, family);
+                          pitch, family.c_str());
     if (cache.size() > 64) { DeleteObject(cache.front().second); cache.erase(cache.begin()); }
     cache.push_back({key, f});
     return f;
@@ -1356,6 +1400,7 @@ A hc_ui(A op, A a, A b, A c, A d, A e) {
     }
     case UI_FREE: free((void *)a); return 0;
     case UI_TEXT: return text_op((MwText *)a);
+    case UI_FONT_ADD: return font_add((const char *)a, (char *)b, (size_t)c);
     case UI_IMAGE_DECODE: return image_decode((const void *)a, b, (MwImage *)c);
     case UI_IMAGE_ENCODE: { float q; memcpy(&q, &c, sizeof q); return image_encode((const MwImage *)a, b, q, (uint64_t *)d); }
     case UI_PRESENT: return present(win_by_id((uint32_t)a), (const MwImage *)b);

@@ -340,43 +340,213 @@ NSPoint NSPointFromString(NSString *s) { double v[2] = {0}; geo_nums(s, v, 2); r
 NSSize NSSizeFromString(NSString *s) { double v[2] = {0}; geo_nums(s, v, 2); return NSMakeSize(v[0], v[1]); }
 NSRect NSRectFromString(NSString *s) { double v[4] = {0}; geo_nums(s, v, 4); return NSMakeRect(v[0], v[1], v[2], v[3]); }
 
-/* ================================================================ NSAttributedString (one attribute set for the whole string) */
-@implementation NSAttributedString { @protected NSMutableString *_s; NSMutableDictionary *_a; }
+/* ================================================================ NSAttributedString: the characters, and runs of attributes
+ * (each a length and an immutable dictionary; neighbours with equal attributes are merged, so a run is the longest range) */
+typedef struct { NSUInteger len; NSDictionary *a; } MWRun;
+@implementation NSAttributedString { @protected NSMutableString *_s; MWRun *_r; NSUInteger _nr, _cap; }
+static NSDictionary *empty_attrs(void) { static NSDictionary *e; if (!e) e = [[NSDictionary alloc] init]; return e; }
 - (instancetype)init { return [self initWithString:@"" attributes:nil]; }
 - (instancetype)initWithString:(NSString *)s { return [self initWithString:s attributes:nil]; }
 - (instancetype)initWithString:(NSString *)s attributes:(NSDictionary *)a {
-    if ((self = [super init])) { _s = [[NSMutableString alloc] initWithString:s ? s : @""]; _a = [[NSMutableDictionary alloc] initWithDictionary:a ? a : @{}]; }
+    if ((self = [super init])) {
+        _s = [[NSMutableString alloc] initWithString:s ? s : @""];
+        if ([_s length]) { _cap = 4; _r = malloc(_cap * sizeof *_r); _r[0].len = [_s length]; _r[0].a = [a ? a : empty_attrs() copy]; _nr = 1; }
+    }
     return self;
 }
-- (instancetype)initWithAttributedString:(NSAttributedString *)s { return [self initWithString:s.string attributes:[s attributesAtIndex:0 effectiveRange:0]]; }
-- (void)dealloc { [_s release]; [_a release]; [super dealloc]; }
+- (instancetype)initWithAttributedString:(NSAttributedString *)o {
+    if (!(self = [self initWithString:@"" attributes:nil])) return nil;
+    [_s setString:o ? o.string : @""];
+    [o enumerateAttributesInRange:NSMakeRange(0, [o length]) options:0 usingBlock:^(NSDictionary *a, NSRange r, BOOL *stop) {
+        [self _mwInsertRun:a length:r.length at:self->_nr];
+    }];
+    return self;
+}
+- (void)dealloc { for (NSUInteger i = 0; i < _nr; i++) [_r[i].a release]; free(_r); [_s release]; [super dealloc]; }
 - (NSString *)string { return [[_s copy] autorelease]; }
 - (NSUInteger)length { return [_s length]; }
-- (NSDictionary *)attributesAtIndex:(NSUInteger)i effectiveRange:(NSRangePointer)r { if (r) *r = NSMakeRange(0, [_s length]); return [[_a copy] autorelease]; }
-- (id)attribute:(NSString *)n atIndex:(NSUInteger)i effectiveRange:(NSRangePointer)r { if (r) *r = NSMakeRange(0, [_s length]); return [_a objectForKey:n]; }
-- (NSAttributedString *)attributedSubstringFromRange:(NSRange)r { return [[[NSAttributedString alloc] initWithString:[_s substringWithRange:r] attributes:_a] autorelease]; }
-- (void)enumerateAttributesInRange:(NSRange)r options:(NSUInteger)o usingBlock:(void (^)(NSDictionary *, NSRange, BOOL *))b { BOOL stop = NO; b(_a, r, &stop); }
-- (id)copyWithZone:(NSZone *)z { return [[NSAttributedString alloc] initWithString:_s attributes:_a]; }
-- (id)mutableCopyWithZone:(NSZone *)z { return [[NSMutableAttributedString alloc] initWithString:_s attributes:_a]; }
-- (BOOL)isEqual:(id)o { return [o isKindOfClass:[NSAttributedString class]] && [_s isEqualToString:[o string]]; }
-- (NSString *)description { return [_s description]; }
+/* the runs cover the characters even after edits through -mutableString: the last run takes up the difference */
+- (void)_mwSync {
+    NSUInteger total = 0, n = [_s length];
+    for (NSUInteger k = 0; k < _nr; k++) total += _r[k].len;
+    if (total < n) { if (_nr) _r[_nr - 1].len += n - total; else [self _mwInsertRun:nil length:n at:0]; }
+    for (NSUInteger k = _nr; total > n && k-- > 0;) { NSUInteger cut = MIN(_r[k].len, total - n); _r[k].len -= cut; total -= cut; }
+    if (total != n || (_nr && !_r[_nr - 1].len)) { NSUInteger w = 0; for (NSUInteger k = 0; k < _nr; k++) { if (_r[k].len) _r[w++] = _r[k]; else [_r[k].a release]; } _nr = w; }
+}
+/* run k and where it starts, for character i (i < length) */
+- (NSUInteger)_mwRunAt:(NSUInteger)i start:(NSUInteger *)start {
+    [self _mwSync];
+    NSUInteger p = 0;
+    for (NSUInteger k = 0; k < _nr; k++) { if (i < p + _r[k].len) { if (start) *start = p; return k; } p += _r[k].len; }
+    [NSException raise:NSRangeException format:@"index %lu out of bounds (%lu)", (unsigned long)i, (unsigned long)[_s length]];
+    return 0;
+}
+- (void)_mwInsertRun:(NSDictionary *)a length:(NSUInteger)n at:(NSUInteger)k {
+    if (!n) return;
+    if (_nr == _cap) { _cap = _cap ? 2 * _cap : 4; _r = realloc(_r, _cap * sizeof *_r); }
+    memmove(_r + k + 1, _r + k, (_nr - k) * sizeof *_r);
+    _r[k].len = n; _r[k].a = [a ? a : empty_attrs() copy];
+    _nr++;
+}
+/* a run boundary at character i: the index of the run that starts there (_nr at the end) */
+- (NSUInteger)_mwSplitAt:(NSUInteger)i {
+    [self _mwSync];
+    NSUInteger p = 0;
+    for (NSUInteger k = 0; k < _nr; k++) {
+        if (i == p) return k;
+        if (i < p + _r[k].len) {
+            NSUInteger first = i - p;
+            [self _mwInsertRun:_r[k].a length:_r[k].len - first at:k + 1];
+            _r[k].len = first;
+            return k + 1;
+        }
+        p += _r[k].len;
+    }
+    return _nr;
+}
+- (void)_mwCoalesce {
+    NSUInteger w = 0;
+    for (NSUInteger k = 0; k < _nr; k++) {
+        if (!_r[k].len) { [_r[k].a release]; continue; }
+        if (w && (_r[w - 1].a == _r[k].a || [_r[w - 1].a isEqualToDictionary:_r[k].a])) { _r[w - 1].len += _r[k].len; [_r[k].a release]; continue; }
+        _r[w++] = _r[k];
+    }
+    _nr = w;
+}
+- (NSDictionary *)attributesAtIndex:(NSUInteger)i effectiveRange:(NSRangePointer)r {
+    NSUInteger start, k = [self _mwRunAt:i start:&start];
+    if (r) *r = NSMakeRange(start, _r[k].len);
+    return _r[k].a;
+}
+- (NSDictionary *)attributesAtIndex:(NSUInteger)i longestEffectiveRange:(NSRangePointer)r inRange:(NSRange)in {
+    NSRange e; NSDictionary *a = [self attributesAtIndex:i effectiveRange:&e];
+    if (r) *r = NSIntersectionRange(e, in);
+    return a;
+}
+- (id)attribute:(NSString *)n atIndex:(NSUInteger)i effectiveRange:(NSRangePointer)r {
+    NSRange e; id v = [[self attributesAtIndex:i effectiveRange:&e] objectForKey:n];
+    if (r) {   /* the longest range with the same value, over runs that differ in other attributes */
+        NSUInteger lo = e.location, hi = NSMaxRange(e);
+        while (lo > 0) { NSRange p; id pv = [[self attributesAtIndex:lo - 1 effectiveRange:&p] objectForKey:n]; if (pv != v && ![pv isEqual:v]) break; lo = p.location; }
+        while (hi < [_s length]) { NSRange p; id pv = [[self attributesAtIndex:hi effectiveRange:&p] objectForKey:n]; if (pv != v && ![pv isEqual:v]) break; hi = NSMaxRange(p); }
+        *r = NSMakeRange(lo, hi - lo);
+    }
+    return v;
+}
+- (id)attribute:(NSString *)n atIndex:(NSUInteger)i longestEffectiveRange:(NSRangePointer)r inRange:(NSRange)in {
+    NSRange e; id v = [self attribute:n atIndex:i effectiveRange:&e];
+    if (r) *r = NSIntersectionRange(e, in);
+    return v;
+}
+- (NSAttributedString *)attributedSubstringFromRange:(NSRange)r {
+    if (NSMaxRange(r) > [_s length]) [NSException raise:NSRangeException format:@"range out of bounds"];
+    NSAttributedString *m = [[[NSAttributedString alloc] initWithString:@"" attributes:nil] autorelease];
+    [m->_s setString:[_s substringWithRange:r]];
+    [self enumerateAttributesInRange:r options:0 usingBlock:^(NSDictionary *a, NSRange q, BOOL *stop) { [m _mwInsertRun:a length:q.length at:m->_nr]; }];
+    return m;
+}
+- (void)enumerateAttributesInRange:(NSRange)r options:(NSUInteger)o usingBlock:(void (^)(NSDictionary *, NSRange, BOOL *))b {
+    [self _mwSync];
+    NSUInteger n = 0, p = 0;
+    NSRange *rs = malloc((_nr ? _nr : 1) * sizeof *rs); NSDictionary **as = malloc((_nr ? _nr : 1) * sizeof *as);
+    for (NSUInteger k = 0; k < _nr; p += _r[k].len, k++) {
+        NSRange q = NSIntersectionRange(NSMakeRange(p, _r[k].len), r);
+        if (q.length) { rs[n] = q; as[n] = [[_r[k].a retain] autorelease]; n++; }
+    }
+    BOOL stop = NO;
+    for (NSUInteger i = 0; i < n && !stop; i++) { NSUInteger j = (o & 2 /* Reverse */) ? n - 1 - i : i; b(as[j], rs[j], &stop); }
+    free(rs); free(as);
+}
+- (void)enumerateAttribute:(NSString *)name inRange:(NSRange)r options:(NSUInteger)o usingBlock:(void (^)(id, NSRange, BOOL *))b {
+    NSMutableArray *vals = [NSMutableArray array]; NSMutableArray *ranges = [NSMutableArray array];
+    for (NSUInteger i = r.location; i < NSMaxRange(r);) {
+        NSRange e; id v = [self attribute:name atIndex:i longestEffectiveRange:&e inRange:r];
+        [vals addObject:v ? v : [NSNull null]]; [ranges addObject:[NSValue valueWithRange:e]];
+        i = NSMaxRange(e);
+    }
+    BOOL stop = NO;
+    for (NSUInteger i = 0; i < [vals count] && !stop; i++) {
+        NSUInteger j = (o & 2) ? [vals count] - 1 - i : i;
+        id v = vals[j];
+        b(v == [NSNull null] ? nil : v, [ranges[j] rangeValue], &stop);
+    }
+}
+- (BOOL)containsAttachmentsInRange:(NSRange)r { __block BOOL has = NO; [self enumerateAttribute:@"NSAttachment" inRange:r options:0 usingBlock:^(id v, NSRange q, BOOL *s) { if (v) *s = has = YES; }]; return has; }
+- (id)copyWithZone:(NSZone *)z { return [[NSAttributedString alloc] initWithAttributedString:self]; }
+- (id)mutableCopyWithZone:(NSZone *)z { return [[NSMutableAttributedString alloc] initWithAttributedString:self]; }
+- (BOOL)isEqualToAttributedString:(NSAttributedString *)o {
+    if (![o isKindOfClass:[NSAttributedString class]] || ![_s isEqualToString:o.string]) return NO;
+    __block BOOL same = YES;
+    [self enumerateAttributesInRange:NSMakeRange(0, [_s length]) options:0 usingBlock:^(NSDictionary *a, NSRange r, BOOL *stop) {
+        NSRange e; NSDictionary *b = [o attributesAtIndex:r.location longestEffectiveRange:&e inRange:r];
+        if (!NSEqualRanges(e, r) || ![a isEqualToDictionary:b]) *stop = !(same = NO);
+    }];
+    return same;
+}
+- (BOOL)isEqual:(id)o { return o == self || ([o isKindOfClass:[NSAttributedString class]] && [self isEqualToAttributedString:o]); }
+- (NSUInteger)hash { return [_s hash]; }
+- (NSString *)description {
+    NSMutableString *d = [NSMutableString string];
+    [self enumerateAttributesInRange:NSMakeRange(0, [_s length]) options:0 usingBlock:^(NSDictionary *a, NSRange r, BOOL *stop) {
+        [d appendFormat:@"%@%@", [_s substringWithRange:r], a];
+    }];
+    return d;
+}
 @end
 @implementation NSMutableAttributedString
-- (void)appendAttributedString:(NSAttributedString *)s { [_s appendString:s.string]; if (![_a count]) [_a addEntriesFromDictionary:[s attributesAtIndex:0 effectiveRange:0]]; }
-- (void)addAttribute:(NSString *)n value:(id)v range:(NSRange)r { [_a setObject:v forKey:n]; }
-- (void)addAttributes:(NSDictionary *)a range:(NSRange)r { [_a addEntriesFromDictionary:a]; }
-- (void)setAttributes:(NSDictionary *)a range:(NSRange)r { [_a removeAllObjects]; if (a) [_a addEntriesFromDictionary:a]; }
-- (void)removeAttribute:(NSString *)n range:(NSRange)r { [_a removeObjectForKey:n]; }
-- (void)replaceCharactersInRange:(NSRange)r withString:(NSString *)s { [_s replaceCharactersInRange:r withString:s]; }
-/* one set of attributes for the whole string (ponytail): an empty string takes the inserted text's */
-- (void)replaceCharactersInRange:(NSRange)r withAttributedString:(NSAttributedString *)s {
-    if (![_s length] || ![_a count]) { [_a removeAllObjects]; if ([s length]) [_a addEntriesFromDictionary:[s attributesAtIndex:0 effectiveRange:0]]; }
-    [_s replaceCharactersInRange:r withString:s.string];
+/* the attributes new characters at r take: those of the first one replaced, else of the one before, else the first */
+- (NSDictionary *)_mwAttrsFor:(NSRange)r {
+    NSUInteger n = [_s length];
+    if (!n) return empty_attrs();
+    return [self attributesAtIndex:r.length && r.location < n ? r.location : r.location > 0 ? r.location - 1 : 0 effectiveRange:NULL];
 }
+- (void)_mwDelete:(NSRange)r {
+    if (!r.length) return;
+    NSUInteger a = [self _mwSplitAt:r.location], b = [self _mwSplitAt:NSMaxRange(r)];
+    for (NSUInteger k = a; k < b; k++) _r[k].len = 0;
+}
+- (void)replaceCharactersInRange:(NSRange)r withString:(NSString *)s {
+    if (NSMaxRange(r) > [_s length]) [NSException raise:NSRangeException format:@"range out of bounds"];
+    NSDictionary *a = [[self _mwAttrsFor:r] retain];
+    [self _mwDelete:r];
+    if ([s length]) [self _mwInsertRun:a length:[s length] at:[self _mwSplitAt:r.location]];
+    [a release];
+    [_s replaceCharactersInRange:r withString:s ? s : @""];
+    [self _mwCoalesce];
+}
+- (void)replaceCharactersInRange:(NSRange)r withAttributedString:(NSAttributedString *)s {
+    if (NSMaxRange(r) > [_s length]) [NSException raise:NSRangeException format:@"range out of bounds"];
+    [self _mwDelete:r];
+    NSUInteger k = [self _mwSplitAt:r.location];
+    __block NSUInteger at = k;
+    [s enumerateAttributesInRange:NSMakeRange(0, [s length]) options:0 usingBlock:^(NSDictionary *a, NSRange q, BOOL *stop) { [self _mwInsertRun:a length:q.length at:at++]; }];
+    [_s replaceCharactersInRange:r withString:s.string];
+    [self _mwCoalesce];
+}
+- (void)_mwChange:(NSRange)r with:(NSDictionary *(^)(NSDictionary *))f {
+    if (NSMaxRange(r) > [_s length]) [NSException raise:NSRangeException format:@"range out of bounds"];
+    if (!r.length) return;
+    NSUInteger a = [self _mwSplitAt:r.location], b = [self _mwSplitAt:NSMaxRange(r)];
+    for (NSUInteger k = a; k < b; k++) { NSDictionary *n = [f(_r[k].a) copy]; [_r[k].a release]; _r[k].a = n; }
+    [self _mwCoalesce];
+}
+- (void)setAttributes:(NSDictionary *)a range:(NSRange)r { [self _mwChange:r with:^(NSDictionary *o) { return a ? a : empty_attrs(); }]; }
+- (void)addAttributes:(NSDictionary *)a range:(NSRange)r {
+    [self _mwChange:r with:^(NSDictionary *o) { NSMutableDictionary *m = [[o mutableCopy] autorelease]; [m addEntriesFromDictionary:a]; return (NSDictionary *)m; }];
+}
+- (void)addAttribute:(NSString *)n value:(id)v range:(NSRange)r {
+    if (!v) [NSException raise:NSInvalidArgumentException format:@"nil value for attribute %@", n];
+    [self addAttributes:@{n: v} range:r];
+}
+- (void)removeAttribute:(NSString *)n range:(NSRange)r {
+    [self _mwChange:r with:^(NSDictionary *o) { NSMutableDictionary *m = [[o mutableCopy] autorelease]; [m removeObjectForKey:n]; return (NSDictionary *)m; }];
+}
+- (void)appendAttributedString:(NSAttributedString *)s { [self replaceCharactersInRange:NSMakeRange([_s length], 0) withAttributedString:s]; }
 - (void)insertAttributedString:(NSAttributedString *)s atIndex:(NSUInteger)i { [self replaceCharactersInRange:NSMakeRange(i, 0) withAttributedString:s]; }
-- (void)deleteCharactersInRange:(NSRange)r { [_s deleteCharactersInRange:r]; }
+- (void)deleteCharactersInRange:(NSRange)r { [self replaceCharactersInRange:r withString:@""]; }
 - (void)setAttributedString:(NSAttributedString *)s { [self replaceCharactersInRange:NSMakeRange(0, [_s length]) withAttributedString:s]; }
 - (void)beginEditing { } - (void)endEditing { }
+/* ponytail: edits through this string bypass the runs (see -_mwSync) */
 - (NSMutableString *)mutableString { return _s; }
 @end
 

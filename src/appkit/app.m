@@ -653,7 +653,6 @@ N(NSFontTextStyleSubheadline) N(NSFontTextStyleBody) N(NSFontTextStyleCallout) N
 N(NSModalPanelRunLoopMode) N(NSEventTrackingRunLoopMode)
 N(NSDeviceResolution) N(NSDeviceSize) N(NSDeviceIsScreen) N(NSDeviceColorSpaceName)
 N(NSAppearanceNameAqua) N(NSAppearanceNameDarkAqua) N(NSAppearanceNameVibrantLight) N(NSAppearanceNameVibrantDark)
-N(NSFontAttributeName) N(NSForegroundColorAttributeName) N(NSBackgroundColorAttributeName) N(NSParagraphStyleAttributeName)
 N(NSImageNameApplicationIcon) N(NSImageNameCaution) N(NSImageNameInfo) N(NSCalibratedRGBColorSpace) N(NSDeviceRGBColorSpace)
 #undef N
 NSString *const NSPasteboardTypeString = @"public.utf8-plain-text", *const NSPasteboardTypeURL = @"public.url",

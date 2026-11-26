@@ -2,6 +2,7 @@
 #pragma once
 #import <AppKit/AppKit.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreText/CoreText.h>
 #include "../uibridge.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -48,6 +49,23 @@ void _mwCGContextClipToRectAligned(CGContextRef c, CGRect r); /* clip box rounde
 NSSize mw_text_size(NSString *s, NSFont *f);             /* points; one line per '\n' */
 NSSize mw_text_size_wrapped(NSString *s, NSFont *f, CGFloat maxWidth);
 void mw_font_metrics(NSFont *f, CGFloat *ascent, CGFloat *descent);
+/* an alignment as archived (nibs) and as CoreText has it (1 right, 2 center) -> this architecture's NSTextAlignment */
+static inline NSTextAlignment mw_alignment(NSInteger v) { return v == 1 ? NSTextAlignmentRight : v == 2 ? NSTextAlignmentCenter : (NSTextAlignment)v; }
+static inline uint8_t mw_ct_alignment(NSTextAlignment a) { return a == NSTextAlignmentRight ? 1 : a == NSTextAlignmentCenter ? 2 : (uint8_t)a; }
+CGFloat mw_text_width(NSString *s, NSFont *f);            /* one line, points */
+/* one line, its baseline's left end at p (user space), upright, in col (NULL: the context's fill color) */
+void mw_draw_text_line(CGContextRef c, NSString *s, NSFont *f, CGColorRef col, CGPoint p);
+/* coretext.m: attributed strings, laid out with their runs and paragraph styles (r: top-left in flipped views) */
+void mw_attr_draw(NSAttributedString *s, NSRect r, BOOL wrap);
+NSSize mw_attr_size(NSAttributedString *s, CGFloat maxWidth);
+/* a string's lines wrapped at a width (0: not wrapped); positions are from the text's top-left, y down */
+@interface _MWTextLayout : NSObject { @public NSArray *lines; CGFloat *base, *x, height; NSUInteger length; BOOL trailing_newline; } @end
+_MWTextLayout *mw_text_layout(NSAttributedString *s, CGFloat width);
+void mw_text_layout_draw(_MWTextLayout *t, NSPoint topLeft);
+NSRect mw_text_caret(_MWTextLayout *t, NSUInteger index, NSFont *emptyFont);
+NSUInteger mw_text_index(_MWTextLayout *t, NSPoint p);
+NSUInteger mw_text_vertical(_MWTextLayout *t, NSUInteger index, int dir, NSFont *f);
+NSArray<NSValue *> *mw_text_rects(_MWTextLayout *t, NSRange r);
 /* text in a rect of the current context: wraps unless lb truncates or clips; vcenter centers the block vertically */
 void mw_draw_text_in(NSString *s, NSRect r, NSFont *f, NSColor *c, NSTextAlignment a, NSLineBreakMode lb, BOOL wrap, BOOL vcenter);
 NSImage *mw_catalog_image(NSString *name, NSBundle *bundle);   /* assets.m: an image of a bundle's Assets.car (nil: main) */
