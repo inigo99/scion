@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18 llvm-18 mingw-w64 cmake ninja-build libboost-dev python3 zip \
-            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
+            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev libcurl4-openssl-dev llvm-20-dev libvulkan-dev libzstd-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
       - name: Cache dependencies

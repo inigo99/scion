@@ -1,7 +1,5 @@
-/* xpc.m — NSXPCConnection, NSXPCInterface, NSXPCListener and NSURLResponse/NSHTTPURLResponse. scion has no XPC
- * services: a connection resumes and is invalidated at once, and messages to its remote proxy call the error handler.
- * The URL responses are value objects (apps and frameworks such as Sparkle make and read them).
- * ponytail: real responses come when scion has NSURLSession. */
+/* xpc.m — NSXPCConnection, NSXPCInterface, NSXPCListener. scion has no XPC
+ * services: a connection resumes and is invalidated at once, and messages to its remote proxy call the error handler. */
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 void dispatch_async(void *q, void (^b)(void));
@@ -85,31 +83,6 @@ static NSError *xpc_error(void) {
 - (id)delegate { return _delegate; } - (void)setDelegate:(id)d { _delegate = d; }
 - (NSXPCListenerEndpoint *)endpoint { return [[[NSXPCListenerEndpoint alloc] init] autorelease]; }
 - (void)resume { } - (void)suspend { } - (void)invalidate { } - (void)activate { }
-@end
-
-@interface NSURLResponse : NSObject <NSCopying> { @public NSURL *_url; NSString *_mime, *_encoding; long long _length; } @end
-@implementation NSURLResponse
-- (instancetype)initWithURL:(NSURL *)u MIMEType:(NSString *)m expectedContentLength:(NSInteger)l textEncodingName:(NSString *)e {
-    if ((self = [super init])) { _url = [u copy]; _mime = [m copy]; _length = l; _encoding = [e copy]; }
-    return self;
-}
-- (void)dealloc { [_url release]; [_mime release]; [_encoding release]; [super dealloc]; }
-- (NSURL *)URL { return _url; } - (NSString *)MIMEType { return _mime; } - (NSString *)textEncodingName { return _encoding; }
-- (long long)expectedContentLength { return _length; }
-- (NSString *)suggestedFilename { return [_url lastPathComponent] ?: @"Unknown"; }
-- (id)copyWithZone:(NSZone *)z { return [self retain]; }
-@end
-@interface NSHTTPURLResponse : NSURLResponse { NSInteger _status; NSDictionary *_headers; } @end
-@implementation NSHTTPURLResponse
-- (instancetype)initWithURL:(NSURL *)u statusCode:(NSInteger)s HTTPVersion:(NSString *)v headerFields:(NSDictionary *)h {
-    if ((self = [super initWithURL:u MIMEType:h[@"Content-Type"] expectedContentLength:-1 textEncodingName:nil])) { _status = s; _headers = [h copy] ?: [@{} retain]; }
-    return self;
-}
-- (void)dealloc { [_headers release]; [super dealloc]; }
-- (NSInteger)statusCode { return _status; }
-- (NSDictionary *)allHeaderFields { return _headers; }
-- (NSString *)valueForHTTPHeaderField:(NSString *)f { for (NSString *k in _headers) if ([k caseInsensitiveCompare:f] == NSOrderedSame) return _headers[k]; return nil; }
-+ (NSString *)localizedStringForStatusCode:(NSInteger)s { return s >= 200 && s < 300 ? @"no error" : @"error"; }
 @end
 
 /* ServiceManagement's SMAppService (macOS 13): login items cannot be registered (status: not registered) */

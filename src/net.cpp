@@ -763,6 +763,7 @@ fail:
 }
 
 HCABI A hc_net(A op, A a, A b, A c, A d, A e) {
+    if (op >= NET_HTTP_NEW) return http_op(op, a, b, c);
     net_init();
     switch (op) {
     case NET_SOCKET: {

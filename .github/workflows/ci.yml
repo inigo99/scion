@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18 llvm-18 clang-20 mingw-w64 cmake ninja-build libboost-dev python3 golang \
-            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev llvm-20-dev libvulkan-dev libzstd-dev
+            libsdl2-dev libfreetype-dev libfontconfig-dev libpng-dev libjpeg-turbo8-dev libcurl4-openssl-dev llvm-20-dev libvulkan-dev libzstd-dev
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
 
@@ -98,7 +98,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb mesa-vulkan-drivers libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16t64 \
+          sudo apt-get install -y xvfb mesa-vulkan-drivers libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16t64 libcurl4t64 \
             libjpeg-turbo8 libvulkan1 libllvm20 ${{ matrix.host == 'wine' && 'wine64' || '' }}
       - uses: actions/download-artifact@v8
         with:

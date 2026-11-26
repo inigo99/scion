@@ -30,8 +30,8 @@ These are the areas where work has the most effect. Each is self-contained enoug
 - A menu bar, status items in the tray (StatusNotifierItem), HiDPI, a Flatpak or AppImage.
 
 **Run more apps**
-- Networking: `URLSession` on WinHTTP and on Linux (most apps need it, even if only for update checks); BSD sockets are
-  there.
+- Networking: cookies, authentication challenges and WebSockets in `URLSession`; `Network.framework`; GCD sources on
+  sockets. Sockets and HTTP(S) `URLSession` are there.
 - Child processes: `posix_spawn` and `NSTask` on `CreateProcess`.
 - Text: CoreText on DirectWrite, rich text in `NSTextView`, input methods.
 - CoreAnimation layers beyond Metal presentation; CoreImage basics.

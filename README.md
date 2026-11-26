@@ -54,10 +54,10 @@ under its open licenses), and you do not need a Mac or an Apple SDK.
 
 **Natively (preview).** Download `scion-<version>-linux-x86_64.tar.xz` from
 [Releases](../../releases), unpack it and run `scion` from it. It needs a recent distribution (built on Ubuntu 24.04)
-with SDL2, FreeType, fontconfig, libpng, libjpeg, Vulkan and LLVM 20, plus a Vulkan driver for Metal apps:
+with SDL2, FreeType, fontconfig, libpng, libjpeg, libcurl, Vulkan and LLVM 20, plus a Vulkan driver for Metal apps:
 
 ```sh
-sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libvulkan1 libllvm20 \
+sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libcurl4 libvulkan1 libllvm20 \
                  mesa-vulkan-drivers zenity          # Debian/Ubuntu; zenity gives the file dialogs
 ./scion path/to/tool --help
 ./scion "path/to/Some App.app"

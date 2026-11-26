@@ -140,12 +140,27 @@ enum {
     NET_POLL,       /* struct dpollfd *, n, timeout_ns (-1 inf) -> ready */
     NET_FLAGS,      /* fd, set (-1: get), Darwin O_ flags (only O_NONBLOCK changes) -> flags */
     NET_NREAD,      /* fd -> bytes ready to read (FIONREAD) */
+    /* HTTP(S) for URLSession, on the host's HTTP stack (http.cpp: WinHTTP, libcurl), which follows redirects, speaks
+     * TLS with the host's certificates, uses the host's proxy settings and decompresses bodies. Errors are
+     * NSURLErrorDomain codes (< 0). */
+    NET_HTTP_NEW = 100, /* struct dhttpreq * -> handle */
+    NET_HTTP_SEND,  /* handle, struct dhttpreq * -> 0 once the final response's headers are in (status, headers, url) */
+    NET_HTTP_READ,  /* handle, buf, n -> bytes of the (decoded) body, 0 at its end */
+    NET_HTTP_CANCEL,/* handle: a SEND or READ blocked on it in another thread returns NSURLErrorCancelled */
+    NET_HTTP_CLOSE, /* handle */
 };
 struct dnetio { uint64_t buf, len; int32_t flags; uint32_t addrlen; uint64_t addr; };   /* send(to), recv(from) */
 struct dnethints { int32_t flags, family, socktype, protocol; uint64_t canon, canonlen; };
 struct dnetai { int32_t family, socktype, protocol; uint32_t addrlen; uint8_t addr[28]; uint8_t pad[4]; };
 struct dnetni { uint64_t addr; uint32_t addrlen; int32_t flags; uint64_t host, hostlen, serv, servlen; };
 struct dpollfd { int32_t fd; int16_t events, revents; };
+struct dhttpreq {
+    uint64_t method, url, headers;  /* C strings; headers: "Name: value\r\n" lines */
+    uint64_t body, body_len;
+    int64_t timeout_ms;             /* no progress for that long: NSURLErrorTimedOut */
+    int32_t status, pad;            /* out (SEND): the status, the headers ("Name: value\r\n" lines, cut at the */
+    uint64_t resp_headers, resp_headers_cap, final_url, final_url_cap;   /* capacity), the URL after redirects */
+};
 
 /* Darwin ABI values used by both sides. */
 enum {

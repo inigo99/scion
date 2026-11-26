@@ -1,8 +1,9 @@
 /* more.m — Foundation classes for document-based apps and the libraries they bundle: NSMethodSignature and NSInvocation
  * (with -forwardInvocation: through libobjc's forwarding stub), NSProxy, NSUndoManager, NSSortDescriptor,
- * NSValueTransformer, NSByteCountFormatter, streams, URL requests (no network: requests fail), NSFileCoordinator,
+ * NSValueTransformer, NSByteCountFormatter, streams, URL requests and URLSession (on the host's HTTP stack), NSFileCoordinator,
  * NSArchiver, NSDistributedNotificationCenter and a few stand-ins (NSAppleScript, NSXMLDocument, Mach ports). */
 #include "internal.h"
+#include "../hostcalls.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 typedef struct dqueue *dq_t; extern struct dqueue _dispatch_main_q; void dispatch_async(dq_t, void (^)(void));
@@ -689,7 +690,7 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
 - (id)propertyForKey:(NSString *)k { return [k isEqualToString:NSStreamDataWrittenToMemoryStreamKey] && !_path ? [[_mem copy] autorelease] : nil; }
 @end
 
-/* ======================================================================= URL loading: requests, and a session without network */
+/* ======================================================================= URL loading: requests, responses, URLSession */
 @implementation NSURLRequest { @protected NSURL *_url; NSString *_method; NSMutableDictionary *_headers; NSData *_body; NSTimeInterval _timeout; NSURLRequestCachePolicy _policy; }
 + (instancetype)requestWithURL:(NSURL *)u { return [[[self alloc] initWithURL:u] autorelease]; }
 + (instancetype)requestWithURL:(NSURL *)u cachePolicy:(NSURLRequestCachePolicy)p timeoutInterval:(NSTimeInterval)t { return [[[self alloc] initWithURL:u cachePolicy:p timeoutInterval:t] autorelease]; }
@@ -718,40 +719,412 @@ NSString *const NSStreamFileCurrentOffsetKey = @"NSStreamFileCurrentOffsetKey", 
 - (void)setTimeoutInterval:(NSTimeInterval)t { _timeout = t; }
 - (void)setCachePolicy:(NSURLRequestCachePolicy)p { _policy = p; }
 @end
-@implementation NSURLSessionConfiguration
+@implementation NSURLSessionConfiguration { NSDictionary *_headers; NSTimeInterval _req, _res; NSURLRequestCachePolicy _policy; NSInteger _conns; BOOL _cell, _wait, _cookies; }
 + (NSURLSessionConfiguration *)defaultSessionConfiguration { return [[[self alloc] init] autorelease]; }
 + (NSURLSessionConfiguration *)ephemeralSessionConfiguration { return [[[self alloc] init] autorelease]; }
+- (instancetype)init { _req = 60; _res = 7 * 86400; _conns = 6; _cell = _cookies = YES; return self; }
+- (void)dealloc { [_headers release]; [super dealloc]; }
+- (id)copyWithZone:(NSZone *)z {
+    NSURLSessionConfiguration *c = [[NSURLSessionConfiguration alloc] init];
+    c->_headers = [_headers copy]; c->_req = _req; c->_res = _res; c->_policy = _policy; c->_conns = _conns;
+    c->_cell = _cell; c->_wait = _wait; c->_cookies = _cookies;
+    return c;
+}
+- (NSDictionary *)HTTPAdditionalHeaders { return _headers; } - (void)setHTTPAdditionalHeaders:(NSDictionary *)h { [_headers release]; _headers = [h copy]; }
+- (NSTimeInterval)timeoutIntervalForRequest { return _req; } - (void)setTimeoutIntervalForRequest:(NSTimeInterval)t { _req = t; }
+- (NSTimeInterval)timeoutIntervalForResource { return _res; } - (void)setTimeoutIntervalForResource:(NSTimeInterval)t { _res = t; }
+- (NSURLRequestCachePolicy)requestCachePolicy { return _policy; } - (void)setRequestCachePolicy:(NSURLRequestCachePolicy)p { _policy = p; }
+- (NSInteger)HTTPMaximumConnectionsPerHost { return _conns; } - (void)setHTTPMaximumConnectionsPerHost:(NSInteger)n { _conns = n; }
+- (BOOL)allowsCellularAccess { return _cell; } - (void)setAllowsCellularAccess:(BOOL)b { _cell = b; }
+- (BOOL)waitsForConnectivity { return _wait; } - (void)setWaitsForConnectivity:(BOOL)b { _wait = b; }
+- (BOOL)HTTPShouldSetCookies { return _cookies; } - (void)setHTTPShouldSetCookies:(BOOL)b { _cookies = b; }
+/* the rest of the configuration (cookie storage, caches, proxies, TLS versions) is accepted and has no effect */
+- (void)setValue:(id)v forUndefinedKey:(NSString *)k {} - (id)valueForUndefinedKey:(NSString *)k { return nil; }
+@end
+
+@implementation NSURLResponse { NSURL *_url; NSString *_mime, *_encoding; long long _length; }
+- (instancetype)initWithURL:(NSURL *)u MIMEType:(NSString *)m expectedContentLength:(NSInteger)l textEncodingName:(NSString *)e {
+    if ((self = [super init])) { _url = [u copy]; _mime = [m copy]; _length = l; _encoding = [e copy]; }
+    return self;
+}
+- (void)dealloc { [_url release]; [_mime release]; [_encoding release]; [super dealloc]; }
+- (NSURL *)URL { return _url; } - (NSString *)MIMEType { return _mime; } - (NSString *)textEncodingName { return _encoding; }
+- (long long)expectedContentLength { return _length; }
+- (NSString *)suggestedFilename { NSString *n = [_url lastPathComponent]; return [n length] && ![n isEqualToString:@"/"] ? n : @"Unknown"; }
 - (id)copyWithZone:(NSZone *)z { return [self retain]; }
 @end
-@interface _MWURLSessionTask : NSObject { @public void (^handler)(id, id, NSError *); NSURLRequest *request; BOOL started; } @end
-@implementation _MWURLSessionTask
-- (void)dealloc { if (handler) _Block_release(handler); [request release]; [super dealloc]; }
-- (void)resume {   /* no network in scion yet: every request fails as offline */
-    if (started) return; started = YES;
-    void (^h)(id, id, NSError *) = handler; [self retain];
-    dispatch_async(&_dispatch_main_q, ^{
-        if (h) h(nil, nil, [NSError errorWithDomain:NSURLErrorDomain code:-1009 userInfo:@{NSLocalizedDescriptionKey: @"The Internet connection appears to be offline."}]);
-        [self release];
-    });
+@implementation NSHTTPURLResponse { NSInteger _status; NSDictionary *_headers; }
+static NSString *header_in(NSDictionary *h, NSString *f) { for (NSString *k in h) if ([k caseInsensitiveCompare:f] == NSOrderedSame) return h[k]; return nil; }
+- (instancetype)initWithURL:(NSURL *)u statusCode:(NSInteger)s HTTPVersion:(NSString *)v headerFields:(NSDictionary *)h {
+    /* the MIME type and text encoding come from Content-Type ("text/html; charset=utf-8"), the length from Content-Length */
+    NSString *type = header_in(h, @"Content-Type"), *mime = nil, *enc = nil, *len = header_in(h, @"Content-Length");
+    if (type) {
+        NSArray *parts = [type componentsSeparatedByString:@";"];
+        mime = [[parts[0] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+        for (NSString *p in parts) {
+            NSString *t = [p stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if ([[t lowercaseString] hasPrefix:@"charset="]) enc = [[t substringFromIndex:8] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\"'"]];
+        }
+    }
+    if ((self = [super initWithURL:u MIMEType:mime expectedContentLength:len ? (NSInteger)[len longLongValue] : -1 textEncodingName:enc])) {
+        _status = s; _headers = [h copy] ?: [@{} retain];
+    }
+    return self;
 }
-- (void)cancel {} - (void)suspend {}
-- (NSURLRequest *)originalRequest { return request; } - (NSURLRequest *)currentRequest { return request; }
-- (NSInteger)state { return started ? 3 : 1; }
-- (NSUInteger)taskIdentifier { return (NSUInteger)self; }
+- (void)dealloc { [_headers release]; [super dealloc]; }
+- (NSInteger)statusCode { return _status; }
+- (NSDictionary *)allHeaderFields { return _headers; }
+- (NSString *)valueForHTTPHeaderField:(NSString *)f { return header_in(_headers, f); }
++ (NSString *)localizedStringForStatusCode:(NSInteger)s {
+    switch (s) {
+    case 200: return @"no error"; case 201: return @"created"; case 204: return @"no content"; case 301: return @"moved permanently";
+    case 302: return @"found"; case 304: return @"not modified"; case 400: return @"bad request"; case 401: return @"unauthorized";
+    case 403: return @"forbidden"; case 404: return @"not found"; case 500: return @"internal server error"; case 503: return @"service unavailable";
+    }
+    return s < 200 ? @"informational" : s < 300 ? @"success" : s < 400 ? @"redirected" : s < 500 ? @"client error" : @"server error";
+}
 @end
-@implementation NSURLSession
-+ (NSURLSession *)sharedSession { static NSURLSession *s; if (!s) s = [[self alloc] init]; return s; }
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c { return [[[self alloc] init] autorelease]; }
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c delegate:(id)d delegateQueue:(NSOperationQueue *)q { return [[[self alloc] init] autorelease]; }
-- (id)_task:(NSURLRequest *)r handler:(id)h { _MWURLSessionTask *t = [[[_MWURLSessionTask alloc] init] autorelease]; t->request = [r retain]; t->handler = _Block_copy(h); return t; }
-- (id)dataTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h { return [self _task:r handler:h]; }
-- (id)dataTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h { return [self _task:[NSURLRequest requestWithURL:u] handler:h]; }
-- (id)dataTaskWithRequest:(NSURLRequest *)r { return [self _task:r handler:nil]; }
-- (id)dataTaskWithURL:(NSURL *)u { return [self _task:[NSURLRequest requestWithURL:u] handler:nil]; }
-- (id)downloadTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))h { return [self _task:r handler:h]; }
-- (id)downloadTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))h { return [self _task:[NSURLRequest requestWithURL:u] handler:h]; }
-- (id)downloadTaskWithRequest:(NSURLRequest *)r { return [self _task:r handler:nil]; }
-- (void)invalidateAndCancel {} - (void)finishTasksAndInvalidate {}
+
+/* URLSession: each task runs on a global queue, in one blocking request on the host's HTTP stack (HC_net's NET_HTTP_*,
+ * http.cpp), and its results go to the session's delegate queue (a serial queue if the app gives none): the
+ * completion handler if the task has one, the delegate's methods if not. Redirects, TLS, proxies and decompression
+ * are the host's. ponytail: no cookie storage, URL cache, authentication challenges or background sessions; a
+ * download goes to a file in NSTemporaryDirectory(), removed once the handler or delegate returns. */
+int64_t _scion_net(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e);
+typedef struct dsema *dsem_t; dsem_t dispatch_semaphore_create(long); long dispatch_semaphore_wait(dsem_t, uint64_t);
+long dispatch_semaphore_signal(dsem_t); void dispatch_release(void *); dq_t dispatch_get_global_queue(long, unsigned long);
+int open(const char *, int, ...); long write(int, const void *, unsigned long); int close(int); int unlink(const char *);
+
+static NSError *url_error(NSInteger code, NSURL *u) {
+    NSString *msg;
+    switch (code) {
+    case NSURLErrorCancelled: msg = @"cancelled"; break;
+    case NSURLErrorBadURL: msg = @"bad URL"; break;
+    case NSURLErrorTimedOut: msg = @"The request timed out."; break;
+    case NSURLErrorUnsupportedURL: msg = @"unsupported URL"; break;
+    case NSURLErrorCannotFindHost: msg = @"A server with the specified hostname could not be found."; break;
+    case NSURLErrorCannotConnectToHost: msg = @"Could not connect to the server."; break;
+    case NSURLErrorNetworkConnectionLost: msg = @"The network connection was lost."; break;
+    case NSURLErrorHTTPTooManyRedirects: msg = @"too many HTTP redirects"; break;
+    case NSURLErrorSecureConnectionFailed: msg = @"An SSL error has occurred and a secure connection to the server cannot be made."; break;
+    case NSURLErrorServerCertificateUntrusted: msg = @"The certificate for this server is invalid."; break;
+    case NSURLErrorCannotCreateFile: msg = @"cannot create file"; break;
+    default: msg = @"An unknown error occurred.";
+    }
+    NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:msg forKey:NSLocalizedDescriptionKey];
+    if (u) { info[NSURLErrorFailingURLErrorKey] = u; info[NSURLErrorFailingURLStringErrorKey] = [u absoluteString] ?: @""; }
+    return [NSError errorWithDomain:NSURLErrorDomain code:code userInfo:info];
+}
+static BOOL is_http(NSURL *u) { NSString *s = [[u scheme] lowercaseString]; return [s isEqualToString:@"http"] || [s isEqualToString:@"https"]; }
+
+/* What one request needs from its task and session, and what it gives back */
+typedef struct {
+    NSURLRequest *request; NSDictionary *extra;  /* the session's HTTPAdditionalHeaders */
+    NSData *body; NSTimeInterval timeout;
+    volatile int64_t *handle; volatile BOOL *cancelled;   /* (shared with -cancel) */
+} HTTPJob;
+
+/* Runs a request in this thread: the response once its headers are in (got_response may cancel it), then the body in
+ * pieces to got_data. Returns nil or the error. */
+static NSError *http_run(HTTPJob *j, NSHTTPURLResponse **out, BOOL (^got_response)(NSHTTPURLResponse *), BOOL (^got_data)(const void *, size_t)) {
+    NSURLRequest *r = j->request;
+    NSURL *u = [r URL];
+    if (!u) return url_error(NSURLErrorBadURL, nil);
+    if (!is_http(u)) return url_error(NSURLErrorUnsupportedURL, u);
+    NSMutableString *headers = [NSMutableString string];
+    NSDictionary *own = [r allHTTPHeaderFields];
+    for (NSString *k in j->extra) if (!header_in(own, k)) [headers appendFormat:@"%@: %@\r\n", k, j->extra[k]];
+    for (NSString *k in own) [headers appendFormat:@"%@: %@\r\n", k, own[k]];
+    if (!header_in(own, @"Accept") && !header_in(j->extra, @"Accept")) [headers appendString:@"Accept: */*\r\n"];
+    if (!header_in(own, @"User-Agent") && !header_in(j->extra, @"User-Agent")) {
+        NSString *name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"] ?: [[NSProcessInfo processInfo] processName];
+        NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0";
+        [headers appendFormat:@"User-Agent: %@/%@ CFNetwork/1410.0.3 Darwin/22.6.0\r\n", name, version];
+    }
+    NSData *body = j->body ?: [r HTTPBody];
+    char rh[32768], fu[4096];
+    struct dhttpreq q = {0};
+    q.method = (uint64_t)[[r HTTPMethod] ?: @"GET" UTF8String];
+    q.url = (uint64_t)[[u absoluteString] UTF8String];
+    q.headers = (uint64_t)[headers UTF8String];
+    q.body = (uint64_t)[body bytes]; q.body_len = [body length];
+    q.timeout_ms = (int64_t)((j->timeout > 0 ? j->timeout : 60) * 1000);
+    q.resp_headers = (uint64_t)rh; q.resp_headers_cap = sizeof rh; q.final_url = (uint64_t)fu; q.final_url_cap = sizeof fu;
+    int64_t h = _scion_net(NET_HTTP_NEW, (uint64_t)&q, 0, 0, 0, 0);
+    if (h < 0) return url_error(h, u);
+    *j->handle = h;
+    if (*j->cancelled) _scion_net(NET_HTTP_CANCEL, h, 0, 0, 0, 0);
+    NSError *err = nil;
+    int64_t rc = _scion_net(NET_HTTP_SEND, h, (uint64_t)&q, 0, 0, 0);
+    if (rc < 0) err = url_error(rc, u);
+    else {
+        NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+        for (NSString *line in [@(rh) componentsSeparatedByString:@"\r\n"]) {
+            NSRange c = [line rangeOfString:@":"];
+            if (!c.length) continue;
+            NSString *k = [line substringToIndex:c.location];
+            NSString *v = [[line substringFromIndex:c.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *have = header_in(fields, k);
+            if (have) {   /* a repeated field: one value, comma-separated, under the first spelling */
+                for (NSString *key in [fields allKeys]) if ([key caseInsensitiveCompare:k] == NSOrderedSame) fields[key] = [NSString stringWithFormat:@"%@, %@", have, v];
+            } else fields[k] = v;
+        }
+        NSURL *final = [NSURL URLWithString:@(fu)] ?: u;
+        NSHTTPURLResponse *resp = [[[NSHTTPURLResponse alloc] initWithURL:final statusCode:q.status HTTPVersion:@"HTTP/1.1" headerFields:fields] autorelease];
+        if (out) *out = resp;
+        if (got_response && !got_response(resp)) err = url_error(NSURLErrorCancelled, u);
+        else {
+            enum { N = 65536 };
+            char *buf = malloc(N);
+            int64_t n;
+            while ((n = _scion_net(NET_HTTP_READ, h, (uint64_t)buf, N, 0, 0)) > 0)
+                if (got_data && !got_data(buf, (size_t)n)) { n = NSURLErrorCannotCreateFile; break; }
+            free(buf);
+            if (n < 0) err = url_error(n, u);
+        }
+    }
+    *j->handle = 0;
+    _scion_net(NET_HTTP_CLOSE, h, 0, 0, 0, 0);
+    if (*j->cancelled) err = url_error(NSURLErrorCancelled, u);
+    return err;
+}
+
+/* the whole body of an http(s) URL, in this thread (NSData's and NSString's URL initializers) */
+__attribute__((visibility("hidden"))) NSData *_scion_url_data(NSURL *u, NSError **e) {
+    NSMutableData *d = [NSMutableData data];
+    volatile int64_t handle = 0; volatile BOOL cancelled = NO;
+    HTTPJob j = {[NSURLRequest requestWithURL:u], nil, nil, 60, &handle, &cancelled};
+    NSHTTPURLResponse *resp = nil;
+    NSError *err = http_run(&j, &resp, nil, ^BOOL(const void *p, size_t n) { [d appendBytes:p length:n]; return YES; });
+    if (!err && [resp statusCode] >= 400) err = [NSError errorWithDomain:NSCocoaErrorDomain code:256 userInfo:@{NSURLErrorKey: u}];   /* NSFileReadUnknownError */
+    if (e) *e = err;
+    return err ? nil : d;
+}
+
+/* the body as text in encoding e (UTF-8 when 0) */
+__attribute__((visibility("hidden"))) NSString *_scion_url_string(NSURL *u, NSStringEncoding e, NSError **err) {
+    NSData *d = _scion_url_data(u, err);
+    if (!d) return nil;
+    NSString *s = [[[NSString alloc] initWithData:d encoding:e ?: NSUTF8StringEncoding] autorelease];
+    if (!s && err) *err = [NSError errorWithDomain:NSCocoaErrorDomain code:261 userInfo:@{NSURLErrorKey: u}];   /* NSFileReadInapplicableStringEncodingError */
+    return s;
+}
+
+enum { TASK_DATA, TASK_DOWNLOAD, TASK_UPLOAD };
+@interface NSURLSession () - (void)_taskDone:(NSURLSessionTask *)t; - (NSURLSessionConfiguration *)_config; - (id)_delegate; - (NSOperationQueue *)_queue; @end
+@implementation NSURLSessionTask {
+@public
+    NSURLSession *_session; NSURLRequest *_original, *_current; NSURLResponse *_response; NSError *_error; NSString *_desc;
+    id _handler; NSData *_upload; NSInteger _kind, _state; NSUInteger _ident; float _priority;
+    int64_t _received, _expected, _sent; volatile int64_t _host; volatile BOOL _cancelled; BOOL _started;
+}
+- (void)dealloc {
+    [_session release]; [_original release]; [_current release]; [_response release]; [_error release]; [_desc release];
+    if (_handler) _Block_release(_handler);
+    [_upload release]; [super dealloc];
+}
+- (id)copyWithZone:(NSZone *)z { return [self retain]; }
+- (NSUInteger)taskIdentifier { return _ident; }
+- (NSURLRequest *)originalRequest { return _original; } - (NSURLRequest *)currentRequest { return _current; }
+- (NSURLResponse *)response { return _response; } - (NSError *)error { return _error; }
+- (NSURLSessionTaskState)state { return _state; }
+- (NSString *)taskDescription { return _desc; } - (void)setTaskDescription:(NSString *)d { [_desc release]; _desc = [d copy]; }
+- (float)priority { return _priority; } - (void)setPriority:(float)p { _priority = p; }
+- (int64_t)countOfBytesReceived { return _received; } - (int64_t)countOfBytesExpectedToReceive { return _expected; }
+- (int64_t)countOfBytesSent { return _sent; } - (int64_t)countOfBytesExpectedToSend { return (int64_t)[_upload ?: [_original HTTPBody] length]; }
+- (void)suspend { if (!_started) _state = NSURLSessionTaskStateSuspended; }   /* ponytail: a running task keeps running */
+- (void)cancel {
+    if (_state == NSURLSessionTaskStateCompleted) return;
+    _cancelled = YES;
+    if (_host) _scion_net(NET_HTTP_CANCEL, (uint64_t)_host, 0, 0, 0, 0);
+    if (!_started) { _started = YES; [self retain]; dispatch_async(dispatch_get_global_queue(0, 0), ^{ [self _run]; [self release]; }); }
+    else if (_state != NSURLSessionTaskStateCompleted) _state = NSURLSessionTaskStateCanceling;
+}
+- (void)resume {
+    if (_started) return;
+    _started = YES; _state = NSURLSessionTaskStateRunning;
+    [self retain];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{ [self _run]; [self release]; });
+}
+- (void)_deliver:(void (^)(void))b { [[_session _queue] addOperationWithBlock:b]; }
+- (void)_run {
+    NSURLSession *s = _session;
+    id d = _handler ? nil : [s _delegate];
+    NSURLSessionConfiguration *c = [s _config];
+    HTTPJob j = {_current, [c HTTPAdditionalHeaders], _upload, [_current timeoutInterval] ?: [c timeoutIntervalForRequest], &_host, &_cancelled};
+    if (j.timeout <= 0) j.timeout = [c timeoutIntervalForRequest];
+    _sent = (int64_t)[_upload ?: [_current HTTPBody] length];
+    NSMutableData *data = _kind != TASK_DOWNLOAD && _handler ? [NSMutableData data] : nil;
+    __block int fd = -1;
+    NSString *path = nil;
+    if (_kind == TASK_DOWNLOAD) {
+        path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"CFNetworkDownload_%@.tmp", [[NSUUID UUID] UUIDString]]];
+        fd = open([path fileSystemRepresentation], 0x601, 0644);   /* O_WRONLY | O_CREAT | O_TRUNC */
+    }
+    BOOL wants_response = [d respondsToSelector:@selector(URLSession:dataTask:didReceiveResponse:completionHandler:)] && _kind != TASK_DOWNLOAD;
+    BOOL wants_data = [d respondsToSelector:@selector(URLSession:dataTask:didReceiveData:)] && _kind != TASK_DOWNLOAD;
+    BOOL wants_progress = [d respondsToSelector:@selector(URLSession:downloadTask:didWriteData:totalBytesWritten:totalBytesExpectedToWrite:)] && _kind == TASK_DOWNLOAD;
+    NSHTTPURLResponse *resp = nil;
+    NSError *err = _cancelled ? url_error(NSURLErrorCancelled, [_current URL]) : nil;
+    if (!err && _kind == TASK_DOWNLOAD && fd < 0) err = url_error(NSURLErrorCannotCreateFile, [_current URL]);
+    if (!err) err = http_run(&j, &resp, ^BOOL(NSHTTPURLResponse *r) {
+        _response = [r retain];
+        _expected = [r expectedContentLength] < 0 ? -1 : [r expectedContentLength];
+        if (!wants_response) return YES;
+        /* the delegate decides, on its queue, whether the body comes */
+        __block NSInteger disposition = NSURLSessionResponseAllow;
+        dsem_t sem = dispatch_semaphore_create(0);
+        [self _deliver:^{
+            [d URLSession:s dataTask:(NSURLSessionDataTask *)self didReceiveResponse:r completionHandler:^(NSURLSessionResponseDisposition x) {
+                disposition = x; dispatch_semaphore_signal(sem);
+            }];
+        }];
+        dispatch_semaphore_wait(sem, ~0ull);
+        dispatch_release(sem);
+        return disposition != NSURLSessionResponseCancel;
+    }, ^BOOL(const void *p, size_t n) {
+        _received += n;
+        if (fd >= 0) {
+            if (write(fd, p, n) != (long)n) return NO;
+            if (wants_progress) {
+                int64_t total = _received, expected = _expected;
+                [self _deliver:^{ [d URLSession:s downloadTask:(NSURLSessionDownloadTask *)self didWriteData:(int64_t)n totalBytesWritten:total totalBytesExpectedToWrite:expected]; }];
+            }
+        } else if (data) [data appendBytes:p length:n];
+        else if (wants_data) {
+            NSData *piece = [NSData dataWithBytes:p length:n];
+            [self _deliver:^{ [d URLSession:s dataTask:(NSURLSessionDataTask *)self didReceiveData:piece]; }];
+        }
+        return YES;
+    });
+    if (fd >= 0) close(fd);
+    _error = [err retain];
+    NSURLResponse *r = _response;
+    id h = _handler;
+    NSURL *location = path && !err ? [NSURL fileURLWithPath:path] : nil;
+    [self _deliver:^{
+        if (_kind == TASK_DOWNLOAD) {
+            @autoreleasepool {   /* (what the handler read from the file goes first: Windows keeps a mapped file) */
+                if (h) ((void (^)(NSURL *, NSURLResponse *, NSError *))h)(location, r, err);
+                else if (location && [d respondsToSelector:@selector(URLSession:downloadTask:didFinishDownloadingToURL:)])
+                    [d URLSession:s downloadTask:(NSURLSessionDownloadTask *)self didFinishDownloadingToURL:location];
+            }
+            if (path) unlink([path fileSystemRepresentation]);
+        } else if (h) ((void (^)(NSData *, NSURLResponse *, NSError *))h)(err ? nil : data, r, err);
+        _state = NSURLSessionTaskStateCompleted;
+        if (!h && [d respondsToSelector:@selector(URLSession:task:didCompleteWithError:)]) [d URLSession:s task:self didCompleteWithError:err];
+        [s _taskDone:self];
+    }];
+}
+@end
+@implementation NSURLSessionDataTask @end
+@implementation NSURLSessionUploadTask @end
+@implementation NSURLSessionDownloadTask
+- (void)cancelByProducingResumeData:(void (^)(NSData *))h { [self cancel]; if (h) [self _deliver:^{ h(nil); }]; }   /* no resume data */
+@end
+
+@implementation NSURLSession { NSURLSessionConfiguration *_config; id _delegate; NSOperationQueue *_queue; NSString *_desc; NSMutableArray *_tasks; BOOL _invalid; }
+static NSUInteger g_task_ids;
++ (NSURLSession *)sharedSession { static NSURLSession *s; @synchronized(self) { if (!s) s = [[self alloc] initWithConfiguration:nil delegate:nil queue:nil]; } return s; }
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c { return [[[self alloc] initWithConfiguration:c delegate:nil queue:nil] autorelease]; }
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c delegate:(id)d delegateQueue:(NSOperationQueue *)q {
+    return [[[self alloc] initWithConfiguration:c delegate:d queue:q] autorelease];
+}
+- (instancetype)initWithConfiguration:(NSURLSessionConfiguration *)c delegate:(id)d queue:(NSOperationQueue *)q {
+    if (!(self = [super init])) return nil;
+    _config = [c ?: [NSURLSessionConfiguration defaultSessionConfiguration] copy];
+    _delegate = [d retain];   /* (a session keeps its delegate until it is invalidated) */
+    if (q) _queue = [q retain];
+    else { _queue = [[NSOperationQueue alloc] init]; [_queue setMaxConcurrentOperationCount:1]; }
+    _tasks = [[NSMutableArray alloc] init];
+    return self;
+}
+- (void)dealloc { [_config release]; [_delegate release]; [_queue release]; [_desc release]; [_tasks release]; [super dealloc]; }
+- (NSURLSessionConfiguration *)configuration { return [[_config copy] autorelease]; }
+- (NSURLSessionConfiguration *)_config { return _config; }
+- (id)delegate { return _delegate; } - (id)_delegate { return _delegate; }
+- (NSOperationQueue *)delegateQueue { return _queue; } - (NSOperationQueue *)_queue { return _queue; }
+- (NSString *)sessionDescription { return _desc; } - (void)setSessionDescription:(NSString *)d { [_desc release]; _desc = [d copy]; }
+- (id)_task:(Class)cls kind:(NSInteger)k request:(NSURLRequest *)r body:(NSData *)body handler:(id)h {
+    NSURLSessionTask *t = [[[cls alloc] init] autorelease];
+    t->_session = [self retain]; t->_original = [r copy]; t->_current = [r copy]; t->_kind = k; t->_upload = [body copy];
+    t->_handler = h ? _Block_copy(h) : nil; t->_state = NSURLSessionTaskStateSuspended; t->_priority = 0.5f;
+    @synchronized(self) {
+        t->_ident = ++g_task_ids;
+        if (_invalid) { t->_cancelled = YES; return t; }
+        [_tasks addObject:t];
+    }
+    return t;
+}
+- (void)_taskDone:(NSURLSessionTask *)t {
+    BOOL last;
+    @synchronized(self) { [_tasks removeObjectIdenticalTo:t]; last = _invalid && ![_tasks count]; }
+    if (last) [self _invalidated];
+}
+- (void)_invalidated {
+    if ([_delegate respondsToSelector:@selector(URLSession:didBecomeInvalidWithError:)]) [_delegate URLSession:self didBecomeInvalidWithError:nil];
+    id d = _delegate; _delegate = nil; [d release];
+}
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)r { return [self _task:[NSURLSessionDataTask class] kind:TASK_DATA request:r body:nil handler:nil]; }
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)u { return [self dataTaskWithRequest:[NSURLRequest requestWithURL:u]]; }
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h {
+    return [self _task:[NSURLSessionDataTask class] kind:TASK_DATA request:r body:nil handler:h];
+}
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h { return [self dataTaskWithRequest:[NSURLRequest requestWithURL:u] completionHandler:h]; }
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromData:(NSData *)d { return [self uploadTaskWithRequest:r fromData:d completionHandler:nil]; }
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromData:(NSData *)d completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h {
+    return [self _task:[NSURLSessionUploadTask class] kind:TASK_UPLOAD request:r body:d ?: [NSData data] handler:h];
+}
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromFile:(NSURL *)f { return [self uploadTaskWithRequest:r fromFile:f completionHandler:nil]; }
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromFile:(NSURL *)f completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h {
+    return [self uploadTaskWithRequest:r fromData:[NSData dataWithContentsOfURL:f] completionHandler:h];
+}
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)r { return [self _task:[NSURLSessionDownloadTask class] kind:TASK_DOWNLOAD request:r body:nil handler:nil]; }
+- (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)u { return [self downloadTaskWithRequest:[NSURLRequest requestWithURL:u]]; }
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))h {
+    return [self _task:[NSURLSessionDownloadTask class] kind:TASK_DOWNLOAD request:r body:nil handler:h];
+}
+- (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))h { return [self downloadTaskWithRequest:[NSURLRequest requestWithURL:u] completionHandler:h]; }
+- (void)getAllTasksWithCompletionHandler:(void (^)(NSArray *))h { NSArray *a; @synchronized(self) { a = [[_tasks copy] autorelease]; } [_queue addOperationWithBlock:^{ h(a); }]; }
+- (void)getTasksWithCompletionHandler:(void (^)(NSArray *, NSArray *, NSArray *))h {
+    NSMutableArray *data = [NSMutableArray array], *up = [NSMutableArray array], *down = [NSMutableArray array];
+    @synchronized(self) { for (NSURLSessionTask *t in _tasks) [t->_kind == TASK_DOWNLOAD ? down : t->_kind == TASK_UPLOAD ? up : data addObject:t]; }
+    [_queue addOperationWithBlock:^{ h(data, up, down); }];
+}
+- (void)finishTasksAndInvalidate {
+    if (self == [NSURLSession sharedSession]) return;
+    BOOL now;
+    @synchronized(self) { _invalid = YES; now = ![_tasks count]; }
+    if (now) [_queue addOperationWithBlock:^{ [self _invalidated]; }];
+}
+- (void)invalidateAndCancel {
+    if (self == [NSURLSession sharedSession]) return;
+    NSArray *a;
+    @synchronized(self) { a = [[_tasks copy] autorelease]; }
+    for (NSURLSessionTask *t in a) [t cancel];
+    [self finishTasksAndInvalidate];
+}
+- (void)resetWithCompletionHandler:(void (^)(void))h { [_queue addOperationWithBlock:h]; }
+- (void)flushWithCompletionHandler:(void (^)(void))h { [_queue addOperationWithBlock:h]; }
+@end
+
+/* the old API, on the same requests */
+@implementation NSURLConnection
++ (NSData *)sendSynchronousRequest:(NSURLRequest *)r returningResponse:(NSURLResponse **)resp error:(NSError **)e {
+    NSMutableData *d = [NSMutableData data];
+    volatile int64_t handle = 0; volatile BOOL cancelled = NO;
+    HTTPJob j = {r, nil, nil, [r timeoutInterval], &handle, &cancelled};
+    NSHTTPURLResponse *got = nil;
+    NSError *err = http_run(&j, &got, nil, ^BOOL(const void *p, size_t n) { [d appendBytes:p length:n]; return YES; });
+    if (resp) *resp = got;
+    if (e) *e = err;
+    return err ? nil : d;
+}
++ (void)sendAsynchronousRequest:(NSURLRequest *)r queue:(NSOperationQueue *)q completionHandler:(void (^)(NSURLResponse *, NSData *, NSError *))h {
+    [[[NSURLSession sharedSession] dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
+        [q addOperationWithBlock:^{ h(resp, d, e); }];
+    }] resume];
+}
 @end
 
 /* ======================================================================= files, archives, notifications, scripting */

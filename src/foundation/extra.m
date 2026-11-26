@@ -241,11 +241,12 @@ int access(const char *, int);
 + (instancetype)dataWithContentsOfMappedFile:(NSString *)p { return [self dataWithContentsOfFile:p]; }
 @end
 
+NSData *_scion_url_data(NSURL *, NSError **); NSString *_scion_url_string(NSURL *, NSStringEncoding, NSError **);
 @implementation NSData (URL)
-+ (instancetype)dataWithContentsOfURL:(NSURL *)u { return [u isFileURL] ? [self dataWithContentsOfFile:[u path]] : nil; }
++ (instancetype)dataWithContentsOfURL:(NSURL *)u { return [u isFileURL] ? [self dataWithContentsOfFile:[u path]] : _scion_url_data(u, NULL); }
 @end
 @implementation NSString (URL)
-+ (instancetype)stringWithContentsOfURL:(NSURL *)u encoding:(NSStringEncoding)e error:(NSError **)err { return [self stringWithContentsOfFile:[u path] encoding:e error:err]; }
++ (instancetype)stringWithContentsOfURL:(NSURL *)u encoding:(NSStringEncoding)e error:(NSError **)err { return [u isFileURL] ? [self stringWithContentsOfFile:[u path] encoding:e error:err] : _scion_url_string(u, e, err); }
 @end
 
 /* ================================================================ NSGeometry */

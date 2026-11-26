@@ -22,6 +22,7 @@ Objective-C exceptions {arch}      | EXCEPTIONS OK        | - | exceptions_{arch
 uncaught exception {arch}          | uncaught exception 'NSRangeException' | - | exceptions_{arch} 1
 Foundation {arch}                  | FOUNDATION OK        | - | foundation_{arch}
 Foundation 2 {arch}                | FOUNDATION2 OK       | - | foundation2_{arch}
+URLSession, HTTP {arch}            | URLSESSION OK        | - | urlsession_{arch}
 NSRegularExpression {arch}         | REGEX OK             | - | regex_{arch}
 NSInvocation, NSUndoManager {arch} | INVOCATIONS OK       | - | invocations_{arch}
 class-dump (arm64)                 | - (void)throwAt:(int)arg1; | - | class-dump_arm64 exceptions_arm64

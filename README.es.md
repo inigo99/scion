@@ -55,11 +55,11 @@ sus licencias abiertas), y no necesitas un Mac ni el SDK de Apple.
 
 **De forma nativa (vista previa).** Descarga `scion-<versión>-linux-x86_64.tar.xz` desde
 [Releases](../../releases), descomprímelo y ejecuta `scion` desde ahí. Necesita una distribución reciente (se compila en
-Ubuntu 24.04) con SDL2, FreeType, fontconfig, libpng, libjpeg, Vulkan y LLVM 20, y un driver de Vulkan para las apps que
+Ubuntu 24.04) con SDL2, FreeType, fontconfig, libpng, libjpeg, libcurl, Vulkan y LLVM 20, y un driver de Vulkan para las apps que
 usan Metal:
 
 ```sh
-sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libvulkan1 libllvm20 \
+sudo apt install libsdl2-2.0-0 libfreetype6 libfontconfig1 libpng16-16 libjpeg-turbo8 libcurl4 libvulkan1 libllvm20 \
                  mesa-vulkan-drivers zenity          # Debian/Ubuntu; zenity da los diálogos de archivo
 ./scion ruta/a/herramienta --help
 ./scion "ruta/a/Una App.app"

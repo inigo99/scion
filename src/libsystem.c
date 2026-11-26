@@ -73,6 +73,7 @@ int faccessat(int dirfd, const char *p, int mode, int flags) {
 }
 int64_t _scion_metal(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) { return H(metal, op, a, b, c, d, e); } /* Metal.framework -> host */
 int64_t _scion_ui(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) { return H(ui, op, a, b, c, d, e); } /* AppKit, GameController, AudioToolbox -> host */
+int64_t _scion_net(int op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) { return H(net, op, a, b, c, d, e); } /* Foundation's URLSession -> host */
 int fsync(int fd) { return 0; }   /* ponytail: writes go straight to the OS; no explicit flush */
 int access(const char *p, int mode) { return faccessat(D_AT_FDCWD, p, mode, 0); }
 int lstat(const char *p, struct dstat *st) { return fstatat(D_AT_FDCWD, p, st, D_AT_SYMLINK_NOFOLLOW); }

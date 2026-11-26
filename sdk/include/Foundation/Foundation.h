@@ -1769,22 +1769,90 @@ NS_SWIFT_NAME(NSMutableURLRequest)
 - (void)setValue:(nullable NSString *)v forHTTPHeaderField:(NSString *)f; - (void)addValue:(NSString *)v forHTTPHeaderField:(NSString *)f;
 - (void)setAllHTTPHeaderFields:(nullable NSDictionary<NSString *, NSString *> *)d;
 @end
+NS_SWIFT_NAME(URLResponse)
+@interface NSURLResponse : NSObject <NSCopying>
+- (instancetype)initWithURL:(NSURL *)u MIMEType:(nullable NSString *)m expectedContentLength:(NSInteger)l textEncodingName:(nullable NSString *)e;
+@property (nullable, readonly, copy) NSURL *URL; @property (nullable, readonly, copy) NSString *MIMEType, *textEncodingName, *suggestedFilename;
+@property (readonly) long long expectedContentLength;
+@end
+NS_SWIFT_NAME(HTTPURLResponse)
+@interface NSHTTPURLResponse : NSURLResponse
+- (nullable instancetype)initWithURL:(NSURL *)u statusCode:(NSInteger)s HTTPVersion:(nullable NSString *)v headerFields:(nullable NSDictionary<NSString *, NSString *> *)h;
+@property (readonly) NSInteger statusCode; @property (readonly, copy) NSDictionary *allHeaderFields;
+- (nullable NSString *)valueForHTTPHeaderField:(NSString *)f; + (NSString *)localizedStringForStatusCode:(NSInteger)s;
+@end
+enum { NSURLErrorUnknown = -1, NSURLErrorCancelled = -999, NSURLErrorBadURL = -1000, NSURLErrorTimedOut = -1001,
+       NSURLErrorUnsupportedURL = -1002, NSURLErrorCannotFindHost = -1003, NSURLErrorCannotConnectToHost = -1004,
+       NSURLErrorNetworkConnectionLost = -1005, NSURLErrorHTTPTooManyRedirects = -1007, NSURLErrorNotConnectedToInternet = -1009,
+       NSURLErrorSecureConnectionFailed = -1200, NSURLErrorServerCertificateUntrusted = -1202, NSURLErrorCannotCreateFile = -3000 };
+typedef NS_ENUM(NSInteger, NSURLSessionTaskState) { NSURLSessionTaskStateRunning = 0, NSURLSessionTaskStateSuspended = 1,
+    NSURLSessionTaskStateCanceling = 2, NSURLSessionTaskStateCompleted = 3 };
+typedef NS_ENUM(NSInteger, NSURLSessionResponseDisposition) { NSURLSessionResponseCancel = 0, NSURLSessionResponseAllow = 1,
+    NSURLSessionResponseBecomeDownload = 2, NSURLSessionResponseBecomeStream = 3 };
 NS_SWIFT_NAME(URLSessionConfiguration)
 @interface NSURLSessionConfiguration : NSObject <NSCopying>
 @property (class, readonly, retain) NSURLSessionConfiguration *defaultSessionConfiguration, *ephemeralSessionConfiguration;
+@property (nullable, copy) NSDictionary *HTTPAdditionalHeaders; @property NSTimeInterval timeoutIntervalForRequest, timeoutIntervalForResource;
+@property NSURLRequestCachePolicy requestCachePolicy; @property NSInteger HTTPMaximumConnectionsPerHost;
+@property BOOL allowsCellularAccess, waitsForConnectivity, HTTPShouldSetCookies;
+@end
+@class NSURLSession;
+NS_SWIFT_NAME(URLSessionTask)
+@interface NSURLSessionTask : NSObject <NSCopying>
+@property (readonly) NSUInteger taskIdentifier; @property (nullable, readonly, copy) NSURLRequest *originalRequest, *currentRequest;
+@property (nullable, readonly, copy) NSURLResponse *response; @property (nullable, readonly, copy) NSError *error;
+@property (readonly) NSURLSessionTaskState state; @property (nullable, copy) NSString *taskDescription; @property float priority;
+@property (readonly) int64_t countOfBytesReceived, countOfBytesSent, countOfBytesExpectedToSend, countOfBytesExpectedToReceive;
+- (void)resume; - (void)suspend; - (void)cancel;
+@end
+NS_SWIFT_NAME(URLSessionDataTask) @interface NSURLSessionDataTask : NSURLSessionTask @end
+NS_SWIFT_NAME(URLSessionUploadTask) @interface NSURLSessionUploadTask : NSURLSessionDataTask @end
+NS_SWIFT_NAME(URLSessionDownloadTask) @interface NSURLSessionDownloadTask : NSURLSessionTask
+- (void)cancelByProducingResumeData:(void (^)(NSData * _Nullable))h;
+@end
+@protocol NSURLSessionDelegate <NSObject>
+@optional
+- (void)URLSession:(NSURLSession *)s didBecomeInvalidWithError:(nullable NSError *)e;
+@end
+@protocol NSURLSessionTaskDelegate <NSURLSessionDelegate>
+@optional
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didCompleteWithError:(nullable NSError *)e;
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didSendBodyData:(int64_t)n totalBytesSent:(int64_t)sent totalBytesExpectedToSend:(int64_t)total;
+@end
+@protocol NSURLSessionDataDelegate <NSURLSessionTaskDelegate>
+@optional
+- (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveResponse:(NSURLResponse *)r completionHandler:(void (^)(NSURLSessionResponseDisposition))h;
+- (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveData:(NSData *)d;
+@end
+@protocol NSURLSessionDownloadDelegate <NSURLSessionTaskDelegate>
+- (void)URLSession:(NSURLSession *)s downloadTask:(NSURLSessionDownloadTask *)t didFinishDownloadingToURL:(NSURL *)location;
+@optional
+- (void)URLSession:(NSURLSession *)s downloadTask:(NSURLSessionDownloadTask *)t didWriteData:(int64_t)n totalBytesWritten:(int64_t)w totalBytesExpectedToWrite:(int64_t)e;
 @end
 NS_SWIFT_NAME(URLSession)
 @interface NSURLSession : NSObject
 @property (class, readonly, retain) NSURLSession *sharedSession;
 + (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c;
-+ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c delegate:(nullable id)d delegateQueue:(nullable NSOperationQueue *)q;
-- (id)dataTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
-- (id)dataTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
-- (id)dataTaskWithRequest:(NSURLRequest *)r; - (id)dataTaskWithURL:(NSURL *)u;
-- (id)downloadTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSURL * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
-- (id)downloadTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSURL * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
-- (id)downloadTaskWithRequest:(NSURLRequest *)r;
++ (NSURLSession *)sessionWithConfiguration:(NSURLSessionConfiguration *)c delegate:(nullable id<NSURLSessionDelegate>)d delegateQueue:(nullable NSOperationQueue *)q;
+@property (readonly, copy) NSURLSessionConfiguration *configuration; @property (nullable, readonly, retain) id<NSURLSessionDelegate> delegate;
+@property (readonly, retain) NSOperationQueue *delegateQueue; @property (nullable, copy) NSString *sessionDescription;
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)r; - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)u;
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromData:(NSData *)d;
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromData:(nullable NSData *)d completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromFile:(NSURL *)f;
+- (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)r fromFile:(NSURL *)f completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)r; - (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)u;
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)r completionHandler:(void (^)(NSURL * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (NSURLSessionDownloadTask *)downloadTaskWithURL:(NSURL *)u completionHandler:(void (^)(NSURL * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))h;
+- (void)getAllTasksWithCompletionHandler:(void (^)(NSArray<__kindof NSURLSessionTask *> *))h;
 - (void)invalidateAndCancel; - (void)finishTasksAndInvalidate;
+@end
+NS_SWIFT_NAME(NSURLConnection)
+@interface NSURLConnection : NSObject
++ (nullable NSData *)sendSynchronousRequest:(NSURLRequest *)r returningResponse:(NSURLResponse * _Nullable * _Nullable)resp error:(NSError **)e;
++ (void)sendAsynchronousRequest:(NSURLRequest *)r queue:(NSOperationQueue *)q completionHandler:(void (^)(NSURLResponse * _Nullable, NSData * _Nullable, NSError * _Nullable))h;
 @end
 NS_SWIFT_NAME(NSFileCoordinator)
 @interface NSFileCoordinator : NSObject
