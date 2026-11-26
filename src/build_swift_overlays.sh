@@ -72,7 +72,6 @@ for a in $([ -z "${FOUNDATION_ONLY:-}" ] && echo x86_64 arm64); do
     $D/Dispatch/Private.swift $D/Dispatch/Queue.swift $D/Dispatch/Source.swift $D/Dispatch/Time.swift \
     $D/Dispatch/Schedulers+DispatchQueue.swift $B/dispatch_overlay_$a.o $O/Combine.dylib
   ov $a os $MW/src/swift/os.swift $MW/bin/lib/libobjc.A.dylib
-  ov $a AppKit $MW/src/swift/AppKitOverlay.swift $MW/bin/lib/AppKit.dylib
 done
 # Foundation: a copy of the 5.4 overlay with scion's changes (patches/swift-foundation-overlay.patch), and only the
 # files for the APIs scion's Foundation has (ponytail: no Combine, KVO publishers, URLSession, NSItemProvider, ...)
@@ -89,6 +88,9 @@ FOUNDATION_SOURCES="Foundation.swift Boxing.swift ReferenceConvertible.swift Che
   Schedulers+Date.swift Schedulers+RunLoop.swift $MW/src/swift/AttributedString.swift $MW/src/swift/LocalizedStringResource.swift"
 for a in ${FOUNDATION_ARCHS:-x86_64 arm64}; do
   ov $a Foundation $(for f in $FOUNDATION_SOURCES; do case $f in /*) echo $f;; *) echo $F/$f;; esac; done) $MW/bin/lib/Foundation.dylib $MW/out/swift/$a/Combine.dylib
+  # AppKit after Foundation: its methods that return String bridge through Foundation's overlay (without it, Swift
+  # 6.1's IRGen crashes lowering them)
+  [ -n "${FOUNDATION_ONLY:-}" ] || ov $a AppKit $MW/src/swift/AppKitOverlay.swift $MW/bin/lib/AppKit.dylib
 done
 N="Darwin ObjectiveC CoreFoundation CoreGraphics Dispatch os AppKit Foundation"; [ -n "${FOUNDATION_ONLY:-}" ] && N=Foundation
 for n in $N; do
