@@ -207,6 +207,8 @@ class _MWNode {
     var id: String?
     /// a transition in progress (Animation.swift)
     var fx: _MWFxState?
+    /// an animated node's own values (opacity, rotation...) as it was made, while an animation changes them
+    var animTarget: [CGFloat]?
     init(_ children: [_MWNode] = []) { self.children = children }
     /// draws the node, with its transition if it has one
     final func render(_ g: CGContext) {

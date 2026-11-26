@@ -486,7 +486,12 @@ final class _MWAnimator {
     /// after a layout of `root`: its nodes' places are where they go
     func capture(_ root: _MWNode) {
         targets = [:]
-        root.all { targets[ObjectIdentifier($0)] = _MWAnimValues($0) }
+        root.all { n in
+            var v = _MWAnimValues(n)
+            // (a layout puts frames back, not a node's own values: those it had when it was made are its target)
+            if let t = n.animTarget { v.extra = t } else { n.animTarget = v.extra }
+            targets[ObjectIdentifier(n)] = v
+        }
     }
     /// puts the nodes of `root` where they are at `now`; false once the animation is over (everything at its place)
     func apply(_ root: _MWNode, now: Double) -> Bool {
